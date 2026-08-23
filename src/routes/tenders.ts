@@ -3,7 +3,7 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { AuthRequest } from '../middleware/auth';
 import { generateBidPackageZip, uploadToS3IfConfigured } from '../services/documentService';
-import { analyzeTenderDocuments } from '../services/aiService';
+import { analyzeTenderDocuments, generateTechnicalMemo } from '../services/aiService';
 
 const router = Router();
 
@@ -94,8 +94,16 @@ router.get('/:tenderId/bid', async (req: AuthRequest, res: Response) => {
     );
 
     if (result.rows.length === 0) {
+      // submission_deadline is sourced from the opportunity's own deadline at
+      // creation time - it was never being set here, which meant
+      // GET /api/dashboard/today's "upcoming deadlines" widget always came back
+      // empty (it filters on this column) even for bids due imminently.
       result = await db.query(
-        `INSERT INTO bid_responses (tender_id, company_id, status) VALUES ($1, $2, 'draft') RETURNING *`,
+        `INSERT INTO bid_responses (tender_id, company_id, status, submission_deadline)
+         SELECT $1, $2, 'draft', o.deadline
+         FROM tenders t JOIN opportunities o ON t.opportunity_id = o.id
+         WHERE t.id = $1
+         RETURNING *`,
         [req.params.tenderId, req.user!.companyId]
       );
     }
@@ -152,13 +160,23 @@ router.put('/bid/:bidId', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// POST /api/tenders/bid/:bidId/generate - auto-generate documents from the reusable company profile
-// (DC1/DC2/DUME, engagement act, technical memo, pricing schedule) — Milestone 9
+// POST /api/tenders/bid/:bidId/generate - populate the bid's generated documents
+// (technical memo, engagement act) from the company's own profile data, and flag
+// any mandatory documents missing from that profile.
+//
+// The technical memo is delegated to aiService.generateTechnicalMemo(), which
+// produces the full 6-section memo the Technical Requirements (section 6.4) ask
+// for (company presentation, resources, methodology, schedule, references,
+// QSE measures) - grounded only in real company_resources/company_references/
+// company_policies data, with a deterministic no-AI fallback if the Claude API
+// call fails, so this endpoint never hard-fails on an AI outage.
 router.post('/bid/:bidId/generate', async (req: AuthRequest, res: Response) => {
   try {
     const bidResult = await db.query(
-      `SELECT br.*, t.opportunity_id FROM bid_responses br
+      `SELECT br.*, t.opportunity_id, t.required_documents as tender_required_documents, o.title as opportunity_title
+       FROM bid_responses br
        JOIN tenders t ON br.tender_id = t.id
+       JOIN opportunities o ON t.opportunity_id = o.id
        WHERE br.id = $1 AND br.company_id = $2`,
       [req.params.bidId, req.user!.companyId]
     );
@@ -166,11 +184,10 @@ router.post('/bid/:bidId/generate', async (req: AuthRequest, res: Response) => {
     if (bidResult.rows.length === 0) {
       return res.status(404).json({ error: 'Bid response not found' });
     }
+    const bid = bidResult.rows[0];
 
-    const [companyResult, referencesResult, policiesResult, documentsResult] = await Promise.all([
+    const [companyResult, documentsResult] = await Promise.all([
       db.query('SELECT * FROM companies WHERE id = $1', [req.user!.companyId]),
-      db.query('SELECT * FROM company_references WHERE company_id = $1 ORDER BY completion_date DESC LIMIT 5', [req.user!.companyId]),
-      db.query('SELECT * FROM company_policies WHERE company_id = $1', [req.user!.companyId]),
       db.query(
         `SELECT document_type FROM company_documents
          WHERE company_id = $1 AND deleted_at IS NULL AND (expiry_date IS NULL OR expiry_date > CURRENT_DATE)`,
@@ -179,44 +196,43 @@ router.post('/bid/:bidId/generate', async (req: AuthRequest, res: Response) => {
     ]);
 
     const company = companyResult.rows[0];
-    const references = referencesResult.rows;
-    const policies = policiesResult.rows;
     const availableDocTypes = documentsResult.rows.map((d) => d.document_type);
 
-    // Required documents for a standard French public tender response
+    // Required documents for a standard French public tender response. The DCE
+    // analysis (tender.required_documents) extracts this same list in the buyer's
+    // own wording per tender (e.g. "Attestation d'assurance decennale") - it's
+    // surfaced separately below rather than auto-matched against this generic
+    // internal checklist, since the two use different vocabularies and a wrong
+    // silent auto-match could tell a company it's missing something it isn't (or
+    // vice versa) on a page whose whole purpose is compliance accuracy.
     const requiredDocTypes = ['kbis', 'insurance', 'dc1', 'dc2', 'dume', 'attestation_fiscale', 'attestation_sociale'];
     const missingDocuments = requiredDocTypes.filter((d) => !availableDocTypes.includes(d));
+    const tenderSpecificRequiredDocuments: string[] = bid.tender_required_documents || [];
 
-    // Build technical memo from company's own real data (no invented facts)
-    const referencesText = references.length
-      ? references
-          .map((r) => `- ${r.project_name} (${r.client_name || 'client confidentiel'}, ${r.completion_date || 'date non renseignee'})`)
-          .join('\n')
-      : 'Aucune reference enregistree dans le profil entreprise.';
+    // Engagement act stays a direct template fill (per spec 6.3 this is a
+    // pre-filled form the company reviews/signs, not AI-drafted prose) - but it
+    // does need the contract's purpose, which the earlier inline version omitted.
+    const engagementActText = `ACTE D'ENGAGEMENT\n\nRaison sociale: ${company.name}\nForme juridique: ${company.legal_form || 'non renseignee'}\nSIRET: ${company.siret || 'non renseigne'}\nAdresse: ${company.address_street || ''}, ${company.address_city || ''}\n\nObjet du marche: ${bid.opportunity_title}\n\nLe soussigne s'engage sur la base de son offre a executer les prestations dans les conditions definies au present acte d'engagement. Montant et conditions a verifier et confirmer par l'entreprise avant signature.`;
 
-    const qualityPolicy = policies.find((p) => p.policy_type === 'quality');
-    const safetyPolicy = policies.find((p) => p.policy_type === 'safety');
+    const memoResult = await generateTechnicalMemo(req.params.bidId);
 
-    const technicalMemoText = `MEMOIRE TECHNIQUE\n\nEntreprise: ${company.name}\nSIRET: ${company.siret || 'non renseigne'}\nEffectif: ${company.employee_count || 'non renseigne'}\n\nREFERENCES:\n${referencesText}\n\nPOLITIQUE QUALITE:\n${qualityPolicy?.policy_text || 'Non renseignee dans le profil entreprise.'}\n\nPOLITIQUE SECURITE:\n${safetyPolicy?.policy_text || 'Non renseignee dans le profil entreprise.'}`;
-
-    const engagementActText = `ACTE D'ENGAGEMENT\n\nRaison sociale: ${company.name}\nForme juridique: ${company.legal_form || 'non renseignee'}\nSIRET: ${company.siret || 'non renseigne'}\nAdresse: ${company.address_street || ''}, ${company.address_city || ''}\n\nLe soussigne s'engage sur la base de son offre a executer les prestations dans les conditions definies au present acte d'engagement.`;
-
-    const result = await db.query(
+    await db.query(
       `UPDATE bid_responses SET
-         technical_memo_text = $1,
-         technical_memo_version = technical_memo_version + 1,
-         engagement_act_text = $2,
-         missing_documents = $3,
+         engagement_act_text = $1,
+         missing_documents = $2,
          status = 'in_progress',
          updated_at = NOW()
-       WHERE id = $4
-       RETURNING *`,
-      [technicalMemoText, engagementActText, JSON.stringify(missingDocuments), req.params.bidId]
+       WHERE id = $3`,
+      [engagementActText, JSON.stringify(missingDocuments), req.params.bidId]
     );
+
+    const result = await db.query('SELECT * FROM bid_responses WHERE id = $1', [req.params.bidId]);
 
     res.json({
       bid: result.rows[0],
+      technicalMemoAiGenerated: memoResult.aiGenerated,
       missingDocuments,
+      tenderSpecificRequiredDocuments,
       note: missingDocuments.length > 0
         ? 'Certains documents obligatoires manquent dans le profil entreprise et doivent etre ajoutes avant soumission.'
         : 'Tous les documents obligatoires sont presents dans le profil entreprise.',

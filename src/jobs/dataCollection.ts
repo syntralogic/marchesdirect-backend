@@ -2,7 +2,6 @@ import cron from 'node-cron';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { scheduleDataCollection } from '../services/dataCollectionService';
-import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities } from '../services/aiService';
 import { deduplicateOpportunities } from '../services/deduplicationService';
 
 // ============================================================================
@@ -10,6 +9,16 @@ import { deduplicateOpportunities } from '../services/deduplicationService';
 // Runs BOAMP + any other active source (e.g. PLACE) with NO manual trigger,
 // every 2-6 hours (configurable per source via data_sources.frequency_hours).
 // Each run also cross-checks for duplicates across sources.
+//
+// AI classification/summarization of newly collected opportunities (Milestone
+// 6 & 7) is NOT triggered from here - that's jobs/aiProcessing.ts's job, on
+// its own 15-minute cron. An earlier version of this file also scheduled its
+// own hourly classification batch, which meant two independent crons were
+// pulling from the same `ai_classification_status = 'not_analyzed'` queue on
+// overlapping schedules - not incorrect, but wasteful (duplicate Claude API
+// calls whenever both happened to fire close together) and confusing to
+// reason about. Removed here so there's exactly one job responsible for AI
+// processing.
 // ============================================================================
 
 export const startScheduledJobs = () => {
@@ -29,18 +38,7 @@ export const startScheduledJobs = () => {
     }
   });
 
-  // Classify + summarize newly collected opportunities every hour (Milestone 6 & 7)
-  cron.schedule('30 * * * *', async () => {
-    logger.info('[Job] Running AI classification batch...');
-    try {
-      await classifyUnanalyzedOpportunities(200);
-      await generateSummariesForOpportunities(100);
-    } catch (err) {
-      logger.error('[Job] AI batch job failed:', err);
-    }
-  });
-
-  logger.info('✅ Data collection jobs scheduled (every 2h collection, hourly AI classification)');
+  logger.info('✅ Data collection job scheduled (every 2h). AI classification runs separately - see jobs/aiProcessing.ts.');
 };
 
 // Manual trigger, useful for demonstrating "3 automatic runs" proof (Milestone 2)

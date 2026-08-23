@@ -139,7 +139,10 @@ const startServer = async () => {
     require('./jobs/documentExpiry').startExpiryCheck();
     require('./jobs/seoGeneration').startSEOGeneration();
     require('./jobs/backupManagement').startBackupSchedule();
+    require('./jobs/searchIndexRefresh').startSearchIndexRefresh();
     require('./jobs/aiProcessing').startAIProcessing();
+    require('./jobs/opportunityAlerts').startOpportunityAlerts();
+    require('./jobs/crmRetry').startCrmRetrySchedule();
 
     // Start server
     app.listen(PORT, () => {

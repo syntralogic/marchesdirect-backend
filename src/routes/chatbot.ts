@@ -6,10 +6,14 @@ import { chatbot } from '../services/aiService';
 
 const router = Router();
 
-// POST /api/chatbot/conversations - start a new conversation (optionally tied to an opportunity)
+// POST /api/chatbot/conversations - start a new conversation (optionally tied to an
+// opportunity and/or the journey the user is currently in, so the chatbot can adapt
+// its answers per spec section 3 ("chatbot must be aware of the user's active
+// journey") - journey isn't validated against opportunity_types here since this
+// is just used for tone/prioritization, not access control.
 router.post('/conversations', async (req: AuthRequest, res: Response) => {
   try {
-    const { topic, opportunityId } = req.body;
+    const { topic, opportunityId, journey } = req.body;
 
     const result = await db.query(
       `INSERT INTO chatbot_conversations (company_id, topic, context)
@@ -17,7 +21,10 @@ router.post('/conversations', async (req: AuthRequest, res: Response) => {
       [
         req.user!.companyId,
         topic || 'general',
-        JSON.stringify(opportunityId ? { opportunity_id: opportunityId } : {}),
+        JSON.stringify({
+          ...(opportunityId ? { opportunity_id: opportunityId } : {}),
+          ...(journey ? { journey } : {}),
+        }),
       ]
     );
 

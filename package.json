@@ -11,7 +11,11 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "lint": "eslint src --ext .ts",
-    "lint:fix": "eslint src --ext .ts --fix"
+    "lint:fix": "eslint src --ext .ts --fix",
+    "db:migrate": "node scripts/migrate.js",
+    "db:seed": "node scripts/seed.js",
+    "loadtest:generate": "node scripts/generateSyntheticListings.js",
+    "loadtest:run": "node scripts/loadTest.js"
   },
   "dependencies": {
     "express": "^4.18.2",
@@ -65,7 +69,8 @@
     "ts-jest": "^29.1.1",
     "eslint": "^8.56.0",
     "@typescript-eslint/eslint-plugin": "^6.17.0",
-    "@typescript-eslint/parser": "^6.17.0"
+    "@typescript-eslint/parser": "^6.17.0",
+    "autocannon": "^7.15.0"
   },
   "engines": {
     "node": ">=18.0.0"

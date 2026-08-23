@@ -10,8 +10,11 @@ const execAsync = promisify(exec);
 
 // ============================================================================
 // BACKUP MANAGEMENT (Milestone 12)
-// Requires pg_dump / pg_restore available on the host (standard on most
-// Postgres-capable servers) and DB_* env vars already used by config/database.ts.
+// Requires pg_dump / pg_restore / createdb / dropdb available on the host
+// (standard on most Postgres-capable servers, including Render).
+// Works with either connection style config/database.ts supports:
+//   - DATABASE_URL (single connection string - Render/Supabase default), or
+//   - split DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME
 // Set BACKUP_DIR to control where dumps are written (defaults to /tmp/backups).
 // Optionally set BACKUP_S3_BUCKET + AWS credentials to also push to S3 via aws-sdk.
 // ============================================================================
@@ -23,6 +26,37 @@ const ensureBackupDir = () => {
     fs.mkdirSync(BACKUP_DIR, { recursive: true });
   }
 };
+
+// Builds the pg_dump/psql/createdb/dropdb connection args for whichever
+// connection style is configured, and optionally targets a different
+// database name than the one connected to (used for the restore test's
+// throwaway database). Returns a connection string when DATABASE_URL is set
+// (so SSL/pooler params in the URL are preserved), or a flag string otherwise.
+function connectionArgs(overrideDbName?: string): { conn: string; env: NodeJS.ProcessEnv } {
+  const env = { ...process.env, PGPASSWORD: process.env.DB_PASSWORD || '' };
+
+  if (process.env.DATABASE_URL) {
+    if (!overrideDbName) {
+      return { conn: `"${process.env.DATABASE_URL}"`, env };
+    }
+    const url = new URL(process.env.DATABASE_URL);
+    url.pathname = `/${overrideDbName}`;
+    return { conn: `"${url.toString()}"`, env };
+  }
+
+  const dbHost = process.env.DB_HOST;
+  const dbPort = process.env.DB_PORT || '5432';
+  const dbUser = process.env.DB_USER;
+  const dbName = overrideDbName || process.env.DB_NAME;
+
+  if (!dbHost || !dbUser || !dbName) {
+    throw new Error(
+      'Set DATABASE_URL, or DB_HOST/DB_USER/DB_NAME, before running backups (see config/database.ts).'
+    );
+  }
+
+  return { conn: `-h ${dbHost} -p ${dbPort} -U ${dbUser} -d ${dbName}`, env };
+}
 
 export const runBackup = async (type: 'full' | 'incremental' = 'full') => {
   ensureBackupDir();
@@ -38,20 +72,8 @@ export const runBackup = async (type: 'full' | 'incremental' = 'full') => {
   const backupLogId = logResult.rows[0].id;
 
   try {
-    const dbName = process.env.DB_NAME;
-    const dbHost = process.env.DB_HOST;
-    const dbPort = process.env.DB_PORT || '5432';
-    const dbUser = process.env.DB_USER;
-
-    if (!dbName || !dbHost || !dbUser) {
-      throw new Error('DB_NAME, DB_HOST and DB_USER must be set to run a backup');
-    }
-
-    const env = { ...process.env, PGPASSWORD: process.env.DB_PASSWORD || '' };
-    await execAsync(
-      `pg_dump -h ${dbHost} -p ${dbPort} -U ${dbUser} -d ${dbName} -F p -f "${filepath}"`,
-      { env }
-    );
+    const { conn, env } = connectionArgs();
+    await execAsync(`pg_dump ${conn} -F p -f "${filepath}"`, { env });
 
     const stats = fs.statSync(filepath);
     const recordCountResult = await db.query('SELECT COUNT(*) as count FROM opportunities');
@@ -76,6 +98,13 @@ export const runBackup = async (type: 'full' | 'incremental' = 'full') => {
 
 // Restore test: restores the latest successful backup into a throwaway test database
 // to prove the backup is actually usable (Milestone 12 proof requirement).
+//
+// Note: on a managed Postgres host where the connecting role can't run
+// CREATE DATABASE (e.g. some restricted Supabase/RDS setups), this will fail
+// with a permissions error - that's a real infra constraint to resolve with
+// the DB provider, not something this script can work around. It needs to be
+// run once against the real production-equivalent host to know which case
+// applies.
 export const testRestore = async () => {
   const latestResult = await db.query(
     `SELECT * FROM backup_logs WHERE status = 'success' ORDER BY completed_at DESC LIMIT 1`
@@ -89,24 +118,30 @@ export const testRestore = async () => {
   const testDbName = `restore_test_${Date.now()}`;
 
   try {
-    const dbHost = process.env.DB_HOST;
-    const dbPort = process.env.DB_PORT || '5432';
-    const dbUser = process.env.DB_USER;
-    const env = { ...process.env, PGPASSWORD: process.env.DB_PASSWORD || '' };
+    const admin = connectionArgs(); // connects to the default configured DB to issue CREATE/DROP DATABASE
+    const adminDbNameFlag = process.env.DATABASE_URL ? '' : `-d ${process.env.DB_NAME ?? ''}`;
 
-    await execAsync(`createdb -h ${dbHost} -p ${dbPort} -U ${dbUser} ${testDbName}`, { env });
-    await execAsync(
-      `psql -h ${dbHost} -p ${dbPort} -U ${dbUser} -d ${testDbName} -f "${backup.backup_location}"`,
-      { env }
-    );
-
-    // Sanity check: does the restored DB have the opportunities table with data?
-    await execAsync(
-      `psql -h ${dbHost} -p ${dbPort} -U ${dbUser} -d ${testDbName} -c "SELECT COUNT(*) FROM opportunities;"`,
-      { env }
-    );
-
-    await execAsync(`dropdb -h ${dbHost} -p ${dbPort} -U ${dbUser} ${testDbName}`, { env });
+    if (process.env.DATABASE_URL) {
+      // createdb/dropdb don't take a full connection URL the way psql/pg_dump do -
+      // derive host/port/user from the URL for those two commands specifically.
+      const url = new URL(process.env.DATABASE_URL);
+      const hostArgs = `-h ${url.hostname} -p ${url.port || '5432'} -U ${decodeURIComponent(url.username)}`;
+      await execAsync(`createdb ${hostArgs} ${testDbName}`, { env: admin.env });
+      const restoreConn = connectionArgs(testDbName);
+      await execAsync(`psql ${restoreConn.conn} -f "${backup.backup_location}"`, { env: admin.env });
+      await execAsync(`psql ${restoreConn.conn} -c "SELECT COUNT(*) FROM opportunities;"`, { env: admin.env });
+      await execAsync(`dropdb ${hostArgs} ${testDbName}`, { env: admin.env });
+    } else {
+      const dbHost = process.env.DB_HOST;
+      const dbPort = process.env.DB_PORT || '5432';
+      const dbUser = process.env.DB_USER;
+      const hostArgs = `-h ${dbHost} -p ${dbPort} -U ${dbUser}`;
+      await execAsync(`createdb ${hostArgs} ${testDbName}`, { env: admin.env });
+      await execAsync(`psql ${hostArgs} -d ${testDbName} -f "${backup.backup_location}"`, { env: admin.env });
+      await execAsync(`psql ${hostArgs} -d ${testDbName} -c "SELECT COUNT(*) FROM opportunities;"`, { env: admin.env });
+      await execAsync(`dropdb ${hostArgs} ${testDbName}`, { env: admin.env });
+    }
+    void adminDbNameFlag;
 
     await db.query(
       `UPDATE backup_logs SET restoration_tested = true, restoration_date = NOW() WHERE id = $1`,

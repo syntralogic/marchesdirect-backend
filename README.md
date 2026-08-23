@@ -16,11 +16,22 @@ classification, intelligent matching, and multi-tenant architecture.
 | BOAMP/PLACE/TED connectors (M2), dedup (M3) | Written, no live run with the required 3 automatic executions demonstrated yet |
 | AI classification/matching/summaries (M6-7) | Written (`aiService.ts`), no live-data test or chatbot accuracy benchmark run yet |
 | DCE analysis - selection criteria/required docs/scoring (M6.1/M9) | Written (`aiService.analyzeTenderDocuments`, `POST /api/tenders/:id/analyze`); reads the connector's already-ingested title/description/raw_data, does NOT yet parse RC/CCAP/CCTP PDF files directly (connectors don't download those files today - separate task). No live run yet. |
-| AI technical memo generator, 6-section (M6.4/M9) | Written (`aiService.generateTechnicalMemo`), now pulls company_resources (staff/equipment) and all 3 policy types (quality/safety/environmental) that the previous plain-template version ignored; falls back to a deterministic grounded template if the Claude API call fails. No live run yet. |
+| AI technical memo generator, 6-section (M6.4/M9) | Written (`aiService.generateTechnicalMemo`), pulls company_resources (staff/equipment) and all 3 policy types (quality/safety/environmental). **Fixed this pass:** the actual `POST /api/tenders/bid/:bidId/generate` route was never calling this function — it had its own separate, much weaker inline 2-section builder instead, so the real endpoint was silently producing a non-compliant memo despite the good generator existing elsewhere in the codebase. Now wired together. Falls back to a deterministic grounded template if the Claude API call fails. No live run yet. |
+| Duplicate AI-processing schedules (M6/M7) | `jobs/dataCollection.ts` had its own hourly classification cron **and** `jobs/aiProcessing.ts` had an independent 15-min cron - both pulling from the same `not_analyzed` queue with no coordination, so a race could trigger the same Claude API call twice for one opportunity. Removed the duplicate cron from `dataCollection.ts`; `aiProcessing.ts` is now the single owner of classification/summarization scheduling (it also retries `failed` status, which the removed one didn't). |
+| Dead duplicate scheduler (M2) | `dataCollectionService.ts` exported its own `startScheduledCollection()` (6h cron) that nothing ever called — `jobs/dataCollection.ts` has the actually-wired version (2h cron). Removed the dead one so a future change can't accidentally wire both up and cause the same double-run problem fixed above. |
+| Per-source collection frequency ignored (M2) | `data_sources.frequency_hours` exists (BOAMP=6h, TED=12h per `.env.example`) but was never read — `scheduleDataCollection()` collected every active source unconditionally on every 2-hour tick, and `next_run` was always set to a hardcoded `+6 hours` regardless of the source's own configured frequency. Fixed: collection now only runs for sources where `next_run <= NOW()`, and `next_run` is set using that source's real `frequency_hours`. |
+| Chatbot: journey-awareness, citation, prompt-injection hardening (M7) | Spec (section 5) requires the chatbot to be journey-aware, cite sources, distinguish facts from recommendations, and resist prompt injection from malicious listing content — none of these were implemented. Added: conversations can now carry a `journey` field that shapes tone; externally-sourced opportunity text is wrapped in an explicit `<untrusted_reference_data>` block with instructions telling the model to treat it as quotable data, never as instructions to obey; system prompt now requires citing facts, flagging missing info as "not available", and distinguishing stated facts from recommendations; `chatbot_messages.source_citations` (already in schema, never populated) is now written on each assistant reply. |
+| Engagement act (M9/6.3) | Was missing the contract's purpose entirely (spec 6.3 requires it) — fixed to pull in the opportunity title. Still a direct template fill, not AI-drafted, per spec ("pre-filled form... reviewed and confirmed by company before signature"). |
+| Tender-specific required-documents checklist (M9/6.1) | DCE analysis (`analyzeTenderDocuments`) already extracts a per-tender `required_documents` list, but the generate route was comparing the company's uploaded documents against a generic hardcoded list instead and silently ignoring the tender-specific one. Now both are returned in the response (`missingDocuments` = generic checklist, `tenderSpecificRequiredDocuments` = DCE-extracted) rather than auto-merging them — they use different vocabularies (internal `document_type` codes vs. the buyer's own wording) and a wrong silent auto-match on a compliance-critical checklist seemed worse than surfacing both explicitly. Mapping the two into one true checklist is a reasonable next step but needs testing against real DCE-analyzed tenders to get the term-matching right, not something to guess at blind. |
 | Structured fact extraction with explicit "not available" (POC test spec) | Written (`aiService.extractOpportunityFacts`, `POST /api/opportunities/:id/extract-facts`); requires the `ai_extracted_facts` column added to `schema.sql` in this pass - re-run schema.sql (or the one new `ALTER TABLE` if the DB already exists) before using it. No live run yet. |
 | Documents / S3 (M9) | Written, S3 not configured/tested |
 | Stripe billing, CRM export (M8) | Routes exist (`subscriptions.ts`, `crm.ts`); Stripe/CRM API calls not wired to real accounts |
-| `scripts/migrate.js`, `scripts/seed.js` | Referenced in `package.json`, **do not exist yet** - load `schema.sql` manually for now |
+| `scripts/migrate.js`, `scripts/seed.js` | Both exist now. `npm run db:migrate` loads schema.sql standalone (server.ts also auto-loads it on boot via `ensureSchema()`, so this is mainly for CI/scripted use). `npm run db:seed` inserts demo opportunities across all 3 journeys + a demo login (`demo@marchesdirect.fr` / `DemoPass123!`) so milestones 4/5/8 are demoable before live connector data exists. Not a substitute for milestone 2/3 proof, which requires real connector runs. |
+| GDPR delete endpoint (M8/M11) | Added: `DELETE /api/auth/account` - soft-deletes + anonymizes the user's PII, revokes sessions, audit-logged; also soft-deletes the company if that was its last active user. `tsc --noEmit` clean, not yet exercised against a live DB. |
+| Backup/restore (M12) | `jobs/backupManagement.ts` existed but only supported split `DB_HOST`/`DB_USER` env vars - broken on Render/Supabase, which use a single `DATABASE_URL`. Fixed to support both. Added `POST /api/admin/backups/run` and `POST /api/admin/backups/restore-test` so the restore proof can be triggered on demand instead of waiting for the weekly cron. Still needs to actually be run once against a real deployed DB - `pg_dump`/`createdb`/`dropdb` need to exist on the host and the DB role needs `CREATE DATABASE` privilege, neither of which is verified yet. |
+| Search materialized view (M5/M12) | `opportunity_search_index` existed in schema.sql but nothing ever refreshed it, and the search route queried the base `opportunities` table directly instead - the view was dead weight. Added `jobs/searchIndexRefresh.ts` (refreshes every 15 min via `REFRESH MATERIALIZED VIEW CONCURRENTLY`, needs the new unique index added to schema.sql). The search route itself has **not** been switched over to query the view - that's a separate, riskier change since the view is missing some columns (`status`, `complexity_level`, `ai_summary`, etc.) the route currently returns, and switching needs to be checked against whatever the frontend expects in the response shape. |
+| 1M-row load test (M12) | `scripts/generateSyntheticListings.js` (bulk-inserts clearly-marked `SYNTH-*` rows, `--clean` flag to remove them) and `scripts/loadTest.js` (autocannon against a running instance's `/api/opportunities`) now exist. Neither has been run — this environment has no network path to a live Postgres instance or a deployed API to test against. |
+| Dependency audit (M12) | `npm audit --production`: 2 moderate advisories, both in `aws-sdk` v2 (already flagged elsewhere in this table as EOL, migration to v3 is a separate task) and its transitive `uuid` dependency. No criticals/highs. This is a dependency scan, **not** the independent security audit the milestone actually requires — see acceptance checklist below. |
 
 This section exists so the README doesn't silently drift from reality again -
 please update the table (not just the code) when a row's status changes.
@@ -62,7 +73,9 @@ cp .env.example .env
 
 # Create the database, then load the schema
 createdb procurement_platform          # or: psql -U postgres -c "CREATE DATABASE procurement_platform;"
-psql -U postgres -d procurement_platform -f schema.sql
+npm run db:migrate
+# Optional: seed demo data (opportunities across all 3 journeys + a demo login)
+npm run db:seed
 
 # Start development server (ts-node, no build step)
 npm run dev
@@ -72,9 +85,9 @@ npm run build
 npm start
 ```
 
-> Note: `npm run db:migrate` / `npm run db:seed` are defined in `package.json` but
-> `scripts/migrate.js` and `scripts/seed.js` don't exist in the repo yet — load
-> `schema.sql` directly with `psql` as shown above until those are added.
+> `npm run db:migrate` and `npm run db:seed` are now available (see scripts/
+> above). `db:migrate` loads schema.sql directly if you'd rather not boot the
+> server to get its auto-migration.
 
 ---
 
@@ -368,6 +381,14 @@ By Trade, Region, Department, City + Opportunity Type:
 /region/occitanie/subcontracting
 ```
 
+> **Known gap:** `jobs/seoGeneration.ts` currently only generates trade x region
+> pages. The department/city/opportunity-type granularity shown above (and
+> asked for in Technical Requirements section 10) isn't implemented yet -
+> expanding the combos generated is a reasonably contained change, but wasn't
+> guessed at blind in this pass since page-count at that granularity needs a
+> real sense of the data volume to size sensibly (could go from hundreds of
+> pages to tens of thousands depending on how it's scoped).
+
 Structure:
 - Title & Meta: SEO-optimized
 - Filter links to relevant opportunities
@@ -395,7 +416,7 @@ opportunity_search_index
 ### Data Protection (GDPR)
 - Personal data in Europe (EU data center)
 - Audit logs for all modifications
-- Delete user endpoint → GDPR compliance
+- Delete user endpoint → GDPR compliance (`DELETE /api/auth/account` — soft-deletes + anonymizes PII, revokes sessions, audit-logged)
 - Data retention: 365 days default
 
 ### Backup & Restoration
@@ -465,8 +486,19 @@ INSERT INTO audit_logs (user_id, action, entity_type, old_values, new_values)
 - [ ] Indexed by Google
 
 ### Milestone 12: Security & Backup
-- [ ] Audit report from independent review
-- [ ] Live backup restoration demonstrated
+- [ ] Audit report from independent review — **cannot be self-certified**; needs
+      a reviewer who isn't also the code's author (see Implementation status
+      table above for what a code-level self-review already found: `.env`
+      gitignored, no hardcoded secrets found, `helmet()` + `cors` configured,
+      `npm audit` clean except 2 moderate advisories in `aws-sdk`/`uuid` v2 -
+      both require breaking-change major upgrades, not yet done, see note below)
+- [ ] Live backup restoration demonstrated — code now exists
+      (`POST /api/admin/backups/run` then `POST /api/admin/backups/restore-test`,
+      see `jobs/backupManagement.ts`) but has never actually been run against a
+      real Postgres instance from this environment (no DB/network access here)
+- [ ] Load test at 1M synthetic listings — `scripts/generateSyntheticListings.js`
+      + `scripts/loadTest.js` now exist and are ready to run, but have not been
+      executed against a live deployed instance yet
 
 ---
 
@@ -480,6 +512,7 @@ POST   /api/auth/refresh            # Refresh JWT
 POST   /api/auth/forgot-password
 POST   /api/auth/reset-password
 POST   /api/auth/mfa/enable
+DELETE /api/auth/account            # GDPR right-to-erasure
 POST   /api/auth/mfa/verify
 GET    /api/opportunities           # Search (paginated)
 GET    /api/opportunities/:id       # Detail page

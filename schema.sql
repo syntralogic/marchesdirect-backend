@@ -362,12 +362,17 @@ CREATE TABLE company_certifications (
   issued_date DATE,
   expiry_date DATE,
   is_expired BOOLEAN DEFAULT false,
+  expiry_reminder_sent BOOLEAN DEFAULT false,
   
   document_url VARCHAR(500),                -- S3
   
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Safe to re-run: covers anyone who already loaded schema.sql once before this
+-- column was added to the CREATE TABLE above (which only applies on first create).
+ALTER TABLE company_certifications ADD COLUMN IF NOT EXISTS expiry_reminder_sent BOOLEAN DEFAULT false;
 
 -- Company HR & Resources (for proposal generation)
 CREATE TABLE company_resources (
@@ -789,6 +794,10 @@ WHERE o.deleted_at IS NULL AND o.status NOT IN ('cancelled', 'expired');
 
 CREATE INDEX opportunity_search_index_search ON opportunity_search_index USING GIN(search_vector);
 CREATE INDEX opportunity_search_index_deadline ON opportunity_search_index(deadline);
+-- Required for REFRESH MATERIALIZED VIEW CONCURRENTLY (see jobs/searchIndexRefresh.ts) -
+-- without a unique index, a concurrent refresh isn't possible and every refresh
+-- would briefly lock the view against reads while it rebuilds.
+CREATE UNIQUE INDEX opportunity_search_index_id ON opportunity_search_index(id);
 
 -- ============================================================================
 -- 17. CONSTRAINTS & TRIGGERS

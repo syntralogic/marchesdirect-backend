@@ -11,6 +11,7 @@ import {
   verifyMFALogin,
 } from '../services/authService';
 import { authenticate, AuthRequest } from '../middleware/auth';
+import { db } from '../config/database';
 import { logger } from '../utils/logger';
 
 const router = Router();
@@ -125,6 +126,67 @@ router.post('/password-reset/confirm', authenticate, async (req: AuthRequest, re
 // GET /api/auth/me
 router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
   res.json({ user: req.user, company: req.company });
+});
+
+// DELETE /api/auth/account
+//
+// GDPR right-to-erasure endpoint (Technical Requirements section 8/11:
+// "Delete user endpoint -> GDPR compliance", "access and deletion rights").
+// Soft-deletes the requesting user (deleted_at + PII anonymized), revokes all
+// of their sessions, and writes an audit_logs entry. If they were the last
+// active user on the company, the company record is soft-deleted and its PII
+// anonymized too - company-owned records (opportunities, subscriptions, etc.)
+// are intentionally left in place since they aren't personal data and other
+// tables reference them by foreign key.
+router.delete('/account', authenticate, async (req: AuthRequest, res: Response) => {
+  const userId = req.user!.id;
+  const companyId = req.user!.companyId;
+
+  try {
+    await db.transaction(async (client) => {
+      const before = await client.query('SELECT email, first_name, last_name, phone FROM users WHERE id = $1', [userId]);
+
+      await client.query(
+        `UPDATE users
+         SET deleted_at = NOW(), status = 'deleted',
+             email = 'deleted-user-' || id || '@anonymized.local',
+             first_name = 'Deleted', last_name = 'User', phone = NULL,
+             mfa_secret_encrypted = NULL, password_hash = NULL
+         WHERE id = $1`,
+        [userId]
+      );
+
+      await client.query('DELETE FROM user_sessions WHERE user_id = $1', [userId]);
+
+      const remainingUsers = await client.query(
+        `SELECT COUNT(*)::int AS count FROM users WHERE company_id = $1 AND deleted_at IS NULL`,
+        [companyId]
+      );
+
+      if (remainingUsers.rows[0].count === 0) {
+        await client.query(
+          `UPDATE companies
+           SET deleted_at = NOW(), status = 'deleted',
+               email = 'deleted-company-' || id || '@anonymized.local',
+               phone = NULL, address_street = NULL,
+               stripe_customer_id = NULL
+           WHERE id = $1`,
+          [companyId]
+        );
+      }
+
+      await client.query(
+        `INSERT INTO audit_logs (user_id, company_id, action, entity_type, entity_id, old_values, ip_address, user_agent)
+         VALUES ($1, $2, 'delete', 'user', $1, $3, $4, $5)`,
+        [userId, companyId, JSON.stringify(before.rows[0] || {}), req.ip, req.get('user-agent') || null]
+      );
+    });
+
+    res.json({ message: 'Account deleted.' });
+  } catch (err: any) {
+    logger.error('Account deletion failed:', err);
+    res.status(500).json({ error: 'Account deletion failed' });
+  }
 });
 
 export default router;

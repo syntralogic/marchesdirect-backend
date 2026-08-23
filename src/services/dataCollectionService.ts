@@ -79,7 +79,7 @@ export const collectBoampData = async (sourceId: number) => {
     );
 
     await db.query(
-      "UPDATE data_sources SET last_run = NOW(), next_run = NOW() + INTERVAL '6 hours', total_imports = total_imports + $2 WHERE id = $1",
+      "UPDATE data_sources SET last_run = NOW(), next_run = NOW() + (frequency_hours || ' hours')::interval, total_imports = total_imports + $2 WHERE id = $1",
       [sourceId, inserted]
     );
 
@@ -186,7 +186,7 @@ export const collectPlaceData = async (sourceId: number) => {
     );
 
     await db.query(
-      "UPDATE data_sources SET last_run = NOW(), next_run = NOW() + INTERVAL '6 hours', total_imports = total_imports + $2 WHERE id = $1",
+      "UPDATE data_sources SET last_run = NOW(), next_run = NOW() + (frequency_hours || ' hours')::interval, total_imports = total_imports + $2 WHERE id = $1",
       [sourceId, inserted]
     );
 
@@ -268,7 +268,7 @@ export const collectTedData = async (sourceId: number) => {
     );
 
     await db.query(
-      "UPDATE data_sources SET last_run = NOW(), next_run = NOW() + INTERVAL '6 hours', total_imports = total_imports + $2 WHERE id = $1",
+      "UPDATE data_sources SET last_run = NOW(), next_run = NOW() + (frequency_hours || ' hours')::interval, total_imports = total_imports + $2 WHERE id = $1",
       [sourceId, inserted]
     );
 
@@ -345,8 +345,21 @@ const updateOpportunity = async (opportunityId: string, data: any) => {
 export const scheduleDataCollection = async () => {
   logger.info('Scheduling data collection jobs...');
 
-  // Get all active sources
-  const sources = await db.query('SELECT * FROM data_sources WHERE active = true');
+  // Only collect from sources that are actually due, per that source's own
+  // frequency_hours (next_run is set after each successful run above). The
+  // outer cron in jobs/dataCollection.ts fires every 2 hours as a "check if
+  // anything is due" tick, not "collect everything every 2 hours" - without
+  // this filter, a source configured for e.g. 12-hourly collection (TED) would
+  // get hit every 2 hours anyway, wasting calls against that source's real
+  // rate limits and ignoring the per-source frequency_hours config entirely.
+  const sources = await db.query(
+    `SELECT * FROM data_sources WHERE active = true AND (next_run IS NULL OR next_run <= NOW())`
+  );
+
+  if (sources.rows.length === 0) {
+    logger.info('No sources due for collection right now.');
+    return;
+  }
 
   for (const source of sources.rows) {
     try {
@@ -367,16 +380,4 @@ export const scheduleDataCollection = async () => {
       logger.error(`Failed to collect from ${source.code}:`, err);
     }
   }
-};
-
-export const startScheduledCollection = () => {
-  const cron = require('node-cron');
-
-  // Run every 6 hours
-  cron.schedule('0 */6 * * *', () => {
-    logger.info('Running scheduled data collection...');
-    scheduleDataCollection().catch(err => logger.error('Collection job error:', err));
-  });
-
-  logger.info('✅ Data collection scheduler started (runs every 6 hours)');
 };

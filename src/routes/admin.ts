@@ -5,6 +5,7 @@ import { AuthRequest, requireRole } from '../middleware/auth';
 import { verifyDeduplicationQuality, getDeduplicationReport, deduplicateOpportunities } from '../services/deduplicationService';
 import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities } from '../services/aiService';
 import { collectBoampData, collectPlaceData, collectTedData } from '../services/dataCollectionService';
+import { runBackup, testRestore } from '../jobs/backupManagement';
 
 const router = Router();
 
@@ -164,6 +165,41 @@ router.get('/backups', async (req: AuthRequest, res: Response) => {
   } catch (err: any) {
     logger.error('Admin backups error:', err);
     res.status(500).json({ error: 'Failed to fetch backup logs' });
+  }
+});
+
+// POST /api/admin/backups/run - manually trigger a full backup on demand, so the
+// Milestone 12 restoration proof doesn't require waiting for the 02:00 cron.
+// Runs pg_dump synchronously and returns once it's done (a full backup on a
+// large database can take a while - call this from a background job/queue in
+// production if it starts timing out the HTTP request).
+router.post('/backups/run', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await runBackup('full');
+    if (!result.success) {
+      return res.status(500).json(result);
+    }
+    res.json(result);
+  } catch (err: any) {
+    logger.error('Admin backup trigger error:', err);
+    res.status(500).json({ error: 'Failed to run backup' });
+  }
+});
+
+// POST /api/admin/backups/restore-test - restores the latest successful backup into a
+// throwaway database and verifies it, then drops it. This is the actual Milestone 12
+// proof requirement ("live restoration demonstrated") - GET /backups only shows
+// whether restoration_tested is true, this endpoint is what makes it become true.
+router.post('/backups/restore-test', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await testRestore();
+    if (!result.success) {
+      return res.status(500).json(result);
+    }
+    res.json(result);
+  } catch (err: any) {
+    logger.error('Admin restore-test trigger error:', err);
+    res.status(500).json({ error: 'Failed to run restore test' });
   }
 });
 

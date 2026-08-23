@@ -159,6 +159,53 @@ router.post('/webhook', async (req: Request, res: Response) => {
         );
         break;
       }
+      case 'invoice.payment_failed': {
+        // Was previously unhandled: a declined card left subscriptions.status
+        // and companies.subscription_status both showing 'active' until Stripe
+        // eventually gives up retrying (can be weeks) and fires
+        // customer.subscription.deleted - so a company could keep full access
+        // for a long time after their card started failing, with no record of
+        // the failure anywhere for sales/support to follow up on.
+        const invoice = event.data.object as Stripe.Invoice;
+        const stripeSubId = typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id;
+        if (stripeSubId) {
+          const subResult = await db.query(
+            "UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE stripe_subscription_id = $1 RETURNING company_id",
+            [stripeSubId]
+          );
+          if (subResult.rows.length > 0) {
+            await db.query(
+              "UPDATE companies SET subscription_status = 'past_due' WHERE id = $1",
+              [subResult.rows[0].company_id]
+            );
+            await db.query(
+              `INSERT INTO company_alerts (company_id, alert_type, title, message)
+               VALUES ($1, 'payment_failed', 'Paiement echoue', 'Le paiement de votre abonnement a echoue. Merci de mettre a jour votre moyen de paiement pour eviter une interruption de service.')`,
+              [subResult.rows[0].company_id]
+            );
+          }
+        }
+        break;
+      }
+      case 'invoice.payment_succeeded': {
+        // Recovers a subscription that was previously marked past_due (e.g. the
+        // customer updated their card after a failed charge).
+        const invoice = event.data.object as Stripe.Invoice;
+        const stripeSubId = typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id;
+        if (stripeSubId) {
+          const subResult = await db.query(
+            "UPDATE subscriptions SET status = 'active', updated_at = NOW() WHERE stripe_subscription_id = $1 AND status = 'past_due' RETURNING company_id",
+            [stripeSubId]
+          );
+          if (subResult.rows.length > 0) {
+            await db.query(
+              "UPDATE companies SET subscription_status = 'active' WHERE id = $1",
+              [subResult.rows[0].company_id]
+            );
+          }
+        }
+        break;
+      }
       default:
         logger.info(`Unhandled Stripe event type: ${event.type}`);
     }

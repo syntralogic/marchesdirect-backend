@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { syncLeadToCrm } from '../services/crmSyncService';
 
 const router = Router();
 
@@ -44,6 +45,15 @@ router.post(
       // Intentionally return only id/created_at, not the full row - this is a
       // public endpoint, no need to echo back internal CRM sync fields.
       res.status(201).json({ success: true, id: result.rows[0].id });
+
+      // Fire-and-forget: the visitor's form submission must not wait on (or
+      // fail because of) an external CRM API call. Sync status/errors land on
+      // the crm_leads row itself (crm_sync_status/crm_last_sync), visible via
+      // GET /api/crm/leads for staff, and jobs/crmRetry.ts sweeps up anything
+      // that didn't sync on the first attempt.
+      syncLeadToCrm(result.rows[0].id).catch((err) => {
+        logger.error('Unexpected error firing CRM sync:', err);
+      });
     } catch (err: any) {
       logger.error('Public CRM lead capture error:', err);
       res.status(500).json({ error: 'Failed to submit — please try again' });
