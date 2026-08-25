@@ -82,6 +82,7 @@ app.use('/api/auth', require('./routes/auth').default);
 app.use('/api/opportunities', require('./routes/opportunities').default);
 app.use('/api/trades', require('./routes/trades').default);
 app.use('/api/brands', require('./routes/brandsPublic').default);
+app.use('/api/seo-pages', require('./routes/seoPagesPublic').default);
 app.use('/api/subscriptions', require('./routes/subscriptions').default);
 // CRM lead capture must be public: it's submitted from anonymous marketing
 // pages (pricing page, contact form) before someone has an account.
