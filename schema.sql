@@ -541,6 +541,9 @@ CREATE TABLE subscription_plans (
   id SERIAL PRIMARY KEY,
   brand_id UUID REFERENCES brands(id),      -- Can be NULL for all
   
+  plan_code VARCHAR(50) UNIQUE,             -- Stable identifier (e.g. 'pro') -
+                                             -- frontend/checkout match on this,
+                                             -- never on price or name.
   stripe_product_id VARCHAR(255),
   stripe_price_id VARCHAR(255),
   
@@ -895,10 +898,10 @@ INSERT INTO opportunity_types (code, name) VALUES
 ('public_procurement', 'Public Procurement'),
 ('subcontracting', 'Subcontracting');
 
-INSERT INTO subscription_plans (name, price, billing_period, features) VALUES
-('Starter', 29.00, 'monthly', '{"opportunities": 50, "bids": 5, "support": "email"}'),
-('Pro', 99.00, 'monthly', '{"opportunities": 500, "bids": 50, "support": "priority"}'),
-('Enterprise', 299.00, 'monthly', '{"opportunities": -1, "bids": -1, "support": "dedicated"}');
+INSERT INTO subscription_plans (plan_code, name, price, billing_period, features) VALUES
+('decouverte', 'Découverte', 0.00, 'monthly', '{"opportunities": 10, "bids": 1, "support": "email"}'),
+('pro', 'Pro', 89.00, 'monthly', '{"opportunities": 500, "bids": 50, "support": "priority"}'),
+('entreprise', 'Entreprise', 299.00, 'monthly', '{"opportunities": -1, "bids": -1, "support": "dedicated"}');
 
 -- Create initial data sources
 INSERT INTO data_sources (code, name, feed_type, frequency_hours, active) VALUES

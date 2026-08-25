@@ -135,4 +135,19 @@ export const ensureSchema = async (): Promise<void> => {
 // automatically.
 const applyIncrementalMigrations = async (): Promise<void> => {
   await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
+
+  // Stable identifier for the 3 pricing tiers (decouverte/pro/entreprise) so
+  // the frontend Tarifs page and the checkout endpoint can agree on which
+  // row is which without guessing from price - a `code` never changes even
+  // if a plan's price does, unlike matching on `price`.
+  await pool.query(`ALTER TABLE subscription_plans ADD COLUMN IF NOT EXISTS plan_code VARCHAR(50) UNIQUE`);
+  await pool.query(
+    `UPDATE subscription_plans SET plan_code = 'decouverte' WHERE plan_code IS NULL AND price = 0`
+  );
+  await pool.query(
+    `UPDATE subscription_plans SET plan_code = 'pro' WHERE plan_code IS NULL AND price > 0 AND price < 500`
+  );
+  await pool.query(
+    `UPDATE subscription_plans SET plan_code = 'entreprise' WHERE plan_code IS NULL AND price >= 500`
+  );
 };
