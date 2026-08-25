@@ -103,6 +103,25 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
   }
 });
 
+// Best-effort link to the original notice on its source platform, extracted
+// from raw_data. The open-data feeds we ingest (BOAMP etc.) publish notice
+// metadata, not the DCE PDF itself - the actual consultation documents live
+// on the buyer's own "profil acheteur" platform, referenced from the notice.
+// So this links out to the official source rather than pretending to host a
+// file we were never given. Tries a few plausible field names defensively
+// since we can't fully verify the schema from field names alone; a source
+// with no matching field simply gets no link (frontend hides the button).
+const extractSourceUrl = (rawData: any): string | null => {
+  if (!rawData) return null;
+  const fields = rawData.fields || rawData;
+  const candidates = [
+    fields.url_avis, fields.url, fields.lien_avis, fields.link,
+    rawData.link, rawData.source_url,
+  ];
+  const found = candidates.find((c) => typeof c === 'string' && c.startsWith('http'));
+  return found || null;
+};
+
 // GET /api/opportunities/:id - detail page
 router.get('/:id', optionalAuth, async (req: Request, res: Response) => {
   try {
@@ -121,7 +140,10 @@ router.get('/:id', optionalAuth, async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Opportunity not found' });
     }
 
-    res.json(result.rows[0]);
+    const opportunity = result.rows[0];
+    opportunity.source_url = extractSourceUrl(opportunity.raw_data);
+
+    res.json(opportunity);
   } catch (err: any) {
     logger.error('Opportunity detail error:', err);
     res.status(500).json({ error: 'Failed to fetch opportunity' });
