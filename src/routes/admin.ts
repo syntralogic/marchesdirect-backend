@@ -244,4 +244,211 @@ router.get('/seo-pages', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// GET /api/admin/stats - dashboard summary counts, real numbers only (no
+// AdminDashboard.tsx on the frontend previously showed 100% hardcoded
+// figures like "1,248" tenders and "€48k" revenue with no endpoint behind
+// them at all - this is that endpoint).
+router.get('/stats', async (req: AuthRequest, res: Response) => {
+  try {
+    const [opportunities, companies, matchRate, revenue, recentActivity] = await Promise.all([
+      db.query(`SELECT COUNT(*)::int AS count FROM opportunities WHERE status = 'active'`),
+      db.query(`SELECT COUNT(*)::int AS count FROM companies WHERE deleted_at IS NULL`),
+      db.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE ai_classification_status = 'classified')::float
+             / NULLIF(COUNT(*) FILTER (WHERE ai_classification_status IN ('classified', 'failed')), 0)::float AS rate
+         FROM opportunities`
+      ),
+      db.query(
+        `SELECT COALESCE(SUM(sp.price), 0)::float AS mrr
+         FROM subscriptions s JOIN subscription_plans sp ON s.plan_id = sp.id
+         WHERE s.status = 'active'`
+      ),
+      db.query(
+        `SELECT al.action, al.entity_type, al.created_at,
+                u.first_name, u.last_name, c.name AS company_name
+         FROM audit_logs al
+         LEFT JOIN users u ON al.user_id = u.id
+         LEFT JOIN companies c ON al.company_id = c.id
+         ORDER BY al.created_at DESC LIMIT 10`
+      ),
+    ]);
+
+    res.json({
+      activeOpportunities: opportunities.rows[0].count,
+      totalCompanies: companies.rows[0].count,
+      // null when there's no classified/failed data yet (fresh install, or AI
+      // processing hasn't run) - the frontend shows "-" rather than a
+      // misleading 0%.
+      matchRate: matchRate.rows[0].rate !== null ? Math.round(matchRate.rows[0].rate * 100) : null,
+      monthlyRecurringRevenue: revenue.rows[0].mrr,
+      recentActivity: recentActivity.rows.map((r) => ({
+        user: [r.first_name, r.last_name].filter(Boolean).join(' ') || r.company_name || 'Système',
+        action: r.action,
+        target: r.entity_type,
+        time: r.created_at,
+      })),
+    });
+  } catch (err: any) {
+    logger.error('Admin stats error:', err);
+    res.status(500).json({ error: 'Failed to fetch admin stats' });
+  }
+});
+
+// GET /api/admin/opportunities - admin-wide listing (no company scoping, unlike
+// the public /api/opportunities route) for the admin tenders management screen.
+router.get('/opportunities', async (req: AuthRequest, res: Response) => {
+  try {
+    const { q, status, page = '1', limit = '20' } = req.query as Record<string, string>;
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+    const offset = (pageNum - 1) * limitNum;
+
+    const conditions: string[] = ['1=1'];
+    const params: any[] = [];
+    let idx = 1;
+    if (q) {
+      conditions.push(`o.title ILIKE $${idx++}`);
+      params.push(`%${q}%`);
+    }
+    if (status && status !== 'all') {
+      conditions.push(`o.status = $${idx++}`);
+      params.push(status);
+    }
+    const where = conditions.join(' AND ');
+
+    const [results, totalCount] = await Promise.all([
+      db.query(
+        `SELECT o.id, o.title, o.estimated_value, o.currency, o.deadline, o.status,
+                o.location_city, ot.name as opportunity_type
+         FROM opportunities o
+         LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+         WHERE ${where}
+         ORDER BY o.publication_date DESC NULLS LAST
+         LIMIT $${idx++} OFFSET $${idx++}`,
+        [...params, limitNum, offset]
+      ),
+      db.query(`SELECT COUNT(*)::int as total FROM opportunities o WHERE ${where}`, params),
+    ]);
+
+    res.json({
+      results: results.rows,
+      pagination: { page: pageNum, limit: limitNum, total: totalCount.rows[0].total },
+    });
+  } catch (err: any) {
+    logger.error('Admin opportunities list error:', err);
+    res.status(500).json({ error: 'Failed to fetch opportunities' });
+  }
+});
+
+// PATCH /api/admin/opportunities/:id/status - the one real admin action that
+// fits this data model: opportunities are collected automatically (BOAMP/
+// PLACE/TED), not manually authored, so there's no "create/edit a tender"
+// endpoint - what an admin can legitimately do is hide a bad/duplicate/
+// expired listing (or reactivate one) without touching its source data.
+router.patch('/opportunities/:id/status', async (req: AuthRequest, res: Response) => {
+  try {
+    const { status } = req.body;
+    const allowed = ['active', 'inactive', 'expired', 'cancelled'];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ error: `status must be one of: ${allowed.join(', ')}` });
+    }
+
+    const result = await db.query(
+      `UPDATE opportunities SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING id, status`,
+      [status, req.params.id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Opportunity not found' });
+    }
+
+    await db.query(
+      `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_values)
+       VALUES ($1, 'update', 'opportunity', $2, $3)`,
+      [req.user!.id, req.params.id, JSON.stringify({ status })]
+    );
+
+    res.json(result.rows[0]);
+  } catch (err: any) {
+    logger.error('Admin opportunity status update error:', err);
+    res.status(500).json({ error: 'Failed to update opportunity status' });
+  }
+});
+
+// GET /api/admin/companies - admin user/account management screen.
+router.get('/companies', async (req: AuthRequest, res: Response) => {
+  try {
+    const { q, status, page = '1', limit = '20' } = req.query as Record<string, string>;
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+    const offset = (pageNum - 1) * limitNum;
+
+    const conditions: string[] = ['c.deleted_at IS NULL'];
+    const params: any[] = [];
+    let idx = 1;
+    if (q) {
+      conditions.push(`(c.name ILIKE $${idx} OR c.email ILIKE $${idx})`);
+      params.push(`%${q}%`);
+      idx++;
+    }
+    if (status && status !== 'all') {
+      conditions.push(`c.status = $${idx++}`);
+      params.push(status);
+    }
+    const where = conditions.join(' AND ');
+
+    const [results, totalCount] = await Promise.all([
+      db.query(
+        `SELECT c.id, c.name, c.email, c.status, c.subscription_status, c.subscription_tier,
+                u.first_name, u.last_name
+         FROM companies c
+         LEFT JOIN users u ON u.company_id = c.id AND u.role = 'owner' AND u.deleted_at IS NULL
+         WHERE ${where}
+         ORDER BY c.created_at DESC
+         LIMIT $${idx++} OFFSET $${idx++}`,
+        [...params, limitNum, offset]
+      ),
+      db.query(`SELECT COUNT(*)::int as total FROM companies c WHERE ${where}`, params),
+    ]);
+
+    res.json({
+      results: results.rows,
+      pagination: { page: pageNum, limit: limitNum, total: totalCount.rows[0].total },
+    });
+  } catch (err: any) {
+    logger.error('Admin companies list error:', err);
+    res.status(500).json({ error: 'Failed to fetch companies' });
+  }
+});
+
+// PATCH /api/admin/companies/:id/status - suspend/reactivate an account.
+router.patch('/companies/:id/status', async (req: AuthRequest, res: Response) => {
+  try {
+    const { status } = req.body;
+    const allowed = ['active', 'suspended', 'pending'];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ error: `status must be one of: ${allowed.join(', ')}` });
+    }
+
+    const result = await db.query(
+      `UPDATE companies SET status = $1, updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL RETURNING id, status`,
+      [status, req.params.id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
+    await db.query(
+      `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_values)
+       VALUES ($1, 'update', 'company', $2, $3)`,
+      [req.user!.id, req.params.id, JSON.stringify({ status })]
+    );
+
+    res.json(result.rows[0]);
+  } catch (err: any) {
+    logger.error('Admin company status update error:', err);
+    res.status(500).json({ error: 'Failed to update company status' });
+  }
+});
+
 export default router;
