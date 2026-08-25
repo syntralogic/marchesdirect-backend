@@ -11,6 +11,7 @@ export interface AuthRequest extends Request {
     role: string;
     firstName: string;
     lastName: string;
+    mfaEnabled: boolean;
   };
   company?: any;
 }
@@ -45,6 +46,8 @@ export const authenticate = async (
     // Attach user to request - first/last name were previously dropped here even
     // though the DB row has them, so GET /api/auth/me (which returns req.user
     // as-is) could never surface the user's actual name to the frontend.
+    // mfaEnabled is included so the Security settings page can show real
+    // enabled/disabled 2FA state instead of guessing.
     req.user = {
       id: user.id,
       email: user.email,
@@ -52,6 +55,7 @@ export const authenticate = async (
       role: user.role,
       firstName: user.first_name,
       lastName: user.last_name,
+      mfaEnabled: !!user.mfa_enabled,
     };
 
     // Attach company to request
