@@ -506,6 +506,23 @@ CREATE INDEX company_alerts_company ON company_alerts(company_id);
 CREATE INDEX company_alerts_read ON company_alerts(is_read);
 
 -- ============================================================================
+-- 9B. FAVORITES / "MA SELECTION" (core action on every annonce)
+-- ============================================================================
+
+CREATE TABLE favorites (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  opportunity_id UUID NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+  UNIQUE(company_id, opportunity_id)
+);
+
+CREATE INDEX favorites_company ON favorites(company_id);
+CREATE INDEX favorites_opportunity ON favorites(opportunity_id);
+
+-- ============================================================================
 -- 10. CHATBOT CONVERSATIONS (Milestone 7)
 -- ============================================================================
 

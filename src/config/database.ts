@@ -173,4 +173,16 @@ const applyIncrementalMigrations = async (): Promise<void> => {
      WHERE id = (SELECT id FROM subscription_plans WHERE plan_code IS NULL AND price >= 500 ORDER BY price ASC, id ASC LIMIT 1)
        AND NOT EXISTS (SELECT 1 FROM subscription_plans WHERE plan_code = 'entreprise')`
   );
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS favorites (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      opportunity_id UUID NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(company_id, opportunity_id)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS favorites_company ON favorites(company_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS favorites_opportunity ON favorites(opportunity_id)`);
 };
