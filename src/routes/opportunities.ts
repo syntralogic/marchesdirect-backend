@@ -68,7 +68,8 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     const listResult = await db.query(
       `SELECT o.id, o.title, o.description, o.deadline, o.publication_date,
               o.estimated_value, o.currency, o.location_city, o.location_region,
-              o.ai_classification_status, o.ai_summary, o.status,
+              o.location_department, o.estimated_start_date, o.estimated_end_date,
+              o.ai_classification_status, o.ai_summary, o.ai_matched_trades, o.status,
               ot.code as journey, t.name as trade_name
        FROM opportunities o
        LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
