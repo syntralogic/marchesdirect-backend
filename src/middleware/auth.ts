@@ -3,6 +3,19 @@ import jwt from 'jsonwebtoken';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 
+// Fail fast rather than silently signing/verifying tokens with a known,
+// hardcoded string if these are ever left unset (e.g. a forgotten env var
+// on a fresh deploy). A guessable default here would let anyone forge a
+// valid auth token, so there is no fallback - the process refuses to start.
+const JWT_SECRET = process.env.JWT_SECRET;
+const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET;
+if (!JWT_SECRET || !REFRESH_TOKEN_SECRET) {
+  throw new Error(
+    'JWT_SECRET and REFRESH_TOKEN_SECRET must both be set in the environment. ' +
+    'Refusing to start with an insecure default - see .env.example / DEPLOY.md.'
+  );
+}
+
 export interface AuthRequest extends Request {
   user?: {
     id: string;
@@ -29,7 +42,7 @@ export const authenticate = async (
       return res.status(401).json({ error: 'No token provided' });
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
 
     // Fetch user from database
     const result = await db.query(
@@ -120,7 +133,7 @@ export const optionalAuth = (req: AuthRequest, res: Response, next: NextFunction
     const token = req.headers.authorization?.split(' ')[1];
     
     if (token) {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
+      const decoded = jwt.verify(token, JWT_SECRET) as any;
       req.user = decoded;
     }
   } catch (err) {
@@ -137,13 +150,13 @@ export const optionalAuth = (req: AuthRequest, res: Response, next: NextFunction
 export const generateTokens = (userId: string, email: string) => {
   const accessToken = jwt.sign(
     { userId, email },
-    process.env.JWT_SECRET || 'secret',
+    JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN || '7d' } as jwt.SignOptions
   );
 
   const refreshToken = jwt.sign(
     { userId, email },
-    process.env.REFRESH_TOKEN_SECRET || 'refresh_secret',
+    REFRESH_TOKEN_SECRET,
     { expiresIn: process.env.REFRESH_TOKEN_EXPIRES_IN || '30d' } as jwt.SignOptions
   );
 
@@ -153,7 +166,7 @@ export const generateTokens = (userId: string, email: string) => {
 // Verify refresh token
 export const verifyRefreshToken = (token: string) => {
   try {
-    return jwt.verify(token, process.env.REFRESH_TOKEN_SECRET || 'refresh_secret') as any;
+    return jwt.verify(token, REFRESH_TOKEN_SECRET) as any;
   } catch (err) {
     throw new Error('Invalid refresh token');
   }
