@@ -12,33 +12,45 @@ const router = Router();
 // doesn't have an account yet).
 
 // POST /api/crm/leads - capture a new lead (public)
+//
+// email is intentionally optional here: the callback-request flow only
+// collects a phone number by design (no email field in that form), so
+// requiring email would force the frontend to fabricate one just to pass
+// validation - which would pollute crm_leads.email and get forwarded to the
+// real CRM on sync. Instead we validate email's *format* when present, and
+// separately require that at least one contact method (email or phone) was
+// actually provided.
 router.post(
   '/',
   [
     body('brandId').notEmpty(),
-    body('email').isEmail().normalizeEmail(),
+    body('email').optional({ checkFalsy: true }).isEmail().normalizeEmail(),
+    body('phone').optional({ checkFalsy: true }).isString().trim().isLength({ min: 6 }),
   ],
   async (req: Request, res: Response) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ error: 'Validation failed', details: errors.array() });
     }
+    if (!req.body.email && !req.body.phone) {
+      return res.status(400).json({ error: 'Un email ou un téléphone est requis' });
+    }
 
     try {
       const {
         brandId, firstName, lastName, email, phone, companyName,
-        industryTrade, locationCity, locationRegion, leadSource,
+        industryTrade, locationCity, locationRegion, leadSource, message,
       } = req.body;
 
       const result = await db.query(
         `INSERT INTO crm_leads
           (brand_id, first_name, last_name, email, phone, company_name, industry_trade,
-           location_city, location_region, lead_source, crm_sync_status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending')
+           location_city, location_region, lead_source, message, crm_sync_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending')
          RETURNING id, created_at`,
         [
           brandId, firstName, lastName, email, phone, companyName,
-          industryTrade, locationCity, locationRegion, leadSource || 'website_form',
+          industryTrade, locationCity, locationRegion, leadSource || 'website_form', message,
         ]
       );
 

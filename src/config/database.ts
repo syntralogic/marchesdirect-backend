@@ -111,6 +111,7 @@ export const ensureSchema = async (): Promise<void> => {
     );
     if (check.rows[0]?.exists) {
       logger.info('✅ Schema already present, skipping auto-migration');
+      await applyIncrementalMigrations();
       return;
     }
 
@@ -124,4 +125,14 @@ export const ensureSchema = async (): Promise<void> => {
     logger.error('❌ Auto-migration failed — schema may be partially applied. Check manually.', err);
     throw err;
   }
+};
+
+// Small, idempotent column/table additions for databases that already have
+// the full schema from before a given change was made. Each statement uses
+// IF NOT EXISTS so this is safe to run on every boot alongside ensureSchema's
+// early-return path above. Add new lines here (never edit old ones) when
+// schema.sql gains a field that already-provisioned databases won't pick up
+// automatically.
+const applyIncrementalMigrations = async (): Promise<void> => {
+  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
 };

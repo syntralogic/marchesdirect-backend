@@ -620,6 +620,7 @@ CREATE TABLE crm_leads (
   location_region VARCHAR(255),
   
   lead_source VARCHAR(100),                 -- 'organic_search', 'ad', 'landing_page', 'signup'
+  message TEXT,                             -- free-text message from contact/callback/appointment forms
   
   crm_system VARCHAR(50),                   -- 'hubspot', 'pipedrive', etc.
   crm_contact_id VARCHAR(255),              -- Remote ID in CRM
