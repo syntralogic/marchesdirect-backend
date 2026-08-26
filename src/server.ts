@@ -18,6 +18,18 @@ dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 const app: Express = express();
 const PORT = process.env.PORT || 5000;
 
+// Render (and most PaaS hosts) sit behind a reverse proxy, so the real
+// client IP arrives in the X-Forwarded-For header rather than the raw
+// socket address. Without this, Express doesn't trust that header, which
+// makes express-rate-limit unable to tell requests apart by IP - it logs
+// an ERR_ERL_UNEXPECTED_X_FORWARDED_FOR warning and, depending on version,
+// can fall back to lumping every visitor behind the proxy into the same
+// rate-limit bucket. That's a plausible reason signup ("too many
+// requests") could fail even for a person's very first attempt: someone
+// else's earlier attempts already used up the shared bucket.
+// "1" = trust exactly one hop of proxy, which matches Render's setup.
+app.set('trust proxy', 1);
+
 // ============================================================================
 // MIDDLEWARE SETUP
 // ============================================================================
