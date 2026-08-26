@@ -185,4 +185,21 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS favorites_company ON favorites(company_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS favorites_opportunity ON favorites(opportunity_id)`);
+
+  // Signup was failing in production with "No brands configured in system"
+  // (registerCompanyAndUser does SELECT id FROM brands LIMIT 1 and throws if
+  // empty). ensureSchema() only ever runs schema.sql's "INSERT INTO brands"
+  // seed once, the very first time it sees no `opportunities` table at all -
+  // if brands was ever emptied afterwards (or schema.sql ran partially) on an
+  // already-provisioned database, it stays empty forever since ensureSchema
+  // skips re-running schema.sql once `opportunities` exists. This runs on
+  // every boot and is a no-op once at least one brand exists.
+  await pool.query(`
+    INSERT INTO brands (code, name, domain)
+    SELECT * FROM (VALUES
+      ('brand_1', 'BOAMP Pro', 'boamp-pro.fr'),
+      ('brand_2', 'Marchés Locaux', 'marches-locaux.fr')
+    ) AS defaults(code, name, domain)
+    WHERE NOT EXISTS (SELECT 1 FROM brands)
+  `);
 };
