@@ -616,15 +616,18 @@ export const matchOpportunitiesToCompany = async (
            t.id IN (SELECT id FROM trades WHERE name = ANY($6::text[]))
            OR o.ai_matched_trades::text ILIKE ANY($6::text[])
          )
-         -- TODO(review with client): $7 is bound to company.annual_revenue below,
-         -- used here as a MINIMUM opportunity value. That means a company with high
-         -- annual revenue gets smaller/subcontracting opportunities filtered OUT
-         -- entirely, which seems backwards for a platform whose "sous-traitance"
-         -- journey is specifically about matching companies to smaller lots. Left
-         -- as-is rather than silently changed - needs a real business-rule decision,
-         -- not a guess.
+         -- Capacity check: don't recommend contracts far beyond what the
+         -- company can plausibly deliver/bond for. Public-procurement buyers
+         -- commonly expect a bidder's annual revenue to cover a multiple of
+         -- the contract value (a basic solvency signal) - 3x is a permissive,
+         -- conservative multiplier so this filters out only clearly-oversized
+         -- contracts, not merely "smaller than average" ones. This replaces
+         -- an earlier version of this filter that used annual_revenue as a
+         -- MINIMUM opportunity value instead, which had the effect backwards:
+         -- it hid smaller/typical tenders from higher-revenue companies
+         -- entirely, undermining the matching engine's core purpose.
          AND (
-           $7::decimal IS NULL OR o.estimated_value >= $7
+           $7::decimal IS NULL OR o.estimated_value <= $7 * 3
          )
          AND (
            $8::decimal IS NULL OR o.estimated_value <= $8
@@ -643,7 +646,7 @@ export const matchOpportunitiesToCompany = async (
         company.location_longitude,
         company.location_latitude,
         trades,
-        company.annual_revenue || 0,
+        company.annual_revenue || null,
         null,
         company.working_radius_km || 100,
       ]
