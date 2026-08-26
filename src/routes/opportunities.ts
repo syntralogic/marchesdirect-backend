@@ -122,6 +122,79 @@ const extractSourceUrl = (rawData: any): string | null => {
   return found || null;
 };
 
+// GET /api/opportunities/stats/regions - opportunity count per French region,
+// for the interactive map on /zones. Groups on location_region as stored by
+// the connectors (BOAMP etc. give a region name directly on most notices).
+router.get('/stats/regions', async (req: Request, res: Response) => {
+  try {
+    const result = await db.query(
+      `SELECT location_region AS region, COUNT(*)::int AS count
+       FROM opportunities
+       WHERE location_region IS NOT NULL AND location_region != ''
+         AND status != 'archived'
+       GROUP BY location_region
+       ORDER BY count DESC`
+    );
+    res.json({ regions: result.rows });
+  } catch (err: any) {
+    logger.error('Region stats error:', err);
+    res.status(500).json({ error: 'Failed to load region stats' });
+  }
+});
+
+// GET /api/opportunities/stats/departments - same, grouped by French
+// department (numeric code, e.g. "33" for Gironde).
+router.get('/stats/departments', async (req: Request, res: Response) => {
+  try {
+    const result = await db.query(
+      `SELECT location_department AS department, COUNT(*)::int AS count
+       FROM opportunities
+       WHERE location_department IS NOT NULL AND location_department != ''
+         AND status != 'archived'
+       GROUP BY location_department
+       ORDER BY count DESC`
+    );
+    res.json({ departments: result.rows });
+  } catch (err: any) {
+    logger.error('Department stats error:', err);
+    res.status(500).json({ error: 'Failed to load department stats' });
+  }
+});
+
+// GET /api/opportunities/stats/near?lat=&lng=&radius_km= - count within a
+// radius of a point, for the "Villes" (city) tab. Uses the Haversine formula
+// directly in SQL since PostGIS isn't set up on this database.
+router.get('/stats/near', async (req: Request, res: Response) => {
+  try {
+    const lat = parseFloat(req.query.lat as string);
+    const lng = parseFloat(req.query.lng as string);
+    const radiusKm = parseFloat((req.query.radius_km as string) || '50');
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return res.status(400).json({ error: 'lat and lng are required numeric query params' });
+    }
+    const result = await db.query(
+      `SELECT COUNT(*)::int AS count
+       FROM opportunities
+       WHERE location_latitude IS NOT NULL AND location_longitude IS NOT NULL
+         AND status != 'archived'
+         AND (
+           6371 * acos(
+             LEAST(1, GREATEST(-1,
+               cos(radians($1)) * cos(radians(location_latitude)) *
+               cos(radians(location_longitude) - radians($2)) +
+               sin(radians($1)) * sin(radians(location_latitude))
+             ))
+           )
+         ) <= $3`,
+      [lat, lng, radiusKm]
+    );
+    res.json({ count: result.rows[0]?.count ?? 0, radius_km: radiusKm });
+  } catch (err: any) {
+    logger.error('Near stats error:', err);
+    res.status(500).json({ error: 'Failed to load nearby stats' });
+  }
+});
+
 // GET /api/opportunities/:id - detail page
 router.get('/:id', optionalAuth, async (req: Request, res: Response) => {
   try {
