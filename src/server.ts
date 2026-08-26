@@ -82,6 +82,7 @@ app.use('/api/auth', require('./routes/auth').default);
 app.use('/api/opportunities', require('./routes/opportunities').default);
 app.use('/api/trades', require('./routes/trades').default);
 app.use('/api/brands', require('./routes/brandsPublic').default);
+app.use('/api/seo-pages', require('./routes/seoPagesPublic').default);
 app.use('/api/subscriptions', require('./routes/subscriptions').default);
 // CRM lead capture must be public: it's submitted from anonymous marketing
 // pages (pricing page, contact form) before someone has an account.
@@ -97,6 +98,7 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 app.use('/api/dashboard', authenticate, require('./routes/dashboard').default);
 app.use('/api/tenders', authenticate, require('./routes/tenders').default);
 app.use('/api/alerts', authenticate, require('./routes/alerts').default);
+app.use('/api/favorites', authenticate, require('./routes/favorites').default);
 app.use('/api/chatbot', authenticate, require('./routes/chatbot').default);
 app.use('/api/documents', authenticate, require('./routes/documents').default);
 app.use('/api/crm', authenticate, require('./routes/crm').default);

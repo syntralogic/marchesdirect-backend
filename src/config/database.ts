@@ -111,7 +111,15 @@ export const ensureSchema = async (): Promise<void> => {
     );
     if (check.rows[0]?.exists) {
       logger.info('✅ Schema already present, skipping auto-migration');
-      await applyIncrementalMigrations();
+      // A backfill/migration mistake must never take the whole server down -
+      // it did exactly that on 2026-08-25 (a plan_code backfill matched more
+      // than one row and hit its own UNIQUE constraint, crashing boot). Log
+      // and continue instead of throwing past this point.
+      try {
+        await applyIncrementalMigrations();
+      } catch (migrationErr) {
+        logger.error('⚠️ Incremental migration step failed — server will still start. Check manually.', migrationErr);
+      }
       return;
     }
 
@@ -135,4 +143,46 @@ export const ensureSchema = async (): Promise<void> => {
 // automatically.
 const applyIncrementalMigrations = async (): Promise<void> => {
   await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
+
+  // Stable identifier for the 3 pricing tiers (decouverte/pro/entreprise) so
+  // the frontend Tarifs page and the checkout endpoint can agree on which
+  // row is which without guessing from price - a `code` never changes even
+  // if a plan's price does, unlike matching on `price`.
+  //
+  // Each backfill below updates AT MOST ONE row (via the id = subquery),
+  // never a whole price-range in one statement. The original version used
+  // a bare `WHERE price > 0 AND price < 500` etc., which on a database that
+  // had more than one legacy plan in that bracket (real production did -
+  // leftover pre-launch rows) tried to set the same plan_code on multiple
+  // rows in one UPDATE and hit the UNIQUE constraint - crashed boot on
+  // 2026-08-25. If a bucket has more than one candidate now, this picks
+  // the cheapest and leaves the rest uncoded rather than failing.
+  await pool.query(`ALTER TABLE subscription_plans ADD COLUMN IF NOT EXISTS plan_code VARCHAR(50) UNIQUE`);
+  await pool.query(
+    `UPDATE subscription_plans SET plan_code = 'decouverte'
+     WHERE id = (SELECT id FROM subscription_plans WHERE plan_code IS NULL AND price = 0 ORDER BY id ASC LIMIT 1)
+       AND NOT EXISTS (SELECT 1 FROM subscription_plans WHERE plan_code = 'decouverte')`
+  );
+  await pool.query(
+    `UPDATE subscription_plans SET plan_code = 'pro'
+     WHERE id = (SELECT id FROM subscription_plans WHERE plan_code IS NULL AND price > 0 AND price < 500 ORDER BY price ASC, id ASC LIMIT 1)
+       AND NOT EXISTS (SELECT 1 FROM subscription_plans WHERE plan_code = 'pro')`
+  );
+  await pool.query(
+    `UPDATE subscription_plans SET plan_code = 'entreprise'
+     WHERE id = (SELECT id FROM subscription_plans WHERE plan_code IS NULL AND price >= 500 ORDER BY price ASC, id ASC LIMIT 1)
+       AND NOT EXISTS (SELECT 1 FROM subscription_plans WHERE plan_code = 'entreprise')`
+  );
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS favorites (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      opportunity_id UUID NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(company_id, opportunity_id)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS favorites_company ON favorites(company_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS favorites_opportunity ON favorites(opportunity_id)`);
 };
