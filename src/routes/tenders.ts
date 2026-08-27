@@ -4,6 +4,7 @@ import { logger } from '../utils/logger';
 import { AuthRequest } from '../middleware/auth';
 import { generateBidPackageZip, uploadToS3IfConfigured } from '../services/documentService';
 import { analyzeTenderDocuments, generateTechnicalMemo } from '../services/aiService';
+import { buildUnifiedDocumentChecklist } from '../utils/documentMatching';
 
 const router = Router();
 
@@ -198,16 +199,32 @@ router.post('/bid/:bidId/generate', async (req: AuthRequest, res: Response) => {
     const company = companyResult.rows[0];
     const availableDocTypes = documentsResult.rows.map((d) => d.document_type);
 
-    // Required documents for a standard French public tender response. The DCE
-    // analysis (tender.required_documents) extracts this same list in the buyer's
-    // own wording per tender (e.g. "Attestation d'assurance decennale") - it's
-    // surfaced separately below rather than auto-matched against this generic
-    // internal checklist, since the two use different vocabularies and a wrong
-    // silent auto-match could tell a company it's missing something it isn't (or
-    // vice versa) on a page whose whole purpose is compliance accuracy.
+    // Required documents for a standard French public tender response, merged
+    // with the DCE analysis's per-tender, buyer-worded list (tender.required_documents)
+    // via documentMatching.ts's deterministic keyword rules. Anything that doesn't
+    // confidently match an internal type is kept as 'needs_manual_review' rather
+    // than guessed - see documentMatching.ts for why.
     const requiredDocTypes = ['kbis', 'insurance', 'dc1', 'dc2', 'dume', 'attestation_fiscale', 'attestation_sociale'];
-    const missingDocuments = requiredDocTypes.filter((d) => !availableDocTypes.includes(d));
     const tenderSpecificRequiredDocuments: string[] = bid.tender_required_documents || [];
+    const documentChecklist = buildUnifiedDocumentChecklist(
+      tenderSpecificRequiredDocuments,
+      requiredDocTypes,
+      availableDocTypes
+    );
+    // Kept for backward compatibility with anything still reading the old
+    // internal-codes-only shape (e.g. dashboard widgets built against it).
+    const missingDocuments = requiredDocTypes.filter((d) => !availableDocTypes.includes(d));
+    // What actually gets printed in the downloadable bid package (see
+    // documentService.ts) - the merged, human-readable checklist, so a
+    // tender-specific requirement the DCE caught (even one with no internal
+    // type match) shows up in the pack instead of only the 7 generic codes.
+    const missingDocumentsForPackage = documentChecklist
+      .filter((item) => item.status !== 'present')
+      .map((item) =>
+        item.status === 'needs_manual_review'
+          ? `${item.requirement} (a verifier manuellement - non reconnu automatiquement)`
+          : item.requirement
+      );
 
     // Engagement act stays a direct template fill (per spec 6.3 this is a
     // pre-filled form the company reviews/signs, not AI-drafted prose) - but it
@@ -223,19 +240,26 @@ router.post('/bid/:bidId/generate', async (req: AuthRequest, res: Response) => {
          status = 'in_progress',
          updated_at = NOW()
        WHERE id = $3`,
-      [engagementActText, JSON.stringify(missingDocuments), req.params.bidId]
+      [engagementActText, JSON.stringify(missingDocumentsForPackage), req.params.bidId]
     );
 
     const result = await db.query('SELECT * FROM bid_responses WHERE id = $1', [req.params.bidId]);
+    const needsManualReviewCount = documentChecklist.filter((i) => i.status === 'needs_manual_review').length;
 
     res.json({
       bid: result.rows[0],
       technicalMemoAiGenerated: memoResult.aiGenerated,
+      documentChecklist,
+      // Kept alongside documentChecklist for any existing frontend code built
+      // against the old two-list shape - documentChecklist is the merged,
+      // authoritative view and should be preferred for new UI.
       missingDocuments,
       tenderSpecificRequiredDocuments,
-      note: missingDocuments.length > 0
-        ? 'Certains documents obligatoires manquent dans le profil entreprise et doivent etre ajoutes avant soumission.'
-        : 'Tous les documents obligatoires sont presents dans le profil entreprise.',
+      note: missingDocumentsForPackage.length === 0
+        ? 'Tous les documents obligatoires sont presents dans le profil entreprise.'
+        : needsManualReviewCount > 0
+          ? `Certains documents manquent ou n'ont pas pu etre reconnus automatiquement (${needsManualReviewCount} a verifier manuellement).`
+          : 'Certains documents obligatoires manquent dans le profil entreprise et doivent etre ajoutes avant soumission.',
     });
   } catch (err: any) {
     logger.error('Bid document generation error:', err);

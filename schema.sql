@@ -789,15 +789,29 @@ CREATE INDEX opportunities_title ON opportunities USING BTREE(title);
 CREATE INDEX opportunities_description_trgm ON opportunities USING GIN(description gin_trgm_ops);
 
 -- Materialized view for fast search (refresh periodically)
+-- Columns mirror exactly what src/routes/opportunities.ts GET / selects from
+-- `opportunities` + `opportunity_types` + `trades`, so the route can query this
+-- view directly without changing its response shape. If you add a column to
+-- that route's SELECT, add it here too or the route will break on switchover.
 CREATE MATERIALIZED VIEW opportunity_search_index AS
 SELECT 
   o.id,
   o.title,
   o.description,
+  o.deadline,
+  o.publication_date,
+  o.estimated_value,
+  o.currency,
   o.location_city,
   o.location_region,
-  o.deadline,
-  o.estimated_value,
+  o.location_department,
+  o.estimated_start_date,
+  o.estimated_end_date,
+  o.ai_classification_status,
+  o.ai_summary,
+  o.ai_matched_trades,
+  o.status,
+  o.trade_id,
   ot.code as opportunity_type,
   t.name as trade_name,
   c.code as brand_code,
@@ -811,7 +825,7 @@ LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
 LEFT JOIN trades t ON o.trade_id = t.id
 LEFT JOIN data_sources ds ON o.source_id = ds.id
 LEFT JOIN brands c ON ot.brand_id = c.id
-WHERE o.deleted_at IS NULL AND o.status NOT IN ('cancelled', 'expired');
+WHERE o.deleted_at IS NULL AND o.status NOT IN ('cancelled', 'expired', 'merged');
 
 CREATE INDEX opportunity_search_index_search ON opportunity_search_index USING GIN(search_vector);
 CREATE INDEX opportunity_search_index_deadline ON opportunity_search_index(deadline);

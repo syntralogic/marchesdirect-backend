@@ -22,40 +22,51 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       limit = '20',
     } = req.query as Record<string, string>;
 
-    const conditions: string[] = ["o.deleted_at IS NULL", "o.status NOT IN ('cancelled', 'expired', 'merged')"];
+    // Reads from opportunity_search_index (refreshed every 15 min by
+    // jobs/searchIndexRefresh.ts) instead of joining `opportunities` on every
+    // request - the view pre-joins opportunity_types/trades and carries its
+    // own GIN-indexed search_vector, which is what actually pays off at the
+    // 1M-row scale Milestone 12's load test targets. Trade-off: listings can
+    // be up to ~15 min stale here (new/updated rows won't appear until the
+    // next refresh) - acceptable for a browse/search page, but do NOT reuse
+    // this view for anything that needs the current row (e.g. the bid flow
+    // reads `opportunities` directly for that reason, unchanged by this).
+    // deleted_at/cancelled/expired/merged are already filtered by the view's
+    // own WHERE clause (see schema.sql), so they don't need repeating here.
+    const conditions: string[] = ['1=1'];
     const params: any[] = [];
     let idx = 1;
 
     if (journey) {
-      conditions.push(`ot.code = $${idx++}`);
+      conditions.push(`osi.opportunity_type = $${idx++}`);
       params.push(journey);
     }
     if (q) {
-      conditions.push(`o.search_vector @@ plainto_tsquery('french', $${idx++})`);
+      conditions.push(`osi.search_vector @@ plainto_tsquery('french', $${idx++})`);
       params.push(q);
     }
     if (trade_id) {
-      conditions.push(`o.trade_id = $${idx++}`);
+      conditions.push(`osi.trade_id = $${idx++}`);
       params.push(trade_id);
     }
     if (region) {
-      conditions.push(`o.location_region ILIKE $${idx++}`);
+      conditions.push(`osi.location_region ILIKE $${idx++}`);
       params.push(`%${region}%`);
     }
     if (city) {
-      conditions.push(`o.location_city ILIKE $${idx++}`);
+      conditions.push(`osi.location_city ILIKE $${idx++}`);
       params.push(`%${city}%`);
     }
     if (department) {
-      conditions.push(`o.location_department = $${idx++}`);
+      conditions.push(`osi.location_department = $${idx++}`);
       params.push(department);
     }
     if (min_value) {
-      conditions.push(`o.estimated_value >= $${idx++}`);
+      conditions.push(`osi.estimated_value >= $${idx++}`);
       params.push(min_value);
     }
     if (max_value) {
-      conditions.push(`o.estimated_value <= $${idx++}`);
+      conditions.push(`osi.estimated_value <= $${idx++}`);
       params.push(max_value);
     }
 
@@ -66,24 +77,21 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     const whereClause = conditions.join(' AND ');
 
     const listResult = await db.query(
-      `SELECT o.id, o.title, o.description, o.deadline, o.publication_date,
-              o.estimated_value, o.currency, o.location_city, o.location_region,
-              o.location_department, o.estimated_start_date, o.estimated_end_date,
-              o.ai_classification_status, o.ai_summary, o.ai_matched_trades, o.status,
-              ot.code as journey, t.name as trade_name
-       FROM opportunities o
-       LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
-       LEFT JOIN trades t ON o.trade_id = t.id
+      `SELECT osi.id, osi.title, osi.description, osi.deadline, osi.publication_date,
+              osi.estimated_value, osi.currency, osi.location_city, osi.location_region,
+              osi.location_department, osi.estimated_start_date, osi.estimated_end_date,
+              osi.ai_classification_status, osi.ai_summary, osi.ai_matched_trades, osi.status,
+              osi.opportunity_type as journey, osi.trade_name
+       FROM opportunity_search_index osi
        WHERE ${whereClause}
-       ORDER BY o.deadline ASC NULLS LAST
+       ORDER BY osi.deadline ASC NULLS LAST
        LIMIT $${idx++} OFFSET $${idx++}`,
       [...params, limitNum, offset]
     );
 
     const countResult = await db.query(
       `SELECT COUNT(*) as total
-       FROM opportunities o
-       LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+       FROM opportunity_search_index osi
        WHERE ${whereClause}`,
       params
     );
