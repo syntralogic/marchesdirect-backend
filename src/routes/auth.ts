@@ -13,6 +13,7 @@ import {
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { resolveBrandId } from '../utils/brandResolution';
 
 const router = Router();
 
@@ -33,7 +34,12 @@ router.post(
     }
 
     try {
-      const result = await registerCompanyAndUser(req.body);
+      // Resolve which brand this signup belongs to from the Host header the
+      // request actually arrived on (Milestone 10) - without this every
+      // signup silently landed on the first brand regardless of which
+      // brand's domain the person was actually using.
+      const brandId = await resolveBrandId(req);
+      const result = await registerCompanyAndUser(req.body, brandId);
       res.status(201).json(result);
     } catch (err: any) {
       logger.error('Register route error:', err);

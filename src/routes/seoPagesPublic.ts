@@ -1,20 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { resolveBrandId } from '../utils/brandResolution';
 
 const router = Router();
-
-// Resolves the requesting brand the same way GET /api/brands/current does -
-// match Host header against brands.domain, fall back to the first brand for
-// local dev / the single-brand site today.
-const resolveBrandId = async (req: Request): Promise<string | null> => {
-  const host = (req.hostname || '').replace(/^www\./, '');
-  let result = await db.query('SELECT id FROM brands WHERE domain = $1 LIMIT 1', [host]);
-  if (result.rows.length === 0) {
-    result = await db.query('SELECT id FROM brands ORDER BY created_at ASC LIMIT 1');
-  }
-  return result.rows[0]?.id ?? null;
-};
 
 // GET /api/seo-pages - published slugs only, for the frontend's sitemap.xml
 // generator. Milestone 11 auto-generates one row per (trade x region) with

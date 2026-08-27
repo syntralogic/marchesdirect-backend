@@ -16,6 +16,97 @@ const stripe = stripeKey ? new Stripe(stripeKey, { apiVersion: '2023-10-16' }) :
 // All admin routes require admin or super_admin role
 router.use(requireRole(['admin', 'super_admin']));
 
+// ============================================================================
+// BRANDS (Milestone 10 - second brand duplication)
+// ============================================================================
+// Lets an admin actually stand up a second brand from the dashboard instead
+// of needing a manual DB insert/migration edit - that gap was the real
+// reason Milestone 10 had zero code: brands.domain/logo_url/color_primary/
+// color_secondary already existed as columns and were already read by
+// brandResolution.ts, but nothing ever let an admin *set* them for a new
+// brand. Every existing table that needs to be brand-aware (companies,
+// crm_leads, seo_pages) already carries brand_id - duplication is
+// config-only, no schema/code fork per brand, matching the "no code
+// duplication" acceptance criteria.
+
+router.get('/brands', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await db.query('SELECT * FROM brands ORDER BY created_at ASC');
+    res.json(result.rows);
+  } catch (err: any) {
+    logger.error('Brands list error:', err);
+    res.status(500).json({ error: 'Failed to fetch brands' });
+  }
+});
+
+router.post('/brands', async (req: AuthRequest, res: Response) => {
+  try {
+    const { code, name, domain, logoUrl, colorPrimary, colorSecondary, language, regionFocus } = req.body;
+
+    if (!code || !name || !domain) {
+      return res.status(400).json({ error: 'code, name and domain are required' });
+    }
+
+    const result = await db.query(
+      `INSERT INTO brands (code, name, domain, logo_url, color_primary, color_secondary, language, region_focus)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [
+        code,
+        name,
+        domain,
+        logoUrl || null,
+        colorPrimary || null,
+        colorSecondary || null,
+        language || 'fr',
+        regionFocus || null,
+      ]
+    );
+
+    logger.info(`[Admin] New brand created: ${result.rows[0].code} (${domain})`);
+    res.status(201).json(result.rows[0]);
+  } catch (err: any) {
+    if (err.code === '23505') {
+      // unique_violation - code or domain already taken
+      return res.status(409).json({ error: 'A brand with that code or domain already exists' });
+    }
+    logger.error('Brand creation error:', err);
+    res.status(500).json({ error: 'Failed to create brand' });
+  }
+});
+
+router.put('/brands/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const { name, domain, logoUrl, colorPrimary, colorSecondary, language, regionFocus } = req.body;
+
+    const result = await db.query(
+      `UPDATE brands SET
+         name = COALESCE($1, name),
+         domain = COALESCE($2, domain),
+         logo_url = COALESCE($3, logo_url),
+         color_primary = COALESCE($4, color_primary),
+         color_secondary = COALESCE($5, color_secondary),
+         language = COALESCE($6, language),
+         region_focus = COALESCE($7, region_focus),
+         updated_at = NOW()
+       WHERE id = $8
+       RETURNING *`,
+      [name, domain, logoUrl, colorPrimary, colorSecondary, language, regionFocus, req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Brand not found' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err: any) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'That domain is already used by another brand' });
+    }
+    logger.error('Brand update error:', err);
+    res.status(500).json({ error: 'Failed to update brand' });
+  }
+});
+
 // GET /api/admin/data-sources - connector status (proof for Milestone 2)
 router.get('/data-sources', async (req: AuthRequest, res: Response) => {
   try {
