@@ -237,4 +237,21 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     `UPDATE opportunities SET dce_documents_status = 'pending' WHERE dce_documents_status IS NULL`
   );
   await pool.query(`ALTER TABLE tenders ADD COLUMN IF NOT EXISTS source_completeness VARCHAR(50)`);
+
+  // Reusable company pricing catalog (Milestone 9.2) - see schema.sql comment.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS company_pricing_items (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      label VARCHAR(255) NOT NULL,
+      category VARCHAR(100),
+      unit VARCHAR(50),
+      default_unit_price DECIMAL(12, 2),
+      is_active BOOLEAN DEFAULT true,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS company_pricing_items_company ON company_pricing_items(company_id)`);
+  await pool.query(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS pricing_schedule_source VARCHAR(50)`);
 };

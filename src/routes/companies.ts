@@ -237,6 +237,82 @@ router.post('/me/policies', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// -- Pricing catalog (reusable BPU line items - Milestone 9.2) --
+// Built once by the company; used to pre-fill a new bid's pricing schedule
+// so they only adjust quantities/prices specific to that tender instead of
+// retyping a full BPU from scratch every time. See /bid/:bidId/generate.
+router.get('/me/pricing-catalog', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await db.query(
+      'SELECT * FROM company_pricing_items WHERE company_id = $1 AND is_active = true ORDER BY category, label',
+      [req.user!.companyId]
+    );
+    res.json(result.rows);
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to fetch pricing catalog' });
+  }
+});
+
+router.post('/me/pricing-catalog', async (req: AuthRequest, res: Response) => {
+  try {
+    const { label, category, unit, defaultUnitPrice } = req.body;
+    if (!label) {
+      return res.status(400).json({ error: 'label is required' });
+    }
+    const result = await db.query(
+      `INSERT INTO company_pricing_items (company_id, label, category, unit, default_unit_price)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [req.user!.companyId, label, category || null, unit || null, defaultUnitPrice || null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to save pricing item' });
+  }
+});
+
+router.put('/me/pricing-catalog/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const { label, category, unit, defaultUnitPrice, isActive } = req.body;
+    const result = await db.query(
+      `UPDATE company_pricing_items SET
+         label = COALESCE($1, label),
+         category = COALESCE($2, category),
+         unit = COALESCE($3, unit),
+         default_unit_price = COALESCE($4, default_unit_price),
+         is_active = COALESCE($5, is_active),
+         updated_at = NOW()
+       WHERE id = $6 AND company_id = $7
+       RETURNING *`,
+      [label, category, unit, defaultUnitPrice, isActive, req.params.id, req.user!.companyId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Pricing item not found' });
+    }
+    res.json(result.rows[0]);
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to update pricing item' });
+  }
+});
+
+// Soft-delete only (is_active = false) - past bids reference these amounts
+// historically; hard-deleting would silently corrupt an already-submitted
+// bid package's audit trail.
+router.delete('/me/pricing-catalog/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await db.query(
+      `UPDATE company_pricing_items SET is_active = false, updated_at = NOW()
+       WHERE id = $1 AND company_id = $2 RETURNING id`,
+      [req.params.id, req.user!.companyId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Pricing item not found' });
+    }
+    res.status(204).send();
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to remove pricing item' });
+  }
+});
+
 // GET /api/companies/:companyId - cross-company lookup guarded by checkCompanyAccess
 router.get('/:companyId', checkCompanyAccess, async (req: AuthRequest, res: Response) => {
   try {

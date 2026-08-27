@@ -167,6 +167,16 @@ router.put('/bid/:bidId', async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // Any direct edit to the pricing schedule through this endpoint means the
+    // company has taken over from the profile-catalog pre-fill - mark it
+    // 'manual' so a later POST /bid/:bidId/generate (e.g. after re-running
+    // the technical memo) never silently clobbers their edits back to catalog
+    // defaults. See /bid/:bidId/generate for the pre-fill side of this.
+    if (req.body.pricing_schedule_json !== undefined) {
+      updates.push(`pricing_schedule_source = $${idx++}`);
+      params.push('manual');
+    }
+
     if (updates.length === 0) {
       return res.status(400).json({ error: 'No fields to update' });
     }
@@ -216,11 +226,19 @@ router.post('/bid/:bidId/generate', async (req: AuthRequest, res: Response) => {
     }
     const bid = bidResult.rows[0];
 
-    const [companyResult, documentsResult] = await Promise.all([
+    const [companyResult, documentsResult, existingBidResult, pricingCatalogResult] = await Promise.all([
       db.query('SELECT * FROM companies WHERE id = $1', [req.user!.companyId]),
       db.query(
         `SELECT document_type FROM company_documents
          WHERE company_id = $1 AND deleted_at IS NULL AND (expiry_date IS NULL OR expiry_date > CURRENT_DATE)`,
+        [req.user!.companyId]
+      ),
+      db.query('SELECT pricing_schedule_json, pricing_schedule_source FROM bid_responses WHERE id = $1', [
+        req.params.bidId,
+      ]),
+      db.query(
+        `SELECT label, category, unit, default_unit_price FROM company_pricing_items
+         WHERE company_id = $1 AND is_active = true ORDER BY category, label`,
         [req.user!.companyId]
       ),
     ]);
@@ -262,14 +280,49 @@ router.post('/bid/:bidId/generate', async (req: AuthRequest, res: Response) => {
 
     const memoResult = await generateTechnicalMemo(req.params.bidId);
 
+    // Pre-fill the pricing schedule from the company's reusable catalog only
+    // the first time this bid is generated (or if it was never customized) -
+    // once the company has edited it ('manual'), regenerating the technical
+    // memo/checklist must never silently overwrite their pricing work. This
+    // is the actual "adjust only what's specific to the new tender" behavior
+    // the profile-reuse requirement (section 6.7) asks for: quantities start
+    // blank (per-tender), unit prices start from the company's own defaults.
+    const existingBid = existingBidResult.rows[0];
+    const alreadyCustomized = existingBid?.pricing_schedule_source === 'manual';
+    let pricingScheduleJson = existingBid?.pricing_schedule_json;
+    let pricingScheduleSource = existingBid?.pricing_schedule_source;
+
+    if (!alreadyCustomized) {
+      if (pricingCatalogResult.rows.length > 0) {
+        pricingScheduleJson = pricingCatalogResult.rows.map((item) => ({
+          label: item.label,
+          category: item.category,
+          unit: item.unit,
+          unit_price: item.default_unit_price !== null ? Number(item.default_unit_price) : undefined,
+          quantity: undefined, // always tender-specific - never carried over from the catalog
+        }));
+        pricingScheduleSource = 'profile_catalog';
+      } else if (!pricingScheduleJson) {
+        pricingScheduleJson = [];
+      }
+    }
+
     await db.query(
       `UPDATE bid_responses SET
          engagement_act_text = $1,
          missing_documents = $2,
+         pricing_schedule_json = $3,
+         pricing_schedule_source = $4,
          status = 'in_progress',
          updated_at = NOW()
-       WHERE id = $3`,
-      [engagementActText, JSON.stringify(missingDocumentsForPackage), req.params.bidId]
+       WHERE id = $5`,
+      [
+        engagementActText,
+        JSON.stringify(missingDocumentsForPackage),
+        JSON.stringify(pricingScheduleJson),
+        pricingScheduleSource,
+        req.params.bidId,
+      ]
     );
 
     const result = await db.query('SELECT * FROM bid_responses WHERE id = $1', [req.params.bidId]);

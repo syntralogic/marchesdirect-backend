@@ -491,6 +491,26 @@ CREATE TABLE tender_documents (
 CREATE INDEX tender_documents_opportunity ON tender_documents(opportunity_id);
 CREATE INDEX tender_documents_status ON tender_documents(status);
 
+-- Company reusable pricing catalog (Milestone 9.2 - "adjust only what's
+-- specific to the new tender" instead of retyping a BPU from scratch every
+-- bid). Built once by the company, then used to pre-fill a new bid's
+-- pricing_schedule_json - see /bid/:bidId/generate in tenders.ts.
+CREATE TABLE company_pricing_items (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+
+  label VARCHAR(255) NOT NULL,
+  category VARCHAR(100),                    -- 'materiaux', 'main_oeuvre', 'equipement', etc.
+  unit VARCHAR(50),                         -- 'm2', 'ml', 'jour', 'forfait', ...
+  default_unit_price DECIMAL(12, 2),
+  is_active BOOLEAN DEFAULT true,           -- soft-disable an item without losing history on past bids
+
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX company_pricing_items_company ON company_pricing_items(company_id);
+
 -- Bid responses (one tender, many companies submitting)
 CREATE TABLE bid_responses (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -508,6 +528,10 @@ CREATE TABLE bid_responses (
   is_engagement_act_signed BOOLEAN DEFAULT false,
   
   pricing_schedule_json JSONB,              -- Unit price breakdown
+  pricing_schedule_source VARCHAR(50),       -- 'profile_catalog' (pre-filled from company_pricing_items,
+                                              -- not yet customized) or 'manual' (company has edited it) -
+                                              -- lets the UI show "pre-filled from your profile, review before
+                                              -- submitting" instead of implying a human already checked it
   total_bid_amount DECIMAL(15, 2),
   
   -- Document checks
