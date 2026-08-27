@@ -150,6 +150,7 @@ const startServer = async () => {
 
     // Start background jobs
     require('./jobs/dataCollection').startScheduledJobs();
+    require('./jobs/documentIngestion').startDocumentIngestion();
     require('./jobs/documentExpiry').startExpiryCheck();
     require('./jobs/seoGeneration').startSEOGeneration();
     require('./jobs/backupManagement').startBackupSchedule();

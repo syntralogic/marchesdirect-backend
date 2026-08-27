@@ -65,6 +65,35 @@ router.get('/bids/mine', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// GET /api/tenders/:opportunityId/documents - list DCE attachments ingested for this
+// opportunity (see documentIngestionService.ts). Never returns extracted_text in full -
+// just enough for the UI to show what was actually found and its status honestly.
+router.get('/:opportunityId/documents', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await db.query(
+      `SELECT id, document_label, source_url, status, mime_type, file_size_bytes,
+              (extracted_text IS NOT NULL AND extracted_text != '') as has_extracted_text,
+              error_message, created_at
+       FROM tender_documents
+       WHERE opportunity_id = $1
+       ORDER BY created_at ASC`,
+      [req.params.opportunityId]
+    );
+
+    const oppResult = await db.query('SELECT dce_documents_status FROM opportunities WHERE id = $1', [
+      req.params.opportunityId,
+    ]);
+
+    res.json({
+      dce_documents_status: oppResult.rows[0]?.dce_documents_status || 'pending',
+      documents: result.rows,
+    });
+  } catch (err: any) {
+    logger.error('Tender documents list error:', err);
+    res.status(500).json({ error: 'Failed to fetch tender documents' });
+  }
+});
+
 // GET /api/tenders/:opportunityId - fetch or lazily create tender record for an opportunity
 router.get('/:opportunityId', async (req: AuthRequest, res: Response) => {
   try {

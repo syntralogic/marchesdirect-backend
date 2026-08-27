@@ -202,4 +202,39 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     ) AS defaults(code, name, domain)
     WHERE NOT EXISTS (SELECT 1 FROM brands)
   `);
+
+  // DCE document ingestion (attachment download/parsing) - see schema.sql's
+  // tender_documents comment for why this is keyed on opportunity_id.
+  await pool.query(
+    `ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS dce_documents_status VARCHAR(50) DEFAULT 'pending'`
+  );
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tender_documents (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      opportunity_id UUID NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+      document_label VARCHAR(100),
+      source_url TEXT NOT NULL,
+      file_url TEXT,
+      file_hash VARCHAR(64),
+      mime_type VARCHAR(100),
+      file_size_bytes INTEGER,
+      status VARCHAR(50) NOT NULL DEFAULT 'pending',
+      extracted_text TEXT,
+      error_message TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(opportunity_id, source_url)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS tender_documents_opportunity ON tender_documents(opportunity_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS tender_documents_status ON tender_documents(status)`);
+  // Existing rows predate this feature entirely (no ingestion has ever run for
+  // them) - mark them 'pending' explicitly rather than leaving old rows NULL,
+  // so the ingestion job's WHERE clause (see jobs/documentIngestion.ts) picks
+  // them up on its next pass instead of silently skipping every pre-existing
+  // opportunity forever.
+  await pool.query(
+    `UPDATE opportunities SET dce_documents_status = 'pending' WHERE dce_documents_status IS NULL`
+  );
+  await pool.query(`ALTER TABLE tenders ADD COLUMN IF NOT EXISTS source_completeness VARCHAR(50)`);
 };

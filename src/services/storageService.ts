@@ -105,6 +105,43 @@ export async function uploadCompanyFile(
 }
 
 /**
+ * Uploads a downloaded DCE attachment (RC/CCAP/CCTP/etc.) fetched from a
+ * connector source. Same S3-with-local-disk-fallback behaviour as
+ * uploadCompanyFile, but keyed by opportunityId instead of companyId since
+ * these documents are shared across every company bidding on the tender, not
+ * owned by one company - see tender_documents in schema.sql.
+ */
+export async function uploadTenderDocument(
+  opportunityId: string,
+  safeName: string,
+  mimetype: string,
+  buffer: Buffer
+): Promise<{ url: string; sizeBytes: number }> {
+  const key = `tenders/${opportunityId}/${safeName}`;
+
+  if (s3 && S3_BUCKET) {
+    await s3
+      .putObject({
+        Bucket: S3_BUCKET,
+        Key: key,
+        Body: buffer,
+        ContentType: mimetype,
+        ACL: 'private',
+      })
+      .promise();
+
+    return { url: key, sizeBytes: buffer.length };
+  }
+
+  const dir = path.join(LOCAL_UPLOAD_DIR, 'tenders', opportunityId);
+  fs.mkdirSync(dir, { recursive: true });
+  const filepath = path.join(dir, safeName);
+  fs.writeFileSync(filepath, buffer);
+
+  return { url: `/uploads/tenders/${opportunityId}/${safeName}`, sizeBytes: buffer.length };
+}
+
+/**
  * Resolves a stored reference (S3 key or local path) into a URL the browser
  * can actually fetch. For S3, that means a short-lived presigned URL since
  * objects are private; for local disk, the static /uploads path already works.

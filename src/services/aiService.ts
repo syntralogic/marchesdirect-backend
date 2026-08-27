@@ -57,20 +57,19 @@ const callClaudeAPI = async (
 // DCE ANALYSIS - TENDER DOCUMENT EXTRACTION (MILESTONE 6.1 / 9.1)
 // ============================================================================
 // Extracts selection criteria, required documents, scoring weights and
-// complexity from the tender's own record (title/description/raw_data as
-// currently ingested from the source connector). This intentionally does NOT
-// yet parse the actual RC/CCAP/CCTP PDF files referenced in section 6.1 of the
-// Technical Requirements - the connectors only ingest structured metadata
-// today, not the documents themselves. Downloading and OCR/text-extracting
-// those PDFs is a separate, larger connector-side task. Until that exists,
-// this analyzes the richest text already available per opportunity and is
-// honest about the gap via `source_completeness` in its own output rather
-// than pretending to have read documents it was never given.
+// complexity from the tender's record. Where documentIngestionService has
+// actually downloaded and parsed the real RC/CCAP/CCTP PDF(s) for this
+// opportunity (tender_documents.status = 'parsed'), their extracted text is
+// included below and `source_completeness` reflects that honestly. When
+// ingestion hasn't found a directly-downloadable file yet (still pending, or
+// only an external buyer-platform link was found), this falls back to the
+// notice's own metadata and says so via `source_completeness` rather than
+// pretending to have read documents it was never given.
 export const analyzeTenderDocuments = async (tenderId: string): Promise<boolean> => {
   try {
     const tenderResult = await db.query(
-      `SELECT t.*, o.title, o.description, o.raw_data, o.estimated_value,
-              o.deadline, o.contract_type, o.currency
+      `SELECT t.*, o.id as opportunity_id, o.title, o.description, o.raw_data, o.estimated_value,
+              o.deadline, o.contract_type, o.currency, o.dce_documents_status
        FROM tenders t
        JOIN opportunities o ON t.opportunity_id = o.id
        WHERE t.id = $1`,
@@ -82,6 +81,12 @@ export const analyzeTenderDocuments = async (tenderId: string): Promise<boolean>
     }
 
     const tender = tenderResult.rows[0];
+
+    const parsedDocs = await db.query(
+      `SELECT document_label, extracted_text FROM tender_documents
+       WHERE opportunity_id = $1 AND status = 'parsed' AND extracted_text IS NOT NULL AND extracted_text != ''`,
+      [tender.opportunity_id]
+    );
 
     await db.query('UPDATE tenders SET dce_analysis_status = $1 WHERE id = $2', ['processing', tenderId]);
 
@@ -107,18 +112,31 @@ Return ONLY valid JSON in this exact shape, no markdown, no extra text:
   "required_documents": ["DC1", "DC2", "Attestation d'assurance decennale", ...],
   "scoring_weights": {"price": 40, "technical_value": 45, "deadline": 15, "not_specified": false},
   "complexity_assessment": "medium",
-  "estimated_effort_hours": 12,
-  "source_completeness": "structured_metadata_only"
+  "estimated_effort_hours": 12
 }`;
+
+    const hasParsedDocs = parsedDocs.rows.length > 0;
+    const documentsBlock = hasParsedDocs
+      ? parsedDocs.rows
+          .map((d) => `--- Document: ${d.document_label || 'Autre'} ---\n${d.extracted_text.substring(0, 6000)}`)
+          .join('\n\n')
+      : 'None downloaded yet - analysis below is based on notice metadata only.';
 
     const userMessage = `Title: ${tender.title}
 Description: ${tender.description || 'Not provided by source'}
 Contract type: ${tender.contract_type || 'Not specified'}
 Estimated value: ${tender.estimated_value ? `${tender.estimated_value} ${tender.currency || 'EUR'}` : 'Not specified'}
 Deadline: ${tender.deadline || 'Not specified'}
-Additional source data: ${tender.raw_data ? JSON.stringify(tender.raw_data).substring(0, 1500) : 'None'}`;
+Additional source data: ${tender.raw_data ? JSON.stringify(tender.raw_data).substring(0, 1500) : 'None'}
 
-    const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 1500);
+Consultation file (DCE) documents actually downloaded and text-extracted for this tender:
+${documentsBlock}`;
+
+    const response = await callClaudeAPI(
+      [{ role: 'user', content: userMessage }],
+      systemPrompt,
+      hasParsedDocs ? 2500 : 1500
+    );
 
     let analysis;
     try {
@@ -128,6 +146,17 @@ Additional source data: ${tender.raw_data ? JSON.stringify(tender.raw_data).subs
       throw new Error('Invalid DCE analysis response format');
     }
 
+    // source_completeness is derived deterministically from what we actually
+    // fetched (tender_documents), never from what the model claims - the
+    // model has no way to know whether extracted text came from a real PDF
+    // or was absent, so trusting its self-report here would risk exactly the
+    // kind of invented-completeness the acceptance criteria forbid.
+    const sourceCompleteness = hasParsedDocs
+      ? 'includes_dce_documents'
+      : tender.dce_documents_status === 'external_platform_only'
+      ? 'external_platform_link_only'
+      : 'structured_metadata_only';
+
     await db.query(
       `UPDATE tenders SET
          dce_analysis_status = $1,
@@ -136,8 +165,9 @@ Additional source data: ${tender.raw_data ? JSON.stringify(tender.raw_data).subs
          scoring_weights = $4,
          complexity_assessment = $5,
          estimated_effort_hours = $6,
+         source_completeness = $7,
          updated_at = NOW()
-       WHERE id = $7`,
+       WHERE id = $8`,
       [
         'analyzed',
         JSON.stringify(analysis.selection_criteria || []),
@@ -145,6 +175,7 @@ Additional source data: ${tender.raw_data ? JSON.stringify(tender.raw_data).subs
         JSON.stringify(analysis.scoring_weights || {}),
         analysis.complexity_assessment || 'medium',
         analysis.estimated_effort_hours || null,
+        sourceCompleteness,
         tenderId,
       ]
     );

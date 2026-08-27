@@ -150,6 +150,10 @@ CREATE TABLE opportunities (
   ai_extracted_facts JSONB,                 -- Structured fact extraction (POC test): each field
                                              -- {"value": "...", "available": bool} - "not available"
                                              -- when the source record doesn't actually contain it.
+
+  -- DCE document ingestion (attachment download/parsing - see tender_documents table)
+  dce_documents_status VARCHAR(50) DEFAULT 'pending', -- 'pending', 'processing', 'fetched',
+                                             -- 'no_documents_found', 'external_platform_only', 'failed'
   
   -- Audit
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -438,12 +442,54 @@ CREATE TABLE tenders (
   scoring_weights JSONB,                    -- How winner is chosen
   complexity_assessment VARCHAR(100),
   estimated_effort_hours INTEGER,
+  source_completeness VARCHAR(50),          -- 'structured_metadata_only', 'includes_dce_documents',
+                                             -- 'external_platform_link_only' - set deterministically
+                                             -- from tender_documents, never model-reported
   
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX tenders_opportunity ON tenders(opportunity_id);
+
+-- DCE attachments (RC/CCAP/CCTP/AAPC etc.) discovered and downloaded for an
+-- opportunity. Keyed on opportunity_id rather than tender_id because a
+-- `tenders` row is only lazily created the first time someone opens a tender
+-- (see GET /api/tenders/:opportunityId) - documents need to be fetchable
+-- ahead of that, by the background job right after ingestion.
+--
+-- BOAMP's open-data API only ever gives the notice metadata, never the
+-- consultation file itself - the real DCE lives on the buyer's own
+-- e-procurement platform (profil acheteur / PLACE / a local portal), which
+-- BOAMP links out to. So every row here is honest about what actually
+-- happened: 'parsed' only when we got a real PDF and extracted real text,
+-- 'external_platform_only' when the only lead we found is a link to a portal
+-- that requires a human to open it (varies per buyer, can't be scraped
+-- generically) - never a fabricated status.
+CREATE TABLE tender_documents (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  opportunity_id UUID NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+
+  document_label VARCHAR(100),              -- best-effort guess: 'RC', 'CCAP', 'CCTP', 'AAPC', 'Autre'
+  source_url TEXT NOT NULL,                 -- where we found/downloaded it from
+  file_url TEXT,                            -- storage ref (S3 key or local /uploads path) once downloaded
+  file_hash VARCHAR(64),                    -- SHA-256 of the downloaded bytes, for dedup across re-runs
+  mime_type VARCHAR(100),
+  file_size_bytes INTEGER,
+
+  status VARCHAR(50) NOT NULL DEFAULT 'pending', -- 'pending', 'downloaded', 'parsed', 'not_a_document',
+                                                  -- 'external_platform_only', 'failed'
+  extracted_text TEXT,                      -- parsed PDF text (truncated), used by DCE AI analysis
+  error_message TEXT,
+
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+  UNIQUE(opportunity_id, source_url)
+);
+
+CREATE INDEX tender_documents_opportunity ON tender_documents(opportunity_id);
+CREATE INDEX tender_documents_status ON tender_documents(status);
 
 -- Bid responses (one tender, many companies submitting)
 CREATE TABLE bid_responses (
