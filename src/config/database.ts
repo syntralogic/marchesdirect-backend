@@ -255,6 +255,19 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   await pool.query(`CREATE INDEX IF NOT EXISTS company_pricing_items_company ON company_pricing_items(company_id)`);
   await pool.query(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS pricing_schedule_source VARCHAR(50)`);
 
+  // Notification preferences (Profile > Notifications tab) - previously
+  // UI-only local state with nowhere to persist to, so every toggle reset on
+  // reload. Defaults match what the frontend already showed.
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_preferences JSONB
+    DEFAULT '{"emailAlerts": true, "newOpps": true, "deadlineAlerts": true, "weeklyDigest": false, "mobileNotifs": true}'::jsonb
+  `);
+  await pool.query(`
+    UPDATE users SET notification_preferences =
+      '{"emailAlerts": true, "newOpps": true, "deadlineAlerts": true, "weeklyDigest": false, "mobileNotifs": true}'::jsonb
+    WHERE notification_preferences IS NULL
+  `);
+
   // Buyer/requesting-company name (BOAMP's `nomacheteur` etc.) - previously
   // not stored at all, so the opportunity detail page and the sous-traitance
   // "mise en relation" flow had no real organization name to show and fell

@@ -25,9 +25,18 @@ export interface AuthRequest extends Request {
     firstName: string;
     lastName: string;
     mfaEnabled: boolean;
+    notificationPreferences: Record<string, boolean>;
   };
   company?: any;
 }
+
+const DEFAULT_NOTIFICATION_PREFERENCES: Record<string, boolean> = {
+  emailAlerts: true,
+  newOpps: true,
+  deadlineAlerts: true,
+  weeklyDigest: false,
+  mobileNotifs: true,
+};
 
 // Verify JWT token
 export const authenticate = async (
@@ -69,6 +78,7 @@ export const authenticate = async (
       firstName: user.first_name,
       lastName: user.last_name,
       mfaEnabled: !!user.mfa_enabled,
+      notificationPreferences: user.notification_preferences || DEFAULT_NOTIFICATION_PREFERENCES,
     };
 
     // Attach company to request

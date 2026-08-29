@@ -288,6 +288,12 @@ CREATE TABLE users (
   
   -- Status
   status VARCHAR(50) DEFAULT 'active',
+
+  -- Notification preferences (Profile > Notifications tab). Defaults mirror
+  -- what the frontend showed as UI-only state before this column existed -
+  -- flipping a toggle now actually persists instead of silently resetting
+  -- on reload.
+  notification_preferences JSONB DEFAULT '{"emailAlerts": true, "newOpps": true, "deadlineAlerts": true, "weeklyDigest": false, "mobileNotifs": true}'::jsonb,
   
   -- Audit
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
