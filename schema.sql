@@ -271,6 +271,7 @@ CREATE TABLE users (
   last_name VARCHAR(255),
   phone VARCHAR(20),
   job_title VARCHAR(255),
+  avatar_url VARCHAR(500),
   
   -- Authentication
   email_verified BOOLEAN DEFAULT false,

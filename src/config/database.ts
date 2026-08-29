@@ -267,6 +267,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
       '{"emailAlerts": true, "newOpps": true, "deadlineAlerts": true, "weeklyDigest": false, "mobileNotifs": true}'::jsonb
     WHERE notification_preferences IS NULL
   `);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(500)`);
 
   // Buyer/requesting-company name (BOAMP's `nomacheteur` etc.) - previously
   // not stored at all, so the opportunity detail page and the sous-traitance

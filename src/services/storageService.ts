@@ -64,6 +64,55 @@ export function validateUpload(file: Express.Multer.File) {
   }
 }
 
+const ALLOWED_AVATAR_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const MAX_AVATAR_SIZE_BYTES = 5 * 1024 * 1024; // 5MB - avatars are small, no reason to allow a 15MB upload
+
+export function validateAvatarUpload(file: Express.Multer.File) {
+  if (!ALLOWED_AVATAR_MIME_TYPES.has(file.mimetype)) {
+    throw new UploadValidationError(`Type de fichier non autorisé : ${file.mimetype}. Formats acceptés : JPG, PNG, WEBP.`);
+  }
+  if (file.size > MAX_AVATAR_SIZE_BYTES) {
+    throw new UploadValidationError('Image trop volumineuse (5 Mo maximum).');
+  }
+}
+
+/**
+ * Uploads a profile picture, keyed by userId rather than companyId - an
+ * avatar belongs to the person, not the company record, and multiple users
+ * can share one company account.
+ */
+export async function uploadAvatar(
+  userId: string,
+  mimetype: string,
+  buffer: Buffer
+): Promise<{ url: string; sizeBytes: number }> {
+  const ext = mimetype === 'image/png' ? 'png' : mimetype === 'image/webp' ? 'webp' : 'jpg';
+  // Fixed filename per user (not a random UUID) - a new upload should replace
+  // the old avatar file, not accumulate orphaned images in storage forever.
+  const key = `avatars/${userId}/avatar.${ext}`;
+
+  if (s3 && S3_BUCKET) {
+    await s3
+      .putObject({
+        Bucket: S3_BUCKET,
+        Key: key,
+        Body: buffer,
+        ContentType: mimetype,
+        ACL: 'public-read', // avatars are meant to be publicly viewable, unlike company documents
+      })
+      .promise();
+
+    return { url: key, sizeBytes: buffer.length };
+  }
+
+  const dir = path.join(LOCAL_UPLOAD_DIR, 'avatars', userId);
+  fs.mkdirSync(dir, { recursive: true });
+  const filepath = path.join(dir, `avatar.${ext}`);
+  fs.writeFileSync(filepath, buffer);
+
+  return { url: `/uploads/avatars/${userId}/avatar.${ext}`, sizeBytes: buffer.length };
+}
+
 /**
  * Uploads a file buffer and returns its publicly-fetchable URL.
  * companyId is used as a folder prefix so one company's documents are never
@@ -153,6 +202,19 @@ export async function resolveFileUrl(storedRef: string): Promise<string> {
       Key: storedRef,
       Expires: 300, // 5 minutes
     });
+  }
+  return storedRef;
+}
+
+/**
+ * Same idea as resolveFileUrl, but for avatars specifically: they're
+ * uploaded with a public-read ACL (see uploadAvatar), so a permanent public
+ * URL is correct here rather than a 5-minute presigned link that would
+ * expire mid-page-load or break browser image caching.
+ */
+export function resolveAvatarUrl(storedRef: string): string {
+  if (s3 && S3_BUCKET && !storedRef.startsWith('/uploads/')) {
+    return `https://${S3_BUCKET}.s3.${S3_REGION}.amazonaws.com/${storedRef}`;
   }
   return storedRef;
 }

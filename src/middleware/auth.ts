@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { resolveAvatarUrl } from '../services/storageService';
 
 // Fail fast rather than silently signing/verifying tokens with a known,
 // hardcoded string if these are ever left unset (e.g. a forgotten env var
@@ -26,6 +27,7 @@ export interface AuthRequest extends Request {
     lastName: string;
     mfaEnabled: boolean;
     notificationPreferences: Record<string, boolean>;
+    avatarUrl: string | null;
   };
   company?: any;
 }
@@ -79,6 +81,7 @@ export const authenticate = async (
       lastName: user.last_name,
       mfaEnabled: !!user.mfa_enabled,
       notificationPreferences: user.notification_preferences || DEFAULT_NOTIFICATION_PREFERENCES,
+      avatarUrl: user.avatar_url ? resolveAvatarUrl(user.avatar_url) : null,
     };
 
     // Attach company to request
