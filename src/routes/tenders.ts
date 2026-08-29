@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
-import { AuthRequest } from '../middleware/auth';
+import { AuthRequest, requireActiveSubscription } from '../middleware/auth';
 import { generateBidPackageZip, uploadToS3IfConfigured } from '../services/documentService';
 import { analyzeTenderDocuments, generateTechnicalMemo } from '../services/aiService';
 import { buildUnifiedDocumentChecklist } from '../utils/documentMatching';
@@ -11,7 +11,7 @@ const router = Router();
 // POST /api/tenders/:tenderId/analyze - run DCE analysis (selection criteria, required
 // documents, scoring weights, complexity) via AI - Milestone 6.1. Not company-scoped:
 // a tender's DCE analysis is shared across every company bidding on it.
-router.post('/:tenderId/analyze', async (req: AuthRequest, res: Response) => {
+router.post('/:tenderId/analyze', requireActiveSubscription, async (req: AuthRequest, res: Response) => {
   try {
     const tenderResult = await db.query('SELECT id FROM tenders WHERE id = $1', [req.params.tenderId]);
     if (tenderResult.rows.length === 0) {
@@ -210,7 +210,7 @@ router.put('/bid/:bidId', async (req: AuthRequest, res: Response) => {
 // QSE measures) - grounded only in real company_resources/company_references/
 // company_policies data, with a deterministic no-AI fallback if the Claude API
 // call fails, so this endpoint never hard-fails on an AI outage.
-router.post('/bid/:bidId/generate', async (req: AuthRequest, res: Response) => {
+router.post('/bid/:bidId/generate', requireActiveSubscription, async (req: AuthRequest, res: Response) => {
   try {
     const bidResult = await db.query(
       `SELECT br.*, t.opportunity_id, t.required_documents as tender_required_documents, o.title as opportunity_title

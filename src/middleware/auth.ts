@@ -176,6 +176,21 @@ export const verifyRefreshToken = (token: string) => {
 // MFA HELPERS
 // ============================================================================
 
+// Gate for the paid-tier-only actions on a listing "fiche" (DCE analysis,
+// bid document generation): free/anonymous/trial companies can still browse
+// and read opportunities, but the AI-assisted candidature tools require an
+// active subscription. Runs after `authenticate`, which already attaches
+// req.company from a fresh DB read.
+export const requireActiveSubscription = (req: AuthRequest, res: Response, next: NextFunction) => {
+  if (req.company?.subscription_status !== 'active') {
+    return res.status(403).json({
+      error: 'active_subscription_required',
+      message: 'Cette action nécessite un abonnement actif.',
+    });
+  }
+  next();
+};
+
 export const generateMFASecret = () => {
   const speakeasy = require('speakeasy');
   return speakeasy.generateSecret({
