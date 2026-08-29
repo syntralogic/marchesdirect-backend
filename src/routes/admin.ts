@@ -497,7 +497,11 @@ router.get('/companies', async (req: AuthRequest, res: Response) => {
         `SELECT c.id, c.name, c.email, c.status, c.subscription_status, c.subscription_tier,
                 u.first_name, u.last_name
          FROM companies c
-         LEFT JOIN users u ON u.company_id = c.id AND u.role = 'owner' AND u.deleted_at IS NULL
+         LEFT JOIN LATERAL (
+           SELECT first_name, last_name FROM users
+           WHERE users.company_id = c.id AND users.deleted_at IS NULL
+           ORDER BY created_at ASC LIMIT 1
+         ) u ON true
          WHERE ${where}
          ORDER BY c.created_at DESC
          LIMIT $${idx++} OFFSET $${idx++}`,
