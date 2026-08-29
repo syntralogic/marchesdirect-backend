@@ -254,4 +254,65 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS company_pricing_items_company ON company_pricing_items(company_id)`);
   await pool.query(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS pricing_schedule_source VARCHAR(50)`);
+
+  // Buyer/requesting-company name (BOAMP's `nomacheteur` etc.) - previously
+  // not stored at all, so the opportunity detail page and the sous-traitance
+  // "mise en relation" flow had no real organization name to show and fell
+  // back to placeholder/mock data. See dataCollectionService.ts for where
+  // this gets populated on ingest.
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS buyer_name VARCHAR(500)`);
+
+  // opportunity_search_index is a MATERIALIZED VIEW, so a plain ALTER can't
+  // add a column to it the way it can for a table - the view has to be
+  // dropped and recreated with the new column in its SELECT. Only do that
+  // once (checked via information_schema) so a normal boot doesn't pay for
+  // a full view rebuild every time.
+  const viewHasBuyerName = await pool.query(
+    `SELECT EXISTS (
+       SELECT FROM information_schema.columns
+       WHERE table_name = 'opportunity_search_index' AND column_name = 'buyer_name'
+     ) AS exists`
+  );
+  if (!viewHasBuyerName.rows[0]?.exists) {
+    await pool.query(`DROP MATERIALIZED VIEW IF EXISTS opportunity_search_index`);
+    await pool.query(`
+      CREATE MATERIALIZED VIEW opportunity_search_index AS
+      SELECT 
+        o.id,
+        o.title,
+        o.description,
+        o.deadline,
+        o.publication_date,
+        o.estimated_value,
+        o.currency,
+        o.location_city,
+        o.location_region,
+        o.location_department,
+        o.estimated_start_date,
+        o.estimated_end_date,
+        o.ai_classification_status,
+        o.ai_summary,
+        o.ai_matched_trades,
+        o.status,
+        o.trade_id,
+        o.buyer_name,
+        ot.code as opportunity_type,
+        t.name as trade_name,
+        c.code as brand_code,
+        ds.code as source_code,
+        (
+          to_tsvector('french', COALESCE(o.title, '')) ||
+          to_tsvector('french', COALESCE(o.description, ''))
+        ) as search_vector
+      FROM opportunities o
+      LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+      LEFT JOIN trades t ON o.trade_id = t.id
+      LEFT JOIN data_sources ds ON o.source_id = ds.id
+      LEFT JOIN brands c ON ot.brand_id = c.id
+      WHERE o.deleted_at IS NULL AND o.status NOT IN ('cancelled', 'expired', 'merged')
+    `);
+    await pool.query(`CREATE INDEX opportunity_search_index_search ON opportunity_search_index USING GIN(search_vector)`);
+    await pool.query(`CREATE INDEX opportunity_search_index_deadline ON opportunity_search_index(deadline)`);
+    await pool.query(`CREATE UNIQUE INDEX opportunity_search_index_id ON opportunity_search_index(id)`);
+  }
 };

@@ -134,6 +134,10 @@ CREATE TABLE opportunities (
   location_department VARCHAR(100),         -- French department code
   location_latitude DECIMAL(10, 8),
   location_longitude DECIMAL(11, 8),
+  buyer_name VARCHAR(500),                  -- Awarding buyer / requesting company name
+                                             -- (BOAMP 'nomacheteur' etc.) - shown on the
+                                             -- fiche and used for sous-traitance mise en
+                                             -- relation, kept separate from location_city.
   
   -- Status
   status VARCHAR(50) DEFAULT 'active',      -- 'active', 'updated', 'expired', 'cancelled', 'awarded'
@@ -373,6 +377,10 @@ CREATE TABLE company_certifications (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Safe to re-run: covers anyone who already loaded schema.sql once before this
+-- column was added to the CREATE TABLE above (which only applies on first create).
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS buyer_name VARCHAR(500);
 
 -- Safe to re-run: covers anyone who already loaded schema.sql once before this
 -- column was added to the CREATE TABLE above (which only applies on first create).
@@ -882,6 +890,7 @@ SELECT
   o.ai_matched_trades,
   o.status,
   o.trade_id,
+  o.buyer_name,
   ot.code as opportunity_type,
   t.name as trade_name,
   c.code as brand_code,

@@ -81,7 +81,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
               osi.estimated_value, osi.currency, osi.location_city, osi.location_region,
               osi.location_department, osi.estimated_start_date, osi.estimated_end_date,
               osi.ai_classification_status, osi.ai_summary, osi.ai_matched_trades, osi.status,
-              osi.opportunity_type as journey, osi.trade_name
+              osi.opportunity_type as journey, osi.trade_name, osi.buyer_name
        FROM opportunity_search_index osi
        WHERE ${whereClause}
        ORDER BY osi.deadline ASC NULLS LAST

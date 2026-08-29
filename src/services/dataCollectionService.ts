@@ -115,6 +115,7 @@ const normalizeBoampRecord = (record: any) => {
     location_city: f.ville_avis || f.nomacheteur || null,
     location_region: f.region || null,
     location_department: f.departement || null,
+    buyer_name: f.nomacheteur || null,
     raw: record,
   };
 };
@@ -297,11 +298,11 @@ const insertOpportunity = async (sourceId: number, data: any) => {
   const result = await db.query(
     `INSERT INTO opportunities 
       (source_id, source_reference, title, description, publication_date, deadline, 
-       estimated_value, location_city, location_region, location_department, opportunity_type_id, 
+       estimated_value, location_city, location_region, location_department, buyer_name, opportunity_type_id, 
        raw_data, ai_classification_status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
        (SELECT id FROM opportunity_types WHERE code = 'public_procurement'),
-       $11, 'not_analyzed')
+       $12, 'not_analyzed')
      RETURNING id`,
     [
       sourceId,
@@ -314,6 +315,9 @@ const insertOpportunity = async (sourceId: number, data: any) => {
       data.location_city,
       data.location_region || data.region,
       data.location_department || null,
+      // PLACE/TED feeds don't reliably expose a distinct buyer field the
+      // way BOAMP's `nomacheteur` does - null there rather than a guess.
+      data.buyer_name || data.organism || null,
       JSON.stringify(data.raw || data), // raw_data - keep original source payload for audit
     ]
   );
