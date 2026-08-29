@@ -96,6 +96,9 @@ app.use('/api/trades', require('./routes/trades').default);
 app.use('/api/brands', require('./routes/brandsPublic').default);
 app.use('/api/seo-pages', require('./routes/seoPagesPublic').default);
 app.use('/api/subscriptions', require('./routes/subscriptions').default);
+// Browsing subcontracting needs is public (mirrors opportunities); creating
+// one requires an account, enforced per-route inside the router itself.
+app.use('/api/subcontract-needs', require('./routes/subcontractNeeds').default);
 // CRM lead capture must be public: it's submitted from anonymous marketing
 // pages (pricing page, contact form) before someone has an account.
 // Admin viewing/managing of captured leads stays behind authenticate below.

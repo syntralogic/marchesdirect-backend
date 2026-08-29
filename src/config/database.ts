@@ -329,4 +329,44 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     await pool.query(`CREATE INDEX opportunity_search_index_deadline ON opportunity_search_index(deadline)`);
     await pool.query(`CREATE UNIQUE INDEX opportunity_search_index_id ON opportunity_search_index(id)`);
   }
+
+  // Opportunity detail page graduated access (level1 teaser -> level2 after
+  // lead capture -> level3 after a chargé d'affaires manually validates) +
+  // self-published subcontracting needs ("Je cherche un sous-traitant").
+  // See schema.sql's "12b" comment block for the full access-level model.
+  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS opportunity_id UUID REFERENCES opportunities(id) ON DELETE SET NULL`);
+  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_level VARCHAR(20)`);
+  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_at TIMESTAMP`);
+  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_by UUID REFERENCES users(id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS crm_leads_opportunity ON crm_leads(opportunity_id)`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS subcontract_needs (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      company_id UUID REFERENCES companies(id) ON DELETE SET NULL,
+      created_by UUID REFERENCES users(id),
+      trade VARCHAR(255) NOT NULL,
+      lot VARCHAR(255),
+      description TEXT,
+      location_city VARCHAR(255),
+      location_region VARCHAR(255),
+      budget_min DECIMAL(15, 2),
+      budget_max DECIMAL(15, 2),
+      team_size VARCHAR(100),
+      start_date DATE,
+      duration VARCHAR(100),
+      qualifications TEXT,
+      contact_email VARCHAR(255),
+      contact_phone VARCHAR(20),
+      status VARCHAR(50) DEFAULT 'draft',
+      validity_days INTEGER DEFAULT 42,
+      published_at TIMESTAMP,
+      expires_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS subcontract_needs_company ON subcontract_needs(company_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS subcontract_needs_status ON subcontract_needs(status)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS subcontract_needs_expires ON subcontract_needs(expires_at)`);
 };

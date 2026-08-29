@@ -743,6 +743,66 @@ CREATE INDEX crm_leads_status ON crm_leads(status);
 CREATE INDEX crm_leads_crm ON crm_leads(crm_sync_status);
 
 -- ============================================================================
+-- 12b. OPPORTUNITY DETAIL PAGE - GRADUATED ACCESS + SUBCONTRACT NEEDS
+-- ============================================================================
+-- Private tenders ('tender') and subcontracting ('subcontracting') opportunities
+-- show progressively more detail as a visitor is qualified:
+--   level1 (default)  - teaser only (title, broad location, deadline)
+--   level2            - "aperçu enrichi": granted the instant crm_leads gets a
+--                        row for this opportunity (visitor left contact info)
+--   level3            - "accès complet": a staff member (chargé d'affaires)
+--                        manually reviews the lead and grants full access -
+--                        never automatic, matches the "no online payment/
+--                        unlock, a real person validates" requirement.
+-- Public-procurement ('public_procurement') opportunities are always fully
+-- open and never consult these columns.
+ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS opportunity_id UUID REFERENCES opportunities(id) ON DELETE SET NULL;
+ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_level VARCHAR(20);
+ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_at TIMESTAMP;
+ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_by UUID REFERENCES users(id);
+CREATE INDEX IF NOT EXISTS crm_leads_opportunity ON crm_leads(opportunity_id);
+
+-- A company posting its own subcontracting need ("Je cherche un sous-traitant"
+-- in the /parcours journey), browsed by providers the same way opportunities
+-- are - kept as its own table rather than shoehorned into `opportunities`
+-- since needs are self-published by companies, not ingested from a data source
+-- (opportunities.source_id/source_reference are NOT NULL and don't apply here).
+CREATE TABLE IF NOT EXISTS subcontract_needs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  company_id UUID REFERENCES companies(id) ON DELETE SET NULL,
+  created_by UUID REFERENCES users(id),
+
+  trade VARCHAR(255) NOT NULL,
+  lot VARCHAR(255),
+  description TEXT,
+
+  location_city VARCHAR(255),
+  location_region VARCHAR(255),
+
+  budget_min DECIMAL(15, 2),
+  budget_max DECIMAL(15, 2),
+  team_size VARCHAR(100),
+  start_date DATE,
+  duration VARCHAR(100),
+  qualifications TEXT,
+
+  contact_email VARCHAR(255),
+  contact_phone VARCHAR(20),
+
+  status VARCHAR(50) DEFAULT 'draft',   -- 'draft', 'published', 'expired', 'fulfilled'
+  validity_days INTEGER DEFAULT 42,
+  published_at TIMESTAMP,
+  expires_at TIMESTAMP,
+
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS subcontract_needs_company ON subcontract_needs(company_id);
+CREATE INDEX IF NOT EXISTS subcontract_needs_status ON subcontract_needs(status);
+CREATE INDEX IF NOT EXISTS subcontract_needs_expires ON subcontract_needs(expires_at);
+
+
+-- ============================================================================
 -- 13. SEO PAGE GENERATION (Milestone 11)
 -- ============================================================================
 

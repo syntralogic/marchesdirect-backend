@@ -667,4 +667,74 @@ router.patch('/subscriptions/:id/cancel', async (req: AuthRequest, res: Response
   }
 });
 
+// ============================================================================
+// OPPORTUNITY ACCESS REQUESTS ("Laisser mes coordonnées" leads, reviewed by
+// a chargé d'affaires to grant level3 / "accès complet" on the opportunity
+// detail page - see schema.sql's crm_leads access_level columns and
+// routes/opportunities.ts's :id/access + :id/request-access for the other
+// half of this flow).
+// ============================================================================
+
+// GET /api/admin/opportunity-leads - leads tied to an opportunity (i.e. not
+// the generic contact/appointment/callback leads, which stay in the plain
+// /api/crm/leads list), newest first.
+router.get('/opportunity-leads', async (req: AuthRequest, res: Response) => {
+  try {
+    const { status, page = '1', limit = '50' } = req.query as Record<string, string>;
+    const conditions: string[] = ['l.opportunity_id IS NOT NULL'];
+    const params: any[] = [];
+    let idx = 1;
+    if (status) {
+      conditions.push(`l.status = $${idx++}`);
+      params.push(status);
+    }
+    const pageNum = Math.max(parseInt(page) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit) || 50, 1), 200);
+    const offset = (pageNum - 1) * limitNum;
+
+    const result = await db.query(
+      `SELECT l.*, o.title as opportunity_title, ot.code as journey
+       FROM crm_leads l
+       LEFT JOIN opportunities o ON o.id = l.opportunity_id
+       LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY l.created_at DESC LIMIT $${idx++} OFFSET $${idx++}`,
+      [...params, limitNum, offset]
+    );
+    res.json({ results: result.rows });
+  } catch (err: any) {
+    logger.error('Admin opportunity leads list error:', err);
+    res.status(500).json({ error: 'Failed to fetch opportunity leads' });
+  }
+});
+
+// PUT /api/admin/opportunity-leads/:id/grant-access - the only place level3
+// ("accès complet") ever gets set. Deliberately requires a logged-in staff
+// member (this whole router is behind requireRole admin/super_admin) - there
+// is no automatic/self-serve path to level3 anywhere else in the codebase.
+router.put('/opportunity-leads/:id/grant-access', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await db.query(
+      `UPDATE crm_leads
+       SET access_level = 'level3', access_granted_at = NOW(), access_granted_by = $1,
+           status = 'converted', updated_at = NOW()
+       WHERE id = $2 AND opportunity_id IS NOT NULL
+       RETURNING *`,
+      [req.user!.id, req.params.id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+    await db.query(
+      `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_values)
+       VALUES ($1, 'update', 'crm_lead_access', $2, $3)`,
+      [req.user!.id, req.params.id, JSON.stringify({ access_level: 'level3' })]
+    );
+    res.json(result.rows[0]);
+  } catch (err: any) {
+    logger.error('Admin grant access error:', err);
+    res.status(500).json({ error: 'Failed to grant access' });
+  }
+});
+
 export default router;

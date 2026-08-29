@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { requireRole } from '../middleware/auth';
 
 const router = Router();
 
@@ -8,6 +9,12 @@ const router = Router();
 // Public lead capture (POST) lives in routes/crmPublic.ts instead, since
 // anonymous marketing-page visitors submitting the contact/pricing form don't
 // have an account yet.
+//
+// requireRole is applied here (not just `authenticate` in server.ts) because
+// crm_leads rows contain other people's PII (name/email/phone) - without this
+// any logged-in company user, not just staff, could list or edit every lead
+// in the system via these two routes.
+router.use(requireRole(['admin', 'super_admin']));
 
 // GET /api/crm/leads - list captured leads (admin/staff)
 router.get('/leads', async (req: Request, res: Response) => {

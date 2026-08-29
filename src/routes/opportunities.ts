@@ -1,8 +1,11 @@
 import { Router, Request, Response } from 'express';
+import { body, validationResult } from 'express-validator';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts } from '../services/aiService';
-import { optionalAuth } from '../middleware/auth';
+import { computeMatchScore } from '../services/matchScoreService';
+import { syncLeadToCrm } from '../services/crmSyncService';
+import { optionalAuth, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 
@@ -228,6 +231,168 @@ router.get('/:id', optionalAuth, async (req: Request, res: Response) => {
   } catch (err: any) {
     logger.error('Opportunity detail error:', err);
     res.status(500).json({ error: 'Failed to fetch opportunity' });
+  }
+});
+
+// ============================================================================
+// GRADUATED ACCESS (opportunity detail page "Conditions et accès")
+//
+// Public-procurement opportunities are always fully open. Private tenders and
+// subcontracting opportunities start at level1 (teaser only); level2 unlocks
+// the instant a visitor leaves their contact details (POST .../request-access
+// below); level3 ("accès complet") is only ever granted by a staff member
+// from the admin panel (PUT /api/admin/opportunity-leads/:id/grant-access) -
+// there is intentionally no code path that sets it automatically.
+// ============================================================================
+
+// GET /api/opportunities/:id/access?email=... - current access level.
+// Logged-in users are matched by their account email; anonymous visitors who
+// already submitted the lead form pass the same email back as a query param
+// so a returning visitor can see if a chargé d'affaires has since upgraded
+// them to level3, without needing an account.
+router.get('/:id/access', optionalAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const oppResult = await db.query(
+      `SELECT o.id, ot.code as journey FROM opportunities o
+       LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+       WHERE o.id = $1 AND o.deleted_at IS NULL`,
+      [req.params.id]
+    );
+    if (oppResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Opportunity not found' });
+    }
+    if (oppResult.rows[0].journey === 'public_procurement') {
+      return res.json({ level: 'full' });
+    }
+
+    const email = (req.user?.email || (req.query.email as string) || '').trim().toLowerCase();
+    if (!email) {
+      return res.json({ level: 'level1' });
+    }
+
+    const leadResult = await db.query(
+      `SELECT access_level FROM crm_leads
+       WHERE opportunity_id = $1 AND LOWER(email) = $2
+       ORDER BY CASE access_level WHEN 'level3' THEN 2 WHEN 'level2' THEN 1 ELSE 0 END DESC
+       LIMIT 1`,
+      [req.params.id, email]
+    );
+    const level = leadResult.rows[0]?.access_level === 'level3' ? 'level3'
+      : leadResult.rows[0]?.access_level === 'level2' ? 'level2'
+      : 'level1';
+    res.json({ level });
+  } catch (err: any) {
+    logger.error('Opportunity access check error:', err);
+    res.status(500).json({ error: 'Failed to check access' });
+  }
+});
+
+// POST /api/opportunities/:id/request-access - "Laisser mes coordonnées":
+// immediately grants level2 (aperçu enrichi) and creates/updates the CRM
+// lead so a chargé d'affaires can review it for a level3 (accès complet)
+// upgrade. Public, matches how the rest of the site's lead forms work
+// (see routes/crmPublic.ts) - a visitor filling this in doesn't have an
+// account yet.
+router.post(
+  '/:id/request-access',
+  [
+    body('email').isEmail().normalizeEmail(),
+    body('phone').optional({ checkFalsy: true }).isString().trim(),
+    body('firstName').optional({ checkFalsy: true }).isString().trim(),
+    body('lastName').optional({ checkFalsy: true }).isString().trim(),
+    body('companyName').optional({ checkFalsy: true }).isString().trim(),
+  ],
+  async (req: Request, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ error: 'Validation failed', details: errors.array() });
+    }
+    try {
+      const oppResult = await db.query(
+        `SELECT o.id, o.title, o.trade_id, o.location_city, o.location_region, ot.code as journey, b.id as brand_id
+         FROM opportunities o
+         LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+         LEFT JOIN brands b ON ot.brand_id = b.id
+         WHERE o.id = $1 AND o.deleted_at IS NULL`,
+        [req.params.id]
+      );
+      if (oppResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Opportunity not found' });
+      }
+      const opp = oppResult.rows[0];
+      if (opp.journey === 'public_procurement') {
+        return res.json({ level: 'full' });
+      }
+
+      const { firstName, lastName, email, phone, companyName } = req.body;
+
+      // A default brand is used when the opportunity's type isn't itself
+      // brand-scoped (opportunity_types.brand_id can be NULL, meaning "all
+      // brands") - crm_leads.brand_id is NOT NULL, same constraint the public
+      // contact form already has to satisfy in routes/crmPublic.ts.
+      let brandId = opp.brand_id;
+      if (!brandId) {
+        const brandResult = await db.query('SELECT id FROM brands ORDER BY created_at ASC LIMIT 1');
+        brandId = brandResult.rows[0]?.id;
+      }
+
+      const existing = await db.query(
+        `SELECT id, access_level FROM crm_leads WHERE opportunity_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
+        [req.params.id, email]
+      );
+
+      let leadId: string;
+      if (existing.rows.length > 0) {
+        leadId = existing.rows[0].id;
+        await db.query(
+          `UPDATE crm_leads SET first_name = COALESCE($1, first_name), last_name = COALESCE($2, last_name),
+             phone = COALESCE($3, phone), company_name = COALESCE($4, company_name), updated_at = NOW()
+           WHERE id = $5`,
+          [firstName, lastName, phone, companyName, leadId]
+        );
+      } else {
+        const insertResult = await db.query(
+          `INSERT INTO crm_leads
+            (brand_id, first_name, last_name, email, phone, company_name, lead_source, message,
+             opportunity_id, access_level, crm_sync_status)
+           VALUES ($1, $2, $3, $4, $5, $6, 'opportunity_detail_page', $7, $8, 'level2', 'pending')
+           RETURNING id`,
+          [brandId, firstName, lastName, email, phone, companyName, `Demande d'accès enrichi : ${opp.title}`, req.params.id]
+        );
+        leadId = insertResult.rows[0].id;
+        syncLeadToCrm(leadId).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
+      }
+
+      const level = existing.rows[0]?.access_level === 'level3' ? 'level3' : 'level2';
+      res.status(201).json({ level, leadId });
+    } catch (err: any) {
+      logger.error('Opportunity access request error:', err);
+      res.status(500).json({ error: 'Failed to submit — please try again' });
+    }
+  }
+);
+
+// GET /api/opportunities/:id/match-score - "Analyse stratégique" tab data.
+// Personalizes against the logged-in user's company profile when available,
+// otherwise returns the generic (non-personalized) breakdown.
+router.get('/:id/match-score', optionalAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    // optionalAuth only decodes the JWT (userId/email) - it does not run the
+    // DB lookups `authenticate` does, so req.company is never populated here.
+    // Resolve the company from the token's email instead when present.
+    let companyId: string | null = null;
+    if (req.user?.email) {
+      const userResult = await db.query('SELECT company_id FROM users WHERE email = $1 AND deleted_at IS NULL', [req.user.email]);
+      companyId = userResult.rows[0]?.company_id || null;
+    }
+    const result = await computeMatchScore(req.params.id, companyId);
+    res.json(result);
+  } catch (err: any) {
+    logger.error('Match score error:', err);
+    if (err.message === 'Opportunity not found') {
+      return res.status(404).json({ error: 'Opportunity not found' });
+    }
+    res.status(500).json({ error: 'Failed to compute match score' });
   }
 });
 
