@@ -56,10 +56,18 @@ export const registerCompanyAndUser = async (data: RegisterParams, brandId?: str
 
     // Create company
     const companyId = uuid();
-    const companySlug = data.companyName
+    const baseSlug = data.companyName
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '');
+    // Two different real companies can easily share a display name (generic
+    // names like "Bâtiment Pro" are common), which used to collide on
+    // companies.slug and throw a raw, unhandled Postgres constraint error
+    // straight through to the signup form ("duplicate key value violates
+    // unique constraint..."). Suffixing with part of the company's own id
+    // guarantees uniqueness with no extra query, since it's already unique
+    // by definition.
+    const companySlug = `${baseSlug || 'entreprise'}-${companyId.slice(0, 8)}`;
 
     await client.query(
       `INSERT INTO companies 

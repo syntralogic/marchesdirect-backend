@@ -43,6 +43,18 @@ router.post(
       res.status(201).json(result);
     } catch (err: any) {
       logger.error('Register route error:', err);
+      // Never leak a raw Postgres error (e.g. "duplicate key value violates
+      // unique constraint...") straight to the signup form. err.code is only
+      // ever set on a raw pg driver error, never on the plain Error objects
+      // this service throws itself (like "Email already registered"), so it
+      // reliably tells apart "expected, safe to show" from "unexpected,
+      // translate to something generic".
+      if (err.code === '23505') {
+        return res.status(409).json({ error: 'Un compte existe déjà avec ces informations.' });
+      }
+      if (err.code) {
+        return res.status(500).json({ error: 'Une erreur est survenue. Veuillez réessayer.' });
+      }
       res.status(400).json({ error: err.message || 'Registration failed' });
     }
   }
