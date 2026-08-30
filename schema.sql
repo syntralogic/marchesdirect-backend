@@ -733,6 +733,7 @@ CREATE TABLE crm_leads (
   crm_last_sync TIMESTAMP,
   
   status VARCHAR(50) DEFAULT 'new',         -- 'new', 'contacted', 'qualified', 'converted', 'lost'
+  session_id VARCHAR(100),                  -- links back to visitor_events for this visitor's journey
   
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -741,6 +742,22 @@ CREATE TABLE crm_leads (
 CREATE INDEX crm_leads_email ON crm_leads(email);
 CREATE INDEX crm_leads_status ON crm_leads(status);
 CREATE INDEX crm_leads_crm ON crm_leads(crm_sync_status);
+CREATE INDEX crm_leads_session ON crm_leads(session_id);
+
+-- Anonymous visitor journey tracking (searches, fiches viewed, SEO landing
+-- pages) - see applyIncrementalMigrations() in config/database.ts for the
+-- full rationale, kept in sync here for fresh installs.
+CREATE TABLE visitor_events (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  session_id VARCHAR(100) NOT NULL,
+  brand_id UUID REFERENCES brands(id),
+  event_type VARCHAR(50) NOT NULL,
+  event_label VARCHAR(500),
+  event_data JSONB,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX visitor_events_session ON visitor_events(session_id);
+CREATE INDEX visitor_events_created ON visitor_events(created_at);
 
 -- ============================================================================
 -- 12b. OPPORTUNITY DETAIL PAGE - GRADUATED ACCESS + SUBCONTRACT NEEDS

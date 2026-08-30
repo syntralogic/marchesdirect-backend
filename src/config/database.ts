@@ -369,4 +369,26 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   await pool.query(`CREATE INDEX IF NOT EXISTS subcontract_needs_company ON subcontract_needs(company_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS subcontract_needs_status ON subcontract_needs(status)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS subcontract_needs_expires ON subcontract_needs(expires_at)`);
+
+  // Anonymous visitor journey tracking: lets a "chargé d'affaires" calling a
+  // lead back see what that person actually searched for and looked at
+  // (searches, opportunity fiches, SEO landing pages) instead of having to
+  // ask "what were you looking for again?" from scratch. session_id is a
+  // client-generated id persisted in localStorage - matched to a lead once
+  // that visitor submits any contact form.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS visitor_events (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      session_id VARCHAR(100) NOT NULL,
+      brand_id UUID REFERENCES brands(id),
+      event_type VARCHAR(50) NOT NULL,   -- 'search', 'view_opportunity', 'view_seo_page'
+      event_label VARCHAR(500),          -- human-readable summary shown to staff
+      event_data JSONB,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS visitor_events_session ON visitor_events(session_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS visitor_events_created ON visitor_events(created_at)`);
+  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS session_id VARCHAR(100)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS crm_leads_session ON crm_leads(session_id)`);
 };

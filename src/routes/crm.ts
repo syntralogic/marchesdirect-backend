@@ -16,12 +16,16 @@ const router = Router();
 // in the system via these two routes.
 router.use(requireRole(['admin', 'super_admin']));
 
-// GET /api/crm/leads - list captured leads (admin/staff)
+// GET /api/crm/leads - list captured leads (admin/staff). Excludes
+// opportunity-tied leads (opportunity_id IS NOT NULL) - those have their own
+// dedicated review flow at GET /api/admin/opportunity-leads (graduated
+// access grant), shown on the admin "Demandes" page. This endpoint is for
+// the generic contact/appointment/callback leads instead.
 router.get('/leads', async (req: Request, res: Response) => {
   try {
-    const { status, brand_id, page = '1', limit = '50' } = req.query as Record<string, string>;
+    const { status, brand_id, lead_source, page = '1', limit = '50' } = req.query as Record<string, string>;
 
-    const conditions: string[] = ['1=1'];
+    const conditions: string[] = ['opportunity_id IS NULL'];
     const params: any[] = [];
     let idx = 1;
 
@@ -33,6 +37,10 @@ router.get('/leads', async (req: Request, res: Response) => {
       conditions.push(`brand_id = $${idx++}`);
       params.push(brand_id);
     }
+    if (lead_source) {
+      conditions.push(`lead_source = $${idx++}`);
+      params.push(lead_source);
+    }
 
     const pageNum = Math.max(parseInt(page) || 1, 1);
     const limitNum = Math.min(Math.max(parseInt(limit) || 50, 1), 200);
@@ -43,8 +51,12 @@ router.get('/leads', async (req: Request, res: Response) => {
        ORDER BY created_at DESC LIMIT $${idx++} OFFSET $${idx++}`,
       [...params, limitNum, offset]
     );
+    const countResult = await db.query(
+      `SELECT COUNT(*)::int as total FROM crm_leads WHERE ${conditions.join(' AND ')}`,
+      params
+    );
 
-    res.json(result.rows);
+    res.json({ results: result.rows, pagination: { total: countResult.rows[0].total, page: pageNum, limit: limitNum } });
   } catch (err: any) {
     logger.error('CRM leads list error:', err);
     res.status(500).json({ error: 'Failed to fetch leads' });

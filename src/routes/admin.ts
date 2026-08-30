@@ -741,4 +741,29 @@ router.put('/opportunity-leads/:id/grant-access', async (req: AuthRequest, res: 
   }
 });
 
+// GET /api/admin/leads/:id/journey - visitor_events for this lead's session,
+// so a chargé d'affaires calling the lead back can see what they searched
+// for and looked at instead of re-asking from scratch (client requirement).
+router.get('/leads/:id/journey', async (req: AuthRequest, res: Response) => {
+  try {
+    const leadResult = await db.query('SELECT session_id, email FROM crm_leads WHERE id = $1', [req.params.id]);
+    if (leadResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+    const { session_id } = leadResult.rows[0];
+    if (!session_id) {
+      return res.json({ events: [] });
+    }
+    const eventsResult = await db.query(
+      `SELECT event_type, event_label, event_data, created_at
+       FROM visitor_events WHERE session_id = $1 ORDER BY created_at ASC`,
+      [session_id]
+    );
+    res.json({ events: eventsResult.rows });
+  } catch (err: any) {
+    logger.error('Admin lead journey error:', err);
+    res.status(500).json({ error: 'Failed to fetch visitor journey' });
+  }
+});
+
 export default router;

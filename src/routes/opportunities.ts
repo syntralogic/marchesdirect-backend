@@ -320,6 +320,7 @@ router.post(
     body('firstName').optional({ checkFalsy: true }).isString().trim(),
     body('lastName').optional({ checkFalsy: true }).isString().trim(),
     body('companyName').optional({ checkFalsy: true }).isString().trim(),
+    body('sessionId').optional({ checkFalsy: true }).isString().trim().isLength({ max: 100 }),
   ],
   async (req: Request, res: Response) => {
     const errors = validationResult(req);
@@ -343,7 +344,7 @@ router.post(
         return res.json({ level: 'full' });
       }
 
-      const { firstName, lastName, email, phone, companyName } = req.body;
+      const { firstName, lastName, email, phone, companyName, sessionId } = req.body;
 
       // A default brand is used when the opportunity's type isn't itself
       // brand-scoped (opportunity_types.brand_id can be NULL, meaning "all
@@ -365,18 +366,19 @@ router.post(
         leadId = existing.rows[0].id;
         await db.query(
           `UPDATE crm_leads SET first_name = COALESCE($1, first_name), last_name = COALESCE($2, last_name),
-             phone = COALESCE($3, phone), company_name = COALESCE($4, company_name), updated_at = NOW()
-           WHERE id = $5`,
-          [firstName, lastName, phone, companyName, leadId]
+             phone = COALESCE($3, phone), company_name = COALESCE($4, company_name),
+             session_id = COALESCE(session_id, $5), updated_at = NOW()
+           WHERE id = $6`,
+          [firstName, lastName, phone, companyName, sessionId || null, leadId]
         );
       } else {
         const insertResult = await db.query(
           `INSERT INTO crm_leads
             (brand_id, first_name, last_name, email, phone, company_name, lead_source, message,
-             opportunity_id, access_level, crm_sync_status)
-           VALUES ($1, $2, $3, $4, $5, $6, 'opportunity_detail_page', $7, $8, 'level2', 'pending')
+             opportunity_id, access_level, session_id, crm_sync_status)
+           VALUES ($1, $2, $3, $4, $5, $6, 'opportunity_detail_page', $7, $8, 'level2', $9, 'pending')
            RETURNING id`,
-          [brandId, firstName, lastName, email, phone, companyName, `Demande d'accès enrichi : ${opp.title}`, req.params.id]
+          [brandId, firstName, lastName, email, phone, companyName, `Demande d'accès enrichi : ${opp.title}`, req.params.id, sessionId || null]
         );
         leadId = insertResult.rows[0].id;
         syncLeadToCrm(leadId).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
