@@ -146,7 +146,17 @@ router.get('/:tenderId/bid', async (req: AuthRequest, res: Response) => {
 });
 
 // PUT /api/tenders/bid/:bidId - update bid response (pricing, engagement act, memo edits)
-router.put('/bid/:bidId', async (req: AuthRequest, res: Response) => {
+// PUT /api/tenders/bid/:bidId - save/validate the candidature workspace
+// (mémoire technique, pricing schedule, engagement act, submission status).
+// Gated behind an active subscription like the rest of the candidature
+// flow ("Analyse du DCE et candidature : réservées à l'offre payante" is
+// shown everywhere else in the app) - this was the one write path that
+// wasn't actually checked: a free/trial company could type its own memo
+// text into this endpoint directly (bypassing the gated AI-generate step
+// entirely) and then successfully download the finished ZIP package, since
+// GET /bid/:bidId/package only checks whether technical_memo_text is
+// non-null, not how it got there.
+router.put('/bid/:bidId', requireActiveSubscription, async (req: AuthRequest, res: Response) => {
   try {
     const fields = [
       'technical_memo_text', 'is_technical_memo_approved', 'engagement_act_text',
