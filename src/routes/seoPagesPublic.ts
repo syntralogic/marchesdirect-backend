@@ -33,10 +33,12 @@ router.get('/:slug', async (req: Request, res: Response) => {
   try {
     const brandId = await resolveBrandId(req);
     const result = await db.query(
-      `SELECT page_slug, page_title, page_meta_description, page_keywords, page_content,
-              filter_trade_id, filter_region, filter_city, filter_department
-       FROM seo_pages
-       WHERE brand_id = $1 AND page_slug = $2 AND is_published = true`,
+      `SELECT sp.page_slug, sp.page_title, sp.page_meta_description, sp.page_keywords, sp.page_content,
+              sp.filter_trade_id, sp.filter_region, sp.filter_city, sp.filter_department,
+              ot.code as filter_journey
+       FROM seo_pages sp
+       LEFT JOIN opportunity_types ot ON sp.filter_opportunity_type_id = ot.id
+       WHERE sp.brand_id = $1 AND sp.page_slug = $2 AND sp.is_published = true`,
       [brandId, req.params.slug]
     );
 

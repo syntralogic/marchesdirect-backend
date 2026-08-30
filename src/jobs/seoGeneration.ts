@@ -17,6 +17,66 @@ const slugify = (text: string) =>
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
 
+// Journey-specific copy for the city pages below - these are the exact
+// search terms the client asked to rank for ("appel d'offres Bordeaux",
+// "sous-traitance Paris"), which is a different axis (city x journey type)
+// than the trade x region pages generatePagesForBrand() already produces.
+const JOURNEY_COPY: Record<string, { term: string; noun: string }> = {
+  public_procurement: { term: 'marchés publics', noun: 'marché public' },
+  tender: { term: "appels d'offres", noun: "appel d'offres" },
+  subcontracting: { term: 'sous-traitance', noun: 'mission de sous-traitance' },
+};
+
+const generateCityJourneyPagesForBrand = async (brandId: string) => {
+  let created = 0;
+  let updated = 0;
+
+  // City x journey-type combinations with at least one active opportunity -
+  // same "only generate what's real" rule as the trade x region pages below,
+  // so we never publish a page promising results a search won't actually
+  // return.
+  const combos = await db.query(
+    `SELECT o.location_city, ot.code as journey, ot.id as opportunity_type_id, COUNT(o.id) as opp_count
+     FROM opportunities o
+     JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+     WHERE o.status = 'active' AND o.deleted_at IS NULL
+       AND o.location_city IS NOT NULL AND o.location_city != ''
+     GROUP BY o.location_city, ot.code, ot.id
+     HAVING COUNT(o.id) > 0`
+  );
+
+  for (const combo of combos.rows) {
+    const copy = JOURNEY_COPY[combo.journey];
+    if (!copy) continue; // unknown/future journey code - skip rather than guess wording
+
+    const slug = `${slugify(copy.noun)}-${slugify(combo.location_city)}`;
+    const title = `${copy.noun.charAt(0).toUpperCase()}${copy.noun.slice(1)} à ${combo.location_city} — Marchés Direct`;
+    const metaDescription = `${combo.opp_count} ${copy.term} actuellement ouverts à ${combo.location_city}. Consultez les annonces et candidatez directement.`;
+    const content = `Marchés Direct référence actuellement ${combo.opp_count} ${copy.noun}${Number(combo.opp_count) > 1 ? 's' : ''} à ${combo.location_city}. Consultez le détail de chaque annonce, analysez votre compatibilité et préparez votre candidature directement depuis la plateforme.`;
+
+    const existing = await db.query('SELECT id FROM seo_pages WHERE page_slug = $1', [slug]);
+
+    if (existing.rows.length > 0) {
+      await db.query(
+        `UPDATE seo_pages SET page_title = $1, page_meta_description = $2, page_content = $3, updated_at = NOW()
+         WHERE id = $4`,
+        [title, metaDescription, content, existing.rows[0].id]
+      );
+      updated++;
+    } else {
+      await db.query(
+        `INSERT INTO seo_pages
+          (brand_id, page_type, page_slug, page_title, page_meta_description, page_content, filter_city, filter_opportunity_type_id, is_published)
+         VALUES ($1, 'city_journey', $2, $3, $4, $5, $6, $7, true)`,
+        [brandId, slug, title, metaDescription, content, combo.location_city, combo.opportunity_type_id]
+      );
+      created++;
+    }
+  }
+
+  return { created, updated };
+};
+
 const generatePagesForBrand = async (brandId: string) => {
   let created = 0;
   let updated = 0;
@@ -72,6 +132,9 @@ const runSEOGeneration = async () => {
       const { created, updated } = await generatePagesForBrand(brand.id);
       totalCreated += created;
       totalUpdated += updated;
+      const cityJourney = await generateCityJourneyPagesForBrand(brand.id);
+      totalCreated += cityJourney.created;
+      totalUpdated += cityJourney.updated;
     }
 
     logger.info(`[Job] SEO generation complete: ${totalCreated} created, ${totalUpdated} updated`);
