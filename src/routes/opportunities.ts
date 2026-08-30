@@ -9,6 +9,34 @@ import { optionalAuth, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 
+// Shared by GET /:id (to decide what to redact) and GET /:id/access (to
+// report the level directly) so the two can never disagree about who has
+// access to what.
+async function resolveAccessLevel(opportunityId: string, journey: string, email: string): Promise<'level1' | 'level2' | 'level3' | 'full'> {
+  if (journey === 'public_procurement') return 'full';
+  if (!email) return 'level1';
+  const leadResult = await db.query(
+    `SELECT access_level FROM crm_leads
+     WHERE opportunity_id = $1 AND LOWER(email) = $2
+     ORDER BY CASE access_level WHEN 'level3' THEN 2 WHEN 'level2' THEN 1 ELSE 0 END DESC
+     LIMIT 1`,
+    [opportunityId, email.trim().toLowerCase()]
+  );
+  return leadResult.rows[0]?.access_level === 'level3' ? 'level3'
+    : leadResult.rows[0]?.access_level === 'level2' ? 'level2'
+    : 'level1';
+}
+
+// Fields hidden from a level1 (teaser-only) visitor on a private tender or
+// sous-traitance fiche - the whole point of the graduated-access flow is
+// defeated if the "locked" content is sitting right there in the JSON
+// response for anyone to read from the network tab regardless of what the
+// UI chooses to render.
+const LEVEL1_REDACTED_FIELDS = [
+  'description', 'estimated_value', 'buyer_name', 'raw_data',
+  'estimated_start_date', 'estimated_end_date', 'source_reference', 'cpv_display',
+];
+
 // GET /api/opportunities - search & filter listings (public, powers the 3 journeys)
 router.get('/', optionalAuth, async (req: Request, res: Response) => {
   try {
@@ -207,7 +235,7 @@ router.get('/stats/near', async (req: Request, res: Response) => {
 });
 
 // GET /api/opportunities/:id - detail page
-router.get('/:id', optionalAuth, async (req: Request, res: Response) => {
+router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
   try {
     const result = await db.query(
       `SELECT o.*, ot.code as journey, ot.name as journey_name, t.name as trade_name,
@@ -225,7 +253,15 @@ router.get('/:id', optionalAuth, async (req: Request, res: Response) => {
     }
 
     const opportunity = result.rows[0];
-    opportunity.source_url = extractSourceUrl(opportunity.raw_data);
+    const email = (req.user?.email || (req.query.email as string) || '');
+    const level = await resolveAccessLevel(req.params.id, opportunity.journey, email);
+
+    if (level === 'level1') {
+      for (const field of LEVEL1_REDACTED_FIELDS) delete opportunity[field];
+    } else {
+      opportunity.source_url = extractSourceUrl(opportunity.raw_data);
+    }
+    opportunity.access_level = level;
 
     res.json(opportunity);
   } catch (err: any) {
@@ -261,25 +297,8 @@ router.get('/:id/access', optionalAuth, async (req: AuthRequest, res: Response) 
     if (oppResult.rows.length === 0) {
       return res.status(404).json({ error: 'Opportunity not found' });
     }
-    if (oppResult.rows[0].journey === 'public_procurement') {
-      return res.json({ level: 'full' });
-    }
-
-    const email = (req.user?.email || (req.query.email as string) || '').trim().toLowerCase();
-    if (!email) {
-      return res.json({ level: 'level1' });
-    }
-
-    const leadResult = await db.query(
-      `SELECT access_level FROM crm_leads
-       WHERE opportunity_id = $1 AND LOWER(email) = $2
-       ORDER BY CASE access_level WHEN 'level3' THEN 2 WHEN 'level2' THEN 1 ELSE 0 END DESC
-       LIMIT 1`,
-      [req.params.id, email]
-    );
-    const level = leadResult.rows[0]?.access_level === 'level3' ? 'level3'
-      : leadResult.rows[0]?.access_level === 'level2' ? 'level2'
-      : 'level1';
+    const email = (req.user?.email || (req.query.email as string) || '');
+    const level = await resolveAccessLevel(req.params.id, oppResult.rows[0].journey, email);
     res.json({ level });
   } catch (err: any) {
     logger.error('Opportunity access check error:', err);
