@@ -391,4 +391,14 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   await pool.query(`CREATE INDEX IF NOT EXISTS visitor_events_created ON visitor_events(created_at)`);
   await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS session_id VARCHAR(100)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS crm_leads_session ON crm_leads(session_id)`);
+
+  // Prototype V17 rule: on a private tender / sous-traitance fiche, only the
+  // buyer's identity is ever locked (everything else - amount, tasks,
+  // deadline, score - is open like a public-market fiche). That identity
+  // unlocks ONLY when the visitor books a specific callback slot, never on
+  // "call me back, no particular time" and never on merely leaving an
+  // email. appointment_mode distinguishes the two; appointment_slot_at is
+  // only set for the 'slot' case.
+  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS appointment_mode VARCHAR(20)`);
+  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS appointment_slot_at TIMESTAMP`);
 };

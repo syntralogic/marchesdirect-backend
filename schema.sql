@@ -734,6 +734,8 @@ CREATE TABLE crm_leads (
   
   status VARCHAR(50) DEFAULT 'new',         -- 'new', 'contacted', 'qualified', 'converted', 'lost'
   session_id VARCHAR(100),                  -- links back to visitor_events for this visitor's journey
+  appointment_mode VARCHAR(20),             -- 'slot' | 'callback' - see resolveAccessLevel() in routes/opportunities.ts
+  appointment_slot_at TIMESTAMP,            -- only set when appointment_mode = 'slot'
   
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

@@ -10,32 +10,42 @@ import { optionalAuth, AuthRequest } from '../middleware/auth';
 const router = Router();
 
 // Shared by GET /:id (to decide what to redact) and GET /:id/access (to
-// report the level directly) so the two can never disagree about who has
-// access to what.
-async function resolveAccessLevel(opportunityId: string, journey: string, email: string): Promise<'level1' | 'level2' | 'level3' | 'full'> {
-  if (journey === 'public_procurement') return 'full';
-  if (!email) return 'level1';
-  const leadResult = await db.query(
-    `SELECT access_level FROM crm_leads
-     WHERE opportunity_id = $1 AND LOWER(email) = $2
-     ORDER BY CASE access_level WHEN 'level3' THEN 2 WHEN 'level2' THEN 1 ELSE 0 END DESC
-     LIMIT 1`,
-    [opportunityId, email.trim().toLowerCase()]
-  );
-  return leadResult.rows[0]?.access_level === 'level3' ? 'level3'
-    : leadResult.rows[0]?.access_level === 'level2' ? 'level2'
-    : 'level1';
+// report the unlock state directly) so the two can never disagree.
+//
+// Business rule (client, prototype V17): a public-market fiche is always
+// fully open - the data is public record already. A private-tender or
+// sous-traitance fiche stays open too (amount, tasks, deadline, score,
+// criteria - everything a company needs to judge fit) EXCEPT the buyer's
+// identity, which unlocks only when the visitor books a *specific* callback
+// slot for that opportunity - never merely by leaving an email, and never
+// by choosing "call me back, no particular time".
+async function resolveIdentityUnlocked(opportunityId: string, journey: string, sessionId: string, email: string): Promise<boolean> {
+  if (journey === 'public_procurement') return true;
+  if (!sessionId && !email) return false;
+
+  const conditions: string[] = ['opportunity_id = $1'];
+  const params: any[] = [opportunityId];
+  let idx = 2;
+  const matchClauses: string[] = [];
+  if (sessionId) { matchClauses.push(`session_id = $${idx++}`); params.push(sessionId); }
+  if (email) { matchClauses.push(`LOWER(email) = $${idx++}`); params.push(email.trim().toLowerCase()); }
+  conditions.push(`(${matchClauses.join(' OR ')})`);
+  // A booked slot unlocks it directly (appointment_mode = 'slot'); so does a
+  // manual staff grant on the older access_level column, kept for backward
+  // compatibility with the admin "Demandes" review flow.
+  conditions.push(`(appointment_mode = 'slot' OR access_level = 'level3')`);
+
+  const result = await db.query(`SELECT 1 FROM crm_leads WHERE ${conditions.join(' AND ')} LIMIT 1`, params);
+  return result.rows.length > 0;
 }
 
-// Fields hidden from a level1 (teaser-only) visitor on a private tender or
-// sous-traitance fiche - the whole point of the graduated-access flow is
-// defeated if the "locked" content is sitting right there in the JSON
-// response for anyone to read from the network tab regardless of what the
-// UI chooses to render.
-const LEVEL1_REDACTED_FIELDS = [
-  'description', 'estimated_value', 'buyer_name', 'raw_data',
-  'estimated_start_date', 'estimated_end_date', 'source_reference', 'cpv_display',
-];
+// Buyer-identity fields hidden on a private tender / sous-traitance fiche
+// until resolveIdentityUnlocked() is true. Deliberately narrow - per the
+// rule above, nothing else on the fiche is ever locked. Note: the schema
+// only stores buyer_name today; a named contact person, direct email/phone,
+// and exact street address (also called out in the spec) aren't captured
+// anywhere yet - see the ingest pipeline, not this list, for that gap.
+const IDENTITY_REDACTED_FIELDS = ['buyer_name', 'raw_data'];
 
 // GET /api/opportunities - search & filter listings (public, powers the 3 journeys)
 router.get('/', optionalAuth, async (req: Request, res: Response) => {
@@ -253,15 +263,16 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     }
 
     const opportunity = result.rows[0];
+    const sessionId = (req.query.sessionId as string) || '';
     const email = (req.user?.email || (req.query.email as string) || '');
-    const level = await resolveAccessLevel(req.params.id, opportunity.journey, email);
+    const unlocked = await resolveIdentityUnlocked(req.params.id, opportunity.journey, sessionId, email);
 
-    if (level === 'level1') {
-      for (const field of LEVEL1_REDACTED_FIELDS) delete opportunity[field];
+    if (!unlocked) {
+      for (const field of IDENTITY_REDACTED_FIELDS) delete opportunity[field];
     } else {
       opportunity.source_url = extractSourceUrl(opportunity.raw_data);
     }
-    opportunity.access_level = level;
+    opportunity.identity_unlocked = unlocked;
 
     res.json(opportunity);
   } catch (err: any) {
@@ -297,21 +308,22 @@ router.get('/:id/access', optionalAuth, async (req: AuthRequest, res: Response) 
     if (oppResult.rows.length === 0) {
       return res.status(404).json({ error: 'Opportunity not found' });
     }
+    const sessionId = (req.query.sessionId as string) || '';
     const email = (req.user?.email || (req.query.email as string) || '');
-    const level = await resolveAccessLevel(req.params.id, oppResult.rows[0].journey, email);
-    res.json({ level });
+    const unlocked = await resolveIdentityUnlocked(req.params.id, oppResult.rows[0].journey, sessionId, email);
+    res.json({ identityUnlocked: unlocked });
   } catch (err: any) {
     logger.error('Opportunity access check error:', err);
     res.status(500).json({ error: 'Failed to check access' });
   }
 });
 
-// POST /api/opportunities/:id/request-access - "Laisser mes coordonnées":
-// immediately grants level2 (aperçu enrichi) and creates/updates the CRM
-// lead so a chargé d'affaires can review it for a level3 (accès complet)
-// upgrade. Public, matches how the rest of the site's lead forms work
-// (see routes/crmPublic.ts) - a visitor filling this in doesn't have an
-// account yet.
+// POST /api/opportunities/:id/request-access - "Comment souhaitez-vous
+// continuer ?" (prototype V17, section 3.5): exactly two choices, both of
+// which create/update the CRM lead, but only 'slot' unlocks the buyer's
+// identity - 'callback' (no particular time) never does, however many
+// times it's used. No-op on a public-market opportunity, which has nothing
+// to unlock.
 router.post(
   '/:id/request-access',
   [
@@ -321,6 +333,9 @@ router.post(
     body('lastName').optional({ checkFalsy: true }).isString().trim(),
     body('companyName').optional({ checkFalsy: true }).isString().trim(),
     body('sessionId').optional({ checkFalsy: true }).isString().trim().isLength({ max: 100 }),
+    body('mode').isIn(['slot', 'callback']),
+    body('slotLabel').if(body('mode').equals('slot')).isString().trim().isLength({ min: 1, max: 100 }),
+    body('slotAt').optional({ checkFalsy: true }).isISO8601(),
   ],
   async (req: Request, res: Response) => {
     const errors = validationResult(req);
@@ -341,10 +356,10 @@ router.post(
       }
       const opp = oppResult.rows[0];
       if (opp.journey === 'public_procurement') {
-        return res.json({ level: 'full' });
+        return res.json({ identityUnlocked: true });
       }
 
-      const { firstName, lastName, email, phone, companyName, sessionId } = req.body;
+      const { firstName, lastName, email, phone, companyName, sessionId, mode, slotLabel, slotAt } = req.body;
 
       // A default brand is used when the opportunity's type isn't itself
       // brand-scoped (opportunity_types.brand_id can be NULL, meaning "all
@@ -357,35 +372,36 @@ router.post(
       }
 
       const existing = await db.query(
-        `SELECT id, access_level FROM crm_leads WHERE opportunity_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
+        `SELECT id FROM crm_leads WHERE opportunity_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
         [req.params.id, email]
       );
 
+      const message = mode === 'slot' ? `Créneau choisi : ${slotLabel}` : 'Rappel demandé, sans créneau précis';
       let leadId: string;
       if (existing.rows.length > 0) {
         leadId = existing.rows[0].id;
         await db.query(
           `UPDATE crm_leads SET first_name = COALESCE($1, first_name), last_name = COALESCE($2, last_name),
              phone = COALESCE($3, phone), company_name = COALESCE($4, company_name),
-             session_id = COALESCE(session_id, $5), updated_at = NOW()
-           WHERE id = $6`,
-          [firstName, lastName, phone, companyName, sessionId || null, leadId]
+             session_id = COALESCE(session_id, $5), appointment_mode = $6, appointment_slot_at = $7,
+             message = $8, updated_at = NOW()
+           WHERE id = $9`,
+          [firstName, lastName, phone, companyName, sessionId || null, mode, mode === 'slot' ? slotAt || null : null, message, leadId]
         );
       } else {
         const insertResult = await db.query(
           `INSERT INTO crm_leads
             (brand_id, first_name, last_name, email, phone, company_name, lead_source, message,
-             opportunity_id, access_level, session_id, crm_sync_status)
-           VALUES ($1, $2, $3, $4, $5, $6, 'opportunity_detail_page', $7, $8, 'level2', $9, 'pending')
+             opportunity_id, session_id, appointment_mode, appointment_slot_at, crm_sync_status)
+           VALUES ($1, $2, $3, $4, $5, $6, 'opportunity_detail_page', $7, $8, $9, $10, $11, 'pending')
            RETURNING id`,
-          [brandId, firstName, lastName, email, phone, companyName, `Demande d'accès enrichi : ${opp.title}`, req.params.id, sessionId || null]
+          [brandId, firstName, lastName, email, phone, companyName, message, req.params.id, sessionId || null, mode, mode === 'slot' ? slotAt || null : null]
         );
         leadId = insertResult.rows[0].id;
         syncLeadToCrm(leadId).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
       }
 
-      const level = existing.rows[0]?.access_level === 'level3' ? 'level3' : 'level2';
-      res.status(201).json({ level, leadId });
+      res.status(201).json({ identityUnlocked: mode === 'slot', leadId });
     } catch (err: any) {
       logger.error('Opportunity access request error:', err);
       res.status(500).json({ error: 'Failed to submit — please try again' });
