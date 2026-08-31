@@ -401,4 +401,23 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // only set for the 'slot' case.
   await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS appointment_mode VARCHAR(20)`);
   await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS appointment_slot_at TIMESTAMP`);
+
+  // Prototype V17 rule: `companyKnown` is a single global flag per browser
+  // session, not per-opportunity - once a visitor identifies their company
+  // via SIRET on any fiche, they're recognized everywhere without
+  // re-entering it, and the compatibility score never displays anywhere
+  // until this exists. Session-scoped (not user-scoped) because this
+  // happens before an account exists.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS siret_lookups (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      session_id VARCHAR(100) NOT NULL UNIQUE,
+      siret VARCHAR(14) NOT NULL,
+      company_data JSONB NOT NULL,   -- name, legal, created, capital, address, city, postal,
+                                      -- director, employees, ape, activity + detected online
+                                      -- presence (website/facebook/google) once that lookup exists
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS siret_lookups_session ON siret_lookups(session_id)`);
 };

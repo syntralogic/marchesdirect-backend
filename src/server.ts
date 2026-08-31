@@ -104,6 +104,7 @@ app.use('/api/subcontract-needs', require('./routes/subcontractNeeds').default);
 // Admin viewing/managing of captured leads stays behind authenticate below.
 app.use('/api/crm/leads', require('./routes/crmPublic').default);
 app.use('/api/visitor-events', require('./routes/visitorEvents').default);
+app.use('/api/siret', require('./routes/siret').default);
 
 // Protected routes (require authentication)
 app.use('/api/companies', authenticate, require('./routes/companies').default);

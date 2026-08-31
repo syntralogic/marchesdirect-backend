@@ -761,6 +761,19 @@ CREATE TABLE visitor_events (
 CREATE INDEX visitor_events_session ON visitor_events(session_id);
 CREATE INDEX visitor_events_created ON visitor_events(created_at);
 
+-- SIRET-based company recognition (prototype V17) - session-scoped, global
+-- per browser regardless of which opportunity triggered it. See
+-- applyIncrementalMigrations() in config/database.ts for the full
+-- rationale, kept in sync here for fresh installs.
+CREATE TABLE siret_lookups (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  session_id VARCHAR(100) NOT NULL UNIQUE,
+  siret VARCHAR(14) NOT NULL,
+  company_data JSONB NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX siret_lookups_session ON siret_lookups(session_id);
+
 -- ============================================================================
 -- 12b. OPPORTUNITY DETAIL PAGE - GRADUATED ACCESS + SUBCONTRACT NEEDS
 -- ============================================================================

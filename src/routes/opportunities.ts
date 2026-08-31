@@ -422,6 +422,26 @@ router.get('/:id/match-score', optionalAuth, async (req: AuthRequest, res: Respo
       const userResult = await db.query('SELECT company_id FROM users WHERE email = $1 AND deleted_at IS NULL', [req.user.email]);
       companyId = userResult.rows[0]?.company_id || null;
     }
+
+    // Prototype V17 rule: the score never displays before the visitor's
+    // company is identified (via SIRET, or by being logged in) - not on
+    // this fiche, not anywhere. A logged-in company always counts; an
+    // anonymous visitor needs a completed SIRET lookup for this session.
+    if (!companyId) {
+      const sessionId = req.query.sessionId as string;
+      const siretResult = sessionId
+        ? await db.query('SELECT 1 FROM siret_lookups WHERE session_id = $1', [sessionId])
+        : { rows: [] };
+      if (siretResult.rows.length === 0) {
+        return res.status(403).json({ error: 'company_not_identified', message: "Identifiez votre entreprise (SIRET) pour voir le score de compatibilité." });
+      }
+    }
+
+    // Note: a SIRET-identified-but-not-yet-registered visitor still gets the
+    // generic (non-personalized) breakdown below, same as before - fully
+    // personalizing against the SIRET-derived profile (trade/location
+    // inferred from the APE code, without an account) needs a deeper change
+    // to computeMatchScore, which today only reads a real `companies` row.
     const result = await computeMatchScore(req.params.id, companyId);
     res.json(result);
   } catch (err: any) {
