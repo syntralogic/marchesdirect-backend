@@ -262,6 +262,22 @@ router.get('/stats/near', async (req: Request, res: Response) => {
   }
 });
 
+// Spec section 3.2/3.4: an aggregated, name-free stat about the buyer
+// ("14 marchés similaires publiés en 3 ans") that must stay visible even
+// when the buyer's identity itself is locked - grouped server-side by the
+// real buyer_name before it's ever redacted from the response, so the count
+// is accurate without the name leaking. Pure SQL, no AI/LLM involved.
+async function computeBuyerHistoryCount(buyerName: string | null, opportunityId: string): Promise<number | null> {
+  if (!buyerName) return null;
+  const result = await db.query(
+    `SELECT COUNT(*)::int as count FROM opportunities
+     WHERE buyer_name = $1 AND id != $2 AND deleted_at IS NULL
+       AND publication_date > NOW() - INTERVAL '3 years'`,
+    [buyerName, opportunityId]
+  );
+  return result.rows[0]?.count ?? 0;
+}
+
 // GET /api/opportunities/:id - detail page
 router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
   try {
@@ -285,6 +301,11 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     const email = (req.user?.email || (req.query.email as string) || '');
     const unlocked = await resolveIdentityUnlocked(req.params.id, opportunity.journey, sessionId, email);
 
+    // Computed from the real buyer_name *before* it's redacted below - the
+    // count itself is never identity-revealing, so it goes out regardless
+    // of unlock state (spec explicitly calls this out as an exception).
+    opportunity.buyer_history_count = await computeBuyerHistoryCount(opportunity.buyer_name, opportunity.id);
+
     if (!unlocked) {
       for (const field of IDENTITY_REDACTED_FIELDS) delete opportunity[field];
       opportunity.ai_extracted_facts = redactExtractedFacts(opportunity.ai_extracted_facts);
@@ -292,6 +313,7 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
       opportunity.source_url = extractSourceUrl(opportunity.raw_data);
     }
     opportunity.identity_unlocked = unlocked;
+
 
     res.json(opportunity);
   } catch (err: any) {

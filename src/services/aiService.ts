@@ -384,6 +384,7 @@ Environnement: ${envPolicy?.policy_text || 'non renseignee dans le profil entrep
 // source record, kept intentionally separate so extraction failures never
 // silently corrupt the classification pipeline.
 export type ExtractedFact = { value: string; available: boolean };
+export type ExtractedListFact = { value: string[]; available: boolean };
 export type ExtractedOpportunityFacts = {
   buyer_name: ExtractedFact;
   contract_object: ExtractedFact;
@@ -392,6 +393,15 @@ export type ExtractedOpportunityFacts = {
   estimated_value: ExtractedFact;
   contact_email: ExtractedFact;
   required_qualifications: ExtractedFact;
+  // Added for prototype V17 parity ("équipe attendue" / "points de
+  // vigilance"). Same hard rule as every other field: only ever populated
+  // from what the source literally states - team_size_estimate is a
+  // workforce figure explicitly mentioned in the notice (not a guess based
+  // on budget/scope), and key_risks only lists warnings the source itself
+  // calls out (site visit required, retenue de garantie, pénalités de
+  // retard, etc.) - never inferred generic boilerplate.
+  team_size_estimate: ExtractedFact;
+  key_risks: ExtractedListFact;
 };
 
 export const extractOpportunityFacts = async (
@@ -409,9 +419,13 @@ export const extractOpportunityFacts = async (
 
 HARD RULE: for every field, only use what is literally present in the source text/data given below.
 If a field is not present in the source, you MUST return {"value": "not available", "available": false}
-for it - never guess, infer, or fill it with a plausible-sounding value. This rule is the entire point
-of this extraction step and is checked directly, so treat every field independently: some fields may be
-present while others are genuinely absent from the same record.
+for it (or {"value": [], "available": false} for the list field) - never guess, infer, or fill it with a
+plausible-sounding value. This rule is the entire point of this extraction step and is checked directly,
+so treat every field independently: some fields may be present while others are genuinely absent from the
+same record. In particular: team_size_estimate must be a workforce figure the source explicitly states
+(e.g. "équipe de 3 à 5 personnes"), never something you back into from budget or task scope. key_risks
+must only list warnings the source itself raises (site visit mandatory, retenue de garantie, pénalités de
+retard, etc.) - not generic boilerplate about procurement in general.
 
 Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
 {
@@ -421,7 +435,9 @@ Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
   "submission_deadline": {"value": "...", "available": true},
   "estimated_value": {"value": "not available", "available": false},
   "contact_email": {"value": "not available", "available": false},
-  "required_qualifications": {"value": "...", "available": true}
+  "required_qualifications": {"value": "...", "available": true},
+  "team_size_estimate": {"value": "not available", "available": false},
+  "key_risks": {"value": ["..."], "available": true}
 }`;
 
   const userMessage = `SOURCE RECORD (raw, as ingested from the connector):

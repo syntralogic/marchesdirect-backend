@@ -1159,3 +1159,9 @@ INSERT INTO trades (name, slug, description, cpv_code_id) VALUES
 ('Voirie et reseaux (VRD)', 'vrd', 'Road works and utility networks', (SELECT id FROM cpv_codes WHERE code = '45233000')),
 ('Batiment general', 'batiment-general', 'General building construction', (SELECT id FROM cpv_codes WHERE code = '45210000'))
 ON CONFLICT (name) DO NOTHING;
+
+-- Buyer-history stat on the opportunity detail page (spec: aggregated,
+-- name-free count of similar opportunities from the same buyer, shown even
+-- when the buyer's identity itself is locked) groups by buyer_name on every
+-- fiche view - index it so that stays cheap as the table grows.
+CREATE INDEX IF NOT EXISTS opportunities_buyer_name ON opportunities(buyer_name);
