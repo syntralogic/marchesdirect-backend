@@ -5,7 +5,7 @@ import { logger } from '../utils/logger';
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts } from '../services/aiService';
 import { computeMatchScore } from '../services/matchScoreService';
 import { syncLeadToCrm } from '../services/crmSyncService';
-import { optionalAuth, AuthRequest } from '../middleware/auth';
+import { optionalAuth, authenticate, requireRole, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 
@@ -46,6 +46,24 @@ async function resolveIdentityUnlocked(opportunityId: string, journey: string, s
 // and exact street address (also called out in the spec) aren't captured
 // anywhere yet - see the ingest pipeline, not this list, for that gap.
 const IDENTITY_REDACTED_FIELDS = ['buyer_name', 'raw_data'];
+
+// Sub-fields *inside* ai_extracted_facts (a JSONB blob, so not covered by
+// IDENTITY_REDACTED_FIELDS above) that can carry the same identity/contact
+// info the extraction step pulled out of raw_data - e.g. contact_email for
+// a private tender. POST /:id/extract-facts has no journey restriction, so
+// this can get populated on a locked opportunity same as a public one;
+// without this, `SELECT o.*` would leak it straight past the redaction
+// above the moment it's set, before any callback slot is ever booked.
+const IDENTITY_REDACTED_FACT_KEYS = ['buyer_name', 'contact_email'];
+
+function redactExtractedFacts(facts: Record<string, any> | null | undefined) {
+  if (!facts) return facts;
+  const redacted = { ...facts };
+  for (const key of IDENTITY_REDACTED_FACT_KEYS) {
+    if (redacted[key]) redacted[key] = { value: 'not available', available: false };
+  }
+  return redacted;
+}
 
 // GET /api/opportunities - search & filter listings (public, powers the 3 journeys)
 router.get('/', optionalAuth, async (req: Request, res: Response) => {
@@ -269,6 +287,7 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
 
     if (!unlocked) {
       for (const field of IDENTITY_REDACTED_FIELDS) delete opportunity[field];
+      opportunity.ai_extracted_facts = redactExtractedFacts(opportunity.ai_extracted_facts);
     } else {
       opportunity.source_url = extractSourceUrl(opportunity.raw_data);
     }
@@ -467,8 +486,11 @@ router.post('/:id/classify', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/opportunities/:id/summarize - trigger AI summary (Milestone 7)
-router.post('/:id/summarize', async (req: Request, res: Response) => {
+// POST /api/opportunities/:id/summarize - trigger AI summary (Milestone 7).
+// Admin-only: this calls the LLM on demand and has no rate limiting of its
+// own, so it stayed unauthenticated it'd be an open cost/DoS vector for
+// anyone who found the URL.
+router.post('/:id/summarize', authenticate, requireRole(['admin', 'super_admin']), async (req: Request, res: Response) => {
   try {
     const summary = await generateOpportunitySummary(req.params.id);
     res.json({ summary });
@@ -480,7 +502,10 @@ router.post('/:id/summarize', async (req: Request, res: Response) => {
 
 // POST /api/opportunities/:id/extract-facts - structured fact extraction with explicit
 // "not available" on missing fields (technical POC test acceptance criteria).
-router.post('/:id/extract-facts', async (req: Request, res: Response) => {
+// Admin-only for the same reason as /summarize above - also worth noting this
+// can populate ai_extracted_facts.contact_email on a *locked* private tender,
+// which is exactly why GET /:id redacts it via redactExtractedFacts() above.
+router.post('/:id/extract-facts', authenticate, requireRole(['admin', 'super_admin']), async (req: Request, res: Response) => {
   try {
     const facts = await extractOpportunityFacts(req.params.id);
     res.json({ facts });
