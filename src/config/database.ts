@@ -430,4 +430,15 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     )
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS siret_lookups_session ON siret_lookups(session_id)`);
+
+  // Client's explicit priority (WhatsApp): integrate the two public tender
+  // databases (BOAMP + DECP) as real content before finalizing UX, because
+  // testing against ~50 rows doesn't reflect real usage. BOAMP is already
+  // active by default in schema.sql's seed, but 'decp' was only ever seeded
+  // with active=false (schema.sql line ~1181) - meaning even though
+  // collectDecpData() is fully implemented and wired into the scheduler's
+  // dispatch switch, it could never actually run. Flipping both here
+  // (idempotent - safe to run on every boot) rather than only in schema.sql
+  // since that file doesn't re-run against an already-provisioned database.
+  await pool.query(`UPDATE data_sources SET active = true WHERE code IN ('boamp', 'decp')`);
 };

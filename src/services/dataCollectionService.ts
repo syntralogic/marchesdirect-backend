@@ -5,6 +5,36 @@ import { logger } from '../utils/logger';
 import { deduplicateOpportunities } from './deduplicationService';
 import { v4 as uuid } from 'uuid';
 
+// v2.1 caps each request at 100 records - a real collection run needs to
+// page through `offset` to get anywhere near the "several thousand, even
+// tens of thousands" volume the client explicitly asked for (WhatsApp:
+// testing the actual UX needs real content, not ~50 rows). Capped at
+// MAX_RECORDS_PER_RUN rather than looping until total_count is exhausted so
+// one run can't accidentally pull the entire multi-million-row BOAMP
+// dataset and blow through rate limits / run for hours - subsequent runs
+// (every 6h for BOAMP, 24h for DECP per data_sources.frequency_hours) keep
+// working through the backlog day over day.
+const PAGE_SIZE = 100;
+const MAX_RECORDS_PER_RUN = 3000;
+
+async function fetchAllPages(endpoint: string, baseParams: Record<string, unknown>, label: string): Promise<any[]> {
+  const all: any[] = [];
+  let offset = 0;
+  while (all.length < MAX_RECORDS_PER_RUN) {
+    const response = await axios.get(endpoint, {
+      params: { ...baseParams, limit: PAGE_SIZE, offset },
+      timeout: 30000,
+    });
+    const page = response.data.results || [];
+    all.push(...page);
+    const totalCount = response.data.total_count ?? all.length;
+    logger.info(`[${label}] Fetched page at offset ${offset}: ${page.length} records (${all.length}/${totalCount} so far)`);
+    if (page.length < PAGE_SIZE || all.length >= totalCount) break; // no more pages
+    offset += PAGE_SIZE;
+  }
+  return all.slice(0, MAX_RECORDS_PER_RUN);
+}
+
 const parser = new Parser();
 
 // ============================================================================
@@ -32,24 +62,23 @@ export const collectBoampData = async (sourceId: number) => {
     // Optional - only needed if a higher-rate-limit / authenticated endpoint is used later.
     const apiKey = process.env.BOAMP_API_KEY;
 
-    // Fetch data from BOAMP (last 24 hours), sorted by most recent publication first.
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    // Client's explicit ask (WhatsApp): the platform needs "several
+    // thousand, even tens of thousands" of listings before proper UX
+    // testing is possible - a rolling 24h window would only ever trickle in
+    // a day's worth of new notices even with pagination. Widened to 180
+    // days for a real one-time-feeling backfill; the steady-state trickle
+    // this naturally settles into afterward (re-running every 6h, existing
+    // rows just get updated not duplicated) still keeps recent notices
+    // fresh - this doesn't need separate "backfill mode" vs "daily mode"
+    // logic, just a wider window.
+    const since = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
-    // limit=100 is v2.1's per-request cap (v1's `rows` went up to 1000) - a
-    // production run needs to page through `offset` until total_count is
-    // exhausted rather than assuming one call covers the day, which this
-    // does not yet do. Flagged rather than silently under-fetching forever.
-    const response = await axios.get(endpoint, {
-      params: {
-        where: `dateparution >= date'${since}'`,
-        order_by: '-dateparution',
-        limit: 100,
-        ...(apiKey ? { apikey: apiKey } : {}),
-      },
-      timeout: 30000,
-    });
+    const rawRecords = await fetchAllPages(endpoint, {
+      where: `dateparution >= date'${since}'`,
+      order_by: '-dateparution',
+      ...(apiKey ? { apikey: apiKey } : {}),
+    }, 'BOAMP');
 
-    const rawRecords = response.data.results || [];
     const notices = rawRecords.map(normalizeBoampRecord);
     logger.info(`[BOAMP] Fetched ${notices.length} notices`);
 
@@ -280,24 +309,20 @@ export const collectDecpData = async (sourceId: number) => {
     const apiKey = process.env.DECP_API_KEY; // optional, public dataset works without one
 
     // DECP is award data (données de marchés déjà notifiés), not live "en
-    // cours" notices - a 24h publication window is too narrow (it can take
-    // buyers weeks to declare), so this pulls a rolling 30-day window on
-    // whichever date field the live schema turns out to use for that.
-    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    // cours" notices - a narrow recent window would barely capture anything
+    // since buyers can take weeks to declare. Widened to 180 days for the
+    // same "several thousand, even tens of thousands" backfill reason as
+    // BOAMP above (client's explicit WhatsApp ask) - this dataset alone has
+    // 656,837 records in the 2022 schema, so even a 180-day slice should
+    // comfortably clear a few thousand.
+    const since = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
-    // limit=100 is v2.1's per-request cap - same pagination caveat as the
-    // BOAMP connector above (offset paging not yet implemented).
-    const response = await axios.get(endpoint, {
-      params: {
-        where: `datepublicationdonnees >= date'${since}' OR datenotification >= date'${since}'`,
-        order_by: '-datepublicationdonnees',
-        limit: 100,
-        ...(apiKey ? { apikey: apiKey } : {}),
-      },
-      timeout: 30000,
-    });
+    const rawRecords = await fetchAllPages(endpoint, {
+      where: `datepublicationdonnees >= date'${since}' OR datenotification >= date'${since}'`,
+      order_by: '-datepublicationdonnees',
+      ...(apiKey ? { apikey: apiKey } : {}),
+    }, 'DECP');
 
-    const rawRecords = response.data.results || [];
     const notices = rawRecords.map(normalizeDecpRecord);
     logger.info(`[DECP] Fetched ${notices.length} notices`);
 

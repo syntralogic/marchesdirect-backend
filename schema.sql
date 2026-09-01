@@ -1178,6 +1178,6 @@ CREATE INDEX IF NOT EXISTS opportunities_buyer_name ON opportunities(buyer_name)
 -- ON CONFLICT here (unlike the INSERT above) so this file stays safely
 -- re-runnable even though the original seed block above isn't.
 INSERT INTO data_sources (code, name, feed_type, frequency_hours, active) VALUES
-('decp', 'DECP Consolidées (data.economie.gouv.fr)', 'api', 24, false),
+('decp', 'DECP Consolidées (data.economie.gouv.fr)', 'api', 24, true),
 ('batiweb', 'Batiweb - actualités/marchés (accès libre)', 'scraper', 24, false)
 ON CONFLICT (code) DO NOTHING;
