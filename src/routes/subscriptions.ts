@@ -22,17 +22,27 @@ router.get('/plans', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/subscriptions/checkout - create Stripe checkout session (requires auth)
+// POST /api/subscriptions/checkout - create Stripe checkout session
 //
-// Not called from anywhere in the frontend as of the pricing-page fix that
-// removed the self-serve /checkout/:planId route: the client's explicit
-// instruction (WhatsApp) is that this site never sells a subscription
-// directly - every plan's CTA leads to a phone call with sales, not a card
-// form. Left in place rather than deleted since Stripe itself may still be
-// how sales actually charges a customer after that call (e.g. an admin-
-// generated payment link), just not through this self-serve endpoint from
-// the public site.
+// DISABLED for self-serve/public use. The previous comment here (see git
+// history) only noted the frontend no longer links to this - but the route
+// itself still ran and would create a real Stripe charge for anyone who
+// called it directly (API client, an old cached frontend bundle, a mobile
+// build, etc.), with zero human involved. That's the exact thing the
+// client's instruction rules out ("aucune souscription possible directement
+// sur le site"), so this now actively refuses rather than just being
+// unlinked. The real session-creation logic is kept below (renamed, unused)
+// since an account manager wanting to text/email a client a payment link
+// after a phone call is a legitimate future use of the same Stripe code -
+// it would just need its own admin-authenticated route, not this public one.
 router.post('/checkout', authenticate, async (req: AuthRequest, res: Response) => {
+  return res.status(403).json({
+    error: 'Self-service subscription purchase is not available. An account manager will contact you to finalize your subscription by phone.',
+  });
+});
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- kept for a future admin/account-manager-initiated payment-link route
+const _createCheckoutSessionForAccountManagerUseOnly = async (req: AuthRequest, res: Response) => {
   if (!stripe) {
     return res.status(503).json({
       error: 'Payments not configured. STRIPE_SECRET_KEY is missing on the server.',
@@ -66,7 +76,7 @@ router.post('/checkout', authenticate, async (req: AuthRequest, res: Response) =
     logger.error('Checkout session error:', err);
     res.status(500).json({ error: 'Failed to create checkout session' });
   }
-});
+};
 
 // GET /api/subscriptions/me - current company's subscription (requires auth)
 router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
