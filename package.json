@@ -14,6 +14,7 @@
     "lint:fix": "eslint src --ext .ts --fix",
     "db:migrate": "node scripts/migrate.js",
     "db:seed": "node scripts/seed.js",
+    "backfill:opportunity-facts": "ts-node --files scripts/backfillOpportunityFacts.ts",
     "loadtest:generate": "node scripts/generateSyntheticListings.js",
     "loadtest:run": "node scripts/loadTest.js"
   },
