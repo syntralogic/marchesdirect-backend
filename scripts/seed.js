@@ -43,6 +43,7 @@ const pool = connectionString
 const demoOpportunities = [
   {
     sourceRef: "DEMO-PUB-1",
+    buyerName: "Departement du Gard",
     typeCode: "public_procurement",
     tradeSlug: "vrd",
     title: "Entretien des espaces verts departementaux",
@@ -56,6 +57,7 @@ const demoOpportunities = [
   },
   {
     sourceRef: "DEMO-PUB-2",
+    buyerName: "Ville de Montpellier",
     typeCode: "public_procurement",
     tradeSlug: "batiment-general",
     title: "Renovation energetique d'une ecole",
@@ -68,6 +70,7 @@ const demoOpportunities = [
   },
   {
     sourceRef: "DEMO-PUB-3",
+    buyerName: "Departement de Vaucluse",
     typeCode: "public_procurement",
     tradeSlug: "electricite",
     title: "Maintenance des installations electriques",
@@ -80,6 +83,7 @@ const demoOpportunities = [
   },
   {
     sourceRef: "DEMO-TEN-1",
+    buyerName: "Cabinet Architecture Rhodanienne",
     typeCode: "tender",
     tradeSlug: "batiment-general",
     title: "Renovation complete de 18 logements",
@@ -92,6 +96,7 @@ const demoOpportunities = [
   },
   {
     sourceRef: "DEMO-TEN-2",
+    buyerName: "Logistique Sud Promotion",
     typeCode: "tender",
     tradeSlug: "gros-oeuvre",
     title: "Construction d'une plateforme logistique",
@@ -104,6 +109,7 @@ const demoOpportunities = [
   },
   {
     sourceRef: "DEMO-TEN-3",
+    buyerName: "SCI Bureaux Presqu'ile",
     typeCode: "tender",
     tradeSlug: "platrerie",
     title: "Remise en etat de bureaux tertiaires",
@@ -116,6 +122,7 @@ const demoOpportunities = [
   },
   {
     sourceRef: "DEMO-SUB-1",
+    buyerName: "Batico Renovation",
     typeCode: "subcontracting",
     tradeSlug: "peinture",
     title: "Peinture interieure - chantier de 18 logements",
@@ -148,7 +155,7 @@ async function main() {
          source_id, source_reference, opportunity_type_id, trade_id,
          title, description, publication_date, deadline,
          estimated_value, currency, contract_type,
-         location_city, location_department, location_region,
+         location_city, location_department, location_region, buyer_name,
          status, ai_classification_status, ai_summary_status
        ) VALUES (
          $1, $2,
@@ -156,7 +163,7 @@ async function main() {
          (SELECT id FROM trades WHERE slug = $4),
          $5, $6, NOW(), NOW() + INTERVAL '21 days',
          $7, 'EUR', $8,
-         $9, $10, $11,
+         $9, $10, $11, $12,
          'active', 'not_analyzed', 'not_generated'
        )
        ON CONFLICT (source_id, source_reference) DO UPDATE SET
@@ -175,6 +182,7 @@ async function main() {
         o.city,
         o.department,
         o.region,
+        o.buyerName || null,
       ]
     );
   }

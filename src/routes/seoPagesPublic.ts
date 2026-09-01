@@ -1,20 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { resolveBrandId } from '../utils/brandResolution';
 
 const router = Router();
-
-// Resolves the requesting brand the same way GET /api/brands/current does -
-// match Host header against brands.domain, fall back to the first brand for
-// local dev / the single-brand site today.
-const resolveBrandId = async (req: Request): Promise<string | null> => {
-  const host = (req.hostname || '').replace(/^www\./, '');
-  let result = await db.query('SELECT id FROM brands WHERE domain = $1 LIMIT 1', [host]);
-  if (result.rows.length === 0) {
-    result = await db.query('SELECT id FROM brands ORDER BY created_at ASC LIMIT 1');
-  }
-  return result.rows[0]?.id ?? null;
-};
 
 // GET /api/seo-pages - published slugs only, for the frontend's sitemap.xml
 // generator. Milestone 11 auto-generates one row per (trade x region) with
@@ -44,10 +33,12 @@ router.get('/:slug', async (req: Request, res: Response) => {
   try {
     const brandId = await resolveBrandId(req);
     const result = await db.query(
-      `SELECT page_slug, page_title, page_meta_description, page_keywords, page_content,
-              filter_trade_id, filter_region, filter_city, filter_department
-       FROM seo_pages
-       WHERE brand_id = $1 AND page_slug = $2 AND is_published = true`,
+      `SELECT sp.page_slug, sp.page_title, sp.page_meta_description, sp.page_keywords, sp.page_content,
+              sp.filter_trade_id, sp.filter_region, sp.filter_city, sp.filter_department,
+              ot.code as filter_journey
+       FROM seo_pages sp
+       LEFT JOIN opportunity_types ot ON sp.filter_opportunity_type_id = ot.id
+       WHERE sp.brand_id = $1 AND sp.page_slug = $2 AND sp.is_published = true`,
       [brandId, req.params.slug]
     );
 

@@ -134,6 +134,10 @@ CREATE TABLE opportunities (
   location_department VARCHAR(100),         -- French department code
   location_latitude DECIMAL(10, 8),
   location_longitude DECIMAL(11, 8),
+  buyer_name VARCHAR(500),                  -- Awarding buyer / requesting company name
+                                             -- (BOAMP 'nomacheteur' etc.) - shown on the
+                                             -- fiche and used for sous-traitance mise en
+                                             -- relation, kept separate from location_city.
   
   -- Status
   status VARCHAR(50) DEFAULT 'active',      -- 'active', 'updated', 'expired', 'cancelled', 'awarded'
@@ -150,6 +154,10 @@ CREATE TABLE opportunities (
   ai_extracted_facts JSONB,                 -- Structured fact extraction (POC test): each field
                                              -- {"value": "...", "available": bool} - "not available"
                                              -- when the source record doesn't actually contain it.
+
+  -- DCE document ingestion (attachment download/parsing - see tender_documents table)
+  dce_documents_status VARCHAR(50) DEFAULT 'pending', -- 'pending', 'processing', 'fetched',
+                                             -- 'no_documents_found', 'external_platform_only', 'failed'
   
   -- Audit
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -263,6 +271,7 @@ CREATE TABLE users (
   last_name VARCHAR(255),
   phone VARCHAR(20),
   job_title VARCHAR(255),
+  avatar_url VARCHAR(500),
   
   -- Authentication
   email_verified BOOLEAN DEFAULT false,
@@ -280,6 +289,12 @@ CREATE TABLE users (
   
   -- Status
   status VARCHAR(50) DEFAULT 'active',
+
+  -- Notification preferences (Profile > Notifications tab). Defaults mirror
+  -- what the frontend showed as UI-only state before this column existed -
+  -- flipping a toggle now actually persists instead of silently resetting
+  -- on reload.
+  notification_preferences JSONB DEFAULT '{"emailAlerts": true, "newOpps": true, "deadlineAlerts": true, "weeklyDigest": false, "mobileNotifs": true}'::jsonb,
   
   -- Audit
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -372,6 +387,10 @@ CREATE TABLE company_certifications (
 
 -- Safe to re-run: covers anyone who already loaded schema.sql once before this
 -- column was added to the CREATE TABLE above (which only applies on first create).
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS buyer_name VARCHAR(500);
+
+-- Safe to re-run: covers anyone who already loaded schema.sql once before this
+-- column was added to the CREATE TABLE above (which only applies on first create).
 ALTER TABLE company_certifications ADD COLUMN IF NOT EXISTS expiry_reminder_sent BOOLEAN DEFAULT false;
 
 -- Company HR & Resources (for proposal generation)
@@ -438,12 +457,74 @@ CREATE TABLE tenders (
   scoring_weights JSONB,                    -- How winner is chosen
   complexity_assessment VARCHAR(100),
   estimated_effort_hours INTEGER,
+  source_completeness VARCHAR(50),          -- 'structured_metadata_only', 'includes_dce_documents',
+                                             -- 'external_platform_link_only' - set deterministically
+                                             -- from tender_documents, never model-reported
   
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX tenders_opportunity ON tenders(opportunity_id);
+
+-- DCE attachments (RC/CCAP/CCTP/AAPC etc.) discovered and downloaded for an
+-- opportunity. Keyed on opportunity_id rather than tender_id because a
+-- `tenders` row is only lazily created the first time someone opens a tender
+-- (see GET /api/tenders/:opportunityId) - documents need to be fetchable
+-- ahead of that, by the background job right after ingestion.
+--
+-- BOAMP's open-data API only ever gives the notice metadata, never the
+-- consultation file itself - the real DCE lives on the buyer's own
+-- e-procurement platform (profil acheteur / PLACE / a local portal), which
+-- BOAMP links out to. So every row here is honest about what actually
+-- happened: 'parsed' only when we got a real PDF and extracted real text,
+-- 'external_platform_only' when the only lead we found is a link to a portal
+-- that requires a human to open it (varies per buyer, can't be scraped
+-- generically) - never a fabricated status.
+CREATE TABLE tender_documents (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  opportunity_id UUID NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+
+  document_label VARCHAR(100),              -- best-effort guess: 'RC', 'CCAP', 'CCTP', 'AAPC', 'Autre'
+  source_url TEXT NOT NULL,                 -- where we found/downloaded it from
+  file_url TEXT,                            -- storage ref (S3 key or local /uploads path) once downloaded
+  file_hash VARCHAR(64),                    -- SHA-256 of the downloaded bytes, for dedup across re-runs
+  mime_type VARCHAR(100),
+  file_size_bytes INTEGER,
+
+  status VARCHAR(50) NOT NULL DEFAULT 'pending', -- 'pending', 'downloaded', 'parsed', 'not_a_document',
+                                                  -- 'external_platform_only', 'failed'
+  extracted_text TEXT,                      -- parsed PDF text (truncated), used by DCE AI analysis
+  error_message TEXT,
+
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+  UNIQUE(opportunity_id, source_url)
+);
+
+CREATE INDEX tender_documents_opportunity ON tender_documents(opportunity_id);
+CREATE INDEX tender_documents_status ON tender_documents(status);
+
+-- Company reusable pricing catalog (Milestone 9.2 - "adjust only what's
+-- specific to the new tender" instead of retyping a BPU from scratch every
+-- bid). Built once by the company, then used to pre-fill a new bid's
+-- pricing_schedule_json - see /bid/:bidId/generate in tenders.ts.
+CREATE TABLE company_pricing_items (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+
+  label VARCHAR(255) NOT NULL,
+  category VARCHAR(100),                    -- 'materiaux', 'main_oeuvre', 'equipement', etc.
+  unit VARCHAR(50),                         -- 'm2', 'ml', 'jour', 'forfait', ...
+  default_unit_price DECIMAL(12, 2),
+  is_active BOOLEAN DEFAULT true,           -- soft-disable an item without losing history on past bids
+
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX company_pricing_items_company ON company_pricing_items(company_id);
 
 -- Bid responses (one tender, many companies submitting)
 CREATE TABLE bid_responses (
@@ -462,6 +543,10 @@ CREATE TABLE bid_responses (
   is_engagement_act_signed BOOLEAN DEFAULT false,
   
   pricing_schedule_json JSONB,              -- Unit price breakdown
+  pricing_schedule_source VARCHAR(50),       -- 'profile_catalog' (pre-filled from company_pricing_items,
+                                              -- not yet customized) or 'manual' (company has edited it) -
+                                              -- lets the UI show "pre-filled from your profile, review before
+                                              -- submitting" instead of implying a human already checked it
   total_bid_amount DECIMAL(15, 2),
   
   -- Document checks
@@ -648,6 +733,9 @@ CREATE TABLE crm_leads (
   crm_last_sync TIMESTAMP,
   
   status VARCHAR(50) DEFAULT 'new',         -- 'new', 'contacted', 'qualified', 'converted', 'lost'
+  session_id VARCHAR(100),                  -- links back to visitor_events for this visitor's journey
+  appointment_mode VARCHAR(20),             -- 'slot' | 'callback' - see resolveAccessLevel() in routes/opportunities.ts
+  appointment_slot_at TIMESTAMP,            -- only set when appointment_mode = 'slot'
   
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -656,6 +744,95 @@ CREATE TABLE crm_leads (
 CREATE INDEX crm_leads_email ON crm_leads(email);
 CREATE INDEX crm_leads_status ON crm_leads(status);
 CREATE INDEX crm_leads_crm ON crm_leads(crm_sync_status);
+CREATE INDEX crm_leads_session ON crm_leads(session_id);
+
+-- Anonymous visitor journey tracking (searches, fiches viewed, SEO landing
+-- pages) - see applyIncrementalMigrations() in config/database.ts for the
+-- full rationale, kept in sync here for fresh installs.
+CREATE TABLE visitor_events (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  session_id VARCHAR(100) NOT NULL,
+  brand_id UUID REFERENCES brands(id),
+  event_type VARCHAR(50) NOT NULL,
+  event_label VARCHAR(500),
+  event_data JSONB,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX visitor_events_session ON visitor_events(session_id);
+CREATE INDEX visitor_events_created ON visitor_events(created_at);
+
+-- SIRET-based company recognition (prototype V17) - session-scoped, global
+-- per browser regardless of which opportunity triggered it. See
+-- applyIncrementalMigrations() in config/database.ts for the full
+-- rationale, kept in sync here for fresh installs.
+CREATE TABLE siret_lookups (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  session_id VARCHAR(100) NOT NULL UNIQUE,
+  siret VARCHAR(14) NOT NULL,
+  company_data JSONB NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX siret_lookups_session ON siret_lookups(session_id);
+
+-- ============================================================================
+-- 12b. OPPORTUNITY DETAIL PAGE - GRADUATED ACCESS + SUBCONTRACT NEEDS
+-- ============================================================================
+-- Private tenders ('tender') and subcontracting ('subcontracting') opportunities
+-- show progressively more detail as a visitor is qualified:
+--   level1 (default)  - teaser only (title, broad location, deadline)
+--   level2            - "aperçu enrichi": granted the instant crm_leads gets a
+--                        row for this opportunity (visitor left contact info)
+--   level3            - "accès complet": a staff member (chargé d'affaires)
+--                        manually reviews the lead and grants full access -
+--                        never automatic, matches the "no online payment/
+--                        unlock, a real person validates" requirement.
+-- Public-procurement ('public_procurement') opportunities are always fully
+-- open and never consult these columns.
+ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS opportunity_id UUID REFERENCES opportunities(id) ON DELETE SET NULL;
+ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_level VARCHAR(20);
+ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_at TIMESTAMP;
+ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_by UUID REFERENCES users(id);
+CREATE INDEX IF NOT EXISTS crm_leads_opportunity ON crm_leads(opportunity_id);
+
+-- A company posting its own subcontracting need ("Je cherche un sous-traitant"
+-- in the /parcours journey), browsed by providers the same way opportunities
+-- are - kept as its own table rather than shoehorned into `opportunities`
+-- since needs are self-published by companies, not ingested from a data source
+-- (opportunities.source_id/source_reference are NOT NULL and don't apply here).
+CREATE TABLE IF NOT EXISTS subcontract_needs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  company_id UUID REFERENCES companies(id) ON DELETE SET NULL,
+  created_by UUID REFERENCES users(id),
+
+  trade VARCHAR(255) NOT NULL,
+  lot VARCHAR(255),
+  description TEXT,
+
+  location_city VARCHAR(255),
+  location_region VARCHAR(255),
+
+  budget_min DECIMAL(15, 2),
+  budget_max DECIMAL(15, 2),
+  team_size VARCHAR(100),
+  start_date DATE,
+  duration VARCHAR(100),
+  qualifications TEXT,
+
+  contact_email VARCHAR(255),
+  contact_phone VARCHAR(20),
+
+  status VARCHAR(50) DEFAULT 'draft',   -- 'draft', 'published', 'expired', 'fulfilled'
+  validity_days INTEGER DEFAULT 42,
+  published_at TIMESTAMP,
+  expires_at TIMESTAMP,
+
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS subcontract_needs_company ON subcontract_needs(company_id);
+CREATE INDEX IF NOT EXISTS subcontract_needs_status ON subcontract_needs(status);
+CREATE INDEX IF NOT EXISTS subcontract_needs_expires ON subcontract_needs(expires_at);
+
 
 -- ============================================================================
 -- 13. SEO PAGE GENERATION (Milestone 11)
@@ -789,15 +966,30 @@ CREATE INDEX opportunities_title ON opportunities USING BTREE(title);
 CREATE INDEX opportunities_description_trgm ON opportunities USING GIN(description gin_trgm_ops);
 
 -- Materialized view for fast search (refresh periodically)
+-- Columns mirror exactly what src/routes/opportunities.ts GET / selects from
+-- `opportunities` + `opportunity_types` + `trades`, so the route can query this
+-- view directly without changing its response shape. If you add a column to
+-- that route's SELECT, add it here too or the route will break on switchover.
 CREATE MATERIALIZED VIEW opportunity_search_index AS
 SELECT 
   o.id,
   o.title,
   o.description,
+  o.deadline,
+  o.publication_date,
+  o.estimated_value,
+  o.currency,
   o.location_city,
   o.location_region,
-  o.deadline,
-  o.estimated_value,
+  o.location_department,
+  o.estimated_start_date,
+  o.estimated_end_date,
+  o.ai_classification_status,
+  o.ai_summary,
+  o.ai_matched_trades,
+  o.status,
+  o.trade_id,
+  o.buyer_name,
   ot.code as opportunity_type,
   t.name as trade_name,
   c.code as brand_code,
@@ -811,7 +1003,7 @@ LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
 LEFT JOIN trades t ON o.trade_id = t.id
 LEFT JOIN data_sources ds ON o.source_id = ds.id
 LEFT JOIN brands c ON ot.brand_id = c.id
-WHERE o.deleted_at IS NULL AND o.status NOT IN ('cancelled', 'expired');
+WHERE o.deleted_at IS NULL AND o.status NOT IN ('cancelled', 'expired', 'merged');
 
 CREATE INDEX opportunity_search_index_search ON opportunity_search_index USING GIN(search_vector);
 CREATE INDEX opportunity_search_index_deadline ON opportunity_search_index(deadline);
@@ -967,3 +1159,25 @@ INSERT INTO trades (name, slug, description, cpv_code_id) VALUES
 ('Voirie et reseaux (VRD)', 'vrd', 'Road works and utility networks', (SELECT id FROM cpv_codes WHERE code = '45233000')),
 ('Batiment general', 'batiment-general', 'General building construction', (SELECT id FROM cpv_codes WHERE code = '45210000'))
 ON CONFLICT (name) DO NOTHING;
+
+-- Buyer-history stat on the opportunity detail page (spec: aggregated,
+-- name-free count of similar opportunities from the same buyer, shown even
+-- when the buyer's identity itself is locked) groups by buyer_name on every
+-- fiche view - index it so that stays cheap as the table grows.
+CREATE INDEX IF NOT EXISTS opportunities_buyer_name ON opportunities(buyer_name);
+
+-- Client-recommended data sources (see aiService/dataCollectionService for
+-- the connectors): DECP consolidées (decp.info / data.economie.gouv.fr) is
+-- the most complete public-tender base - it aggregates BOAMP + every profil
+-- acheteur + PLACE, updated near-daily. Kept alongside BOAMP rather than
+-- replacing it: BOAMP still covers "en cours" notices before an award is
+-- made, which DECP (award data only) never shows. Batiweb's free
+-- actualités/marchés section is the one concretely-scrapable open private
+-- source identified so far (see collectBatiwebData) - inactive by default,
+-- flip to true once its markup has been checked against the live site.
+-- ON CONFLICT here (unlike the INSERT above) so this file stays safely
+-- re-runnable even though the original seed block above isn't.
+INSERT INTO data_sources (code, name, feed_type, frequency_hours, active) VALUES
+('decp', 'DECP Consolidées (data.economie.gouv.fr)', 'api', 24, false),
+('batiweb', 'Batiweb - actualités/marchés (accès libre)', 'scraper', 24, false)
+ON CONFLICT (code) DO NOTHING;

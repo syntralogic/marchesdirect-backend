@@ -20,7 +20,7 @@ interface RegisterParams {
 // REGISTRATION (Milestone 1 & 8)
 // ============================================================================
 
-export const registerCompanyAndUser = async (data: RegisterParams) => {
+export const registerCompanyAndUser = async (data: RegisterParams, brandId?: string | null) => {
   const client = await db.getClient();
 
   try {
@@ -36,20 +36,38 @@ export const registerCompanyAndUser = async (data: RegisterParams) => {
       throw new Error('Email already registered');
     }
 
-    // Determine brand (for MVP, default to first brand)
-    const brandResult = await client.query('SELECT id FROM brands LIMIT 1');
-    const brandId = brandResult.rows[0]?.id;
+    // brandId is resolved by the route from the request's Host header (see
+    // utils/brandResolution.ts) so a signup on brand_2's domain actually
+    // creates the company under brand_2, not always the first brand in the
+    // table - that resolution used to be entirely missing here, which meant
+    // every company ended up on brand_1 regardless of which site they used,
+    // defeating the point of the Milestone 10 second-brand duplication.
+    // Falls back to the oldest brand if the caller didn't resolve one
+    // (keeps old call sites / tests working).
+    let resolvedBrandId = brandId;
+    if (!resolvedBrandId) {
+      const brandResult = await client.query('SELECT id FROM brands ORDER BY created_at ASC LIMIT 1');
+      resolvedBrandId = brandResult.rows[0]?.id;
+    }
 
-    if (!brandId) {
+    if (!resolvedBrandId) {
       throw new Error('No brands configured in system');
     }
 
     // Create company
     const companyId = uuid();
-    const companySlug = data.companyName
+    const baseSlug = data.companyName
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '');
+    // Two different real companies can easily share a display name (generic
+    // names like "Bâtiment Pro" are common), which used to collide on
+    // companies.slug and throw a raw, unhandled Postgres constraint error
+    // straight through to the signup form ("duplicate key value violates
+    // unique constraint..."). Suffixing with part of the company's own id
+    // guarantees uniqueness with no extra query, since it's already unique
+    // by definition.
+    const companySlug = `${baseSlug || 'entreprise'}-${companyId.slice(0, 8)}`;
 
     await client.query(
       `INSERT INTO companies 
@@ -58,7 +76,7 @@ export const registerCompanyAndUser = async (data: RegisterParams) => {
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW() + INTERVAL '14 days')`,
       [
         companyId,
-        brandId,
+        resolvedBrandId,
         data.companyName,
         companySlug,
         data.email.toLowerCase(),

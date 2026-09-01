@@ -195,4 +195,239 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     `UPDATE companies SET trial_ends_at = created_at + INTERVAL '14 days'
      WHERE subscription_status = 'trial' AND trial_ends_at IS NULL`
   );
+
+  // Signup was failing in production with "No brands configured in system"
+  // (registerCompanyAndUser does SELECT id FROM brands LIMIT 1 and throws if
+  // empty). ensureSchema() only ever runs schema.sql's "INSERT INTO brands"
+  // seed once, the very first time it sees no `opportunities` table at all -
+  // if brands was ever emptied afterwards (or schema.sql ran partially) on an
+  // already-provisioned database, it stays empty forever since ensureSchema
+  // skips re-running schema.sql once `opportunities` exists. This runs on
+  // every boot and is a no-op once at least one brand exists.
+  await pool.query(`
+    INSERT INTO brands (code, name, domain)
+    SELECT * FROM (VALUES
+      ('brand_1', 'BOAMP Pro', 'boamp-pro.fr'),
+      ('brand_2', 'Marchés Locaux', 'marches-locaux.fr')
+    ) AS defaults(code, name, domain)
+    WHERE NOT EXISTS (SELECT 1 FROM brands)
+  `);
+
+  // DCE document ingestion (attachment download/parsing) - see schema.sql's
+  // tender_documents comment for why this is keyed on opportunity_id.
+  await pool.query(
+    `ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS dce_documents_status VARCHAR(50) DEFAULT 'pending'`
+  );
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tender_documents (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      opportunity_id UUID NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+      document_label VARCHAR(100),
+      source_url TEXT NOT NULL,
+      file_url TEXT,
+      file_hash VARCHAR(64),
+      mime_type VARCHAR(100),
+      file_size_bytes INTEGER,
+      status VARCHAR(50) NOT NULL DEFAULT 'pending',
+      extracted_text TEXT,
+      error_message TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(opportunity_id, source_url)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS tender_documents_opportunity ON tender_documents(opportunity_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS tender_documents_status ON tender_documents(status)`);
+  // Existing rows predate this feature entirely (no ingestion has ever run for
+  // them) - mark them 'pending' explicitly rather than leaving old rows NULL,
+  // so the ingestion job's WHERE clause (see jobs/documentIngestion.ts) picks
+  // them up on its next pass instead of silently skipping every pre-existing
+  // opportunity forever.
+  await pool.query(
+    `UPDATE opportunities SET dce_documents_status = 'pending' WHERE dce_documents_status IS NULL`
+  );
+  await pool.query(`ALTER TABLE tenders ADD COLUMN IF NOT EXISTS source_completeness VARCHAR(50)`);
+
+  // Reusable company pricing catalog (Milestone 9.2) - see schema.sql comment.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS company_pricing_items (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      label VARCHAR(255) NOT NULL,
+      category VARCHAR(100),
+      unit VARCHAR(50),
+      default_unit_price DECIMAL(12, 2),
+      is_active BOOLEAN DEFAULT true,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS company_pricing_items_company ON company_pricing_items(company_id)`);
+  await pool.query(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS pricing_schedule_source VARCHAR(50)`);
+
+  // Notification preferences (Profile > Notifications tab) - previously
+  // UI-only local state with nowhere to persist to, so every toggle reset on
+  // reload. Defaults match what the frontend already showed.
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_preferences JSONB
+    DEFAULT '{"emailAlerts": true, "newOpps": true, "deadlineAlerts": true, "weeklyDigest": false, "mobileNotifs": true}'::jsonb
+  `);
+  await pool.query(`
+    UPDATE users SET notification_preferences =
+      '{"emailAlerts": true, "newOpps": true, "deadlineAlerts": true, "weeklyDigest": false, "mobileNotifs": true}'::jsonb
+    WHERE notification_preferences IS NULL
+  `);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(500)`);
+
+  // Buyer/requesting-company name (BOAMP's `nomacheteur` etc.) - previously
+  // not stored at all, so the opportunity detail page and the sous-traitance
+  // "mise en relation" flow had no real organization name to show and fell
+  // back to placeholder/mock data. See dataCollectionService.ts for where
+  // this gets populated on ingest.
+  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS buyer_name VARCHAR(500)`);
+
+  // opportunity_search_index is a MATERIALIZED VIEW, so a plain ALTER can't
+  // add a column to it the way it can for a table - the view has to be
+  // dropped and recreated with the new column in its SELECT. Only do that
+  // once (checked via information_schema) so a normal boot doesn't pay for
+  // a full view rebuild every time.
+  const viewHasBuyerName = await pool.query(
+    `SELECT EXISTS (
+       SELECT FROM information_schema.columns
+       WHERE table_name = 'opportunity_search_index' AND column_name = 'buyer_name'
+     ) AS exists`
+  );
+  if (!viewHasBuyerName.rows[0]?.exists) {
+    await pool.query(`DROP MATERIALIZED VIEW IF EXISTS opportunity_search_index`);
+    await pool.query(`
+      CREATE MATERIALIZED VIEW opportunity_search_index AS
+      SELECT 
+        o.id,
+        o.title,
+        o.description,
+        o.deadline,
+        o.publication_date,
+        o.estimated_value,
+        o.currency,
+        o.location_city,
+        o.location_region,
+        o.location_department,
+        o.estimated_start_date,
+        o.estimated_end_date,
+        o.ai_classification_status,
+        o.ai_summary,
+        o.ai_matched_trades,
+        o.status,
+        o.trade_id,
+        o.buyer_name,
+        ot.code as opportunity_type,
+        t.name as trade_name,
+        c.code as brand_code,
+        ds.code as source_code,
+        (
+          to_tsvector('french', COALESCE(o.title, '')) ||
+          to_tsvector('french', COALESCE(o.description, ''))
+        ) as search_vector
+      FROM opportunities o
+      LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+      LEFT JOIN trades t ON o.trade_id = t.id
+      LEFT JOIN data_sources ds ON o.source_id = ds.id
+      LEFT JOIN brands c ON ot.brand_id = c.id
+      WHERE o.deleted_at IS NULL AND o.status NOT IN ('cancelled', 'expired', 'merged')
+    `);
+    await pool.query(`CREATE INDEX opportunity_search_index_search ON opportunity_search_index USING GIN(search_vector)`);
+    await pool.query(`CREATE INDEX opportunity_search_index_deadline ON opportunity_search_index(deadline)`);
+    await pool.query(`CREATE UNIQUE INDEX opportunity_search_index_id ON opportunity_search_index(id)`);
+  }
+
+  // Opportunity detail page graduated access (level1 teaser -> level2 after
+  // lead capture -> level3 after a chargé d'affaires manually validates) +
+  // self-published subcontracting needs ("Je cherche un sous-traitant").
+  // See schema.sql's "12b" comment block for the full access-level model.
+  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS opportunity_id UUID REFERENCES opportunities(id) ON DELETE SET NULL`);
+  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_level VARCHAR(20)`);
+  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_at TIMESTAMP`);
+  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_by UUID REFERENCES users(id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS crm_leads_opportunity ON crm_leads(opportunity_id)`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS subcontract_needs (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      company_id UUID REFERENCES companies(id) ON DELETE SET NULL,
+      created_by UUID REFERENCES users(id),
+      trade VARCHAR(255) NOT NULL,
+      lot VARCHAR(255),
+      description TEXT,
+      location_city VARCHAR(255),
+      location_region VARCHAR(255),
+      budget_min DECIMAL(15, 2),
+      budget_max DECIMAL(15, 2),
+      team_size VARCHAR(100),
+      start_date DATE,
+      duration VARCHAR(100),
+      qualifications TEXT,
+      contact_email VARCHAR(255),
+      contact_phone VARCHAR(20),
+      status VARCHAR(50) DEFAULT 'draft',
+      validity_days INTEGER DEFAULT 42,
+      published_at TIMESTAMP,
+      expires_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS subcontract_needs_company ON subcontract_needs(company_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS subcontract_needs_status ON subcontract_needs(status)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS subcontract_needs_expires ON subcontract_needs(expires_at)`);
+
+  // Anonymous visitor journey tracking: lets a "chargé d'affaires" calling a
+  // lead back see what that person actually searched for and looked at
+  // (searches, opportunity fiches, SEO landing pages) instead of having to
+  // ask "what were you looking for again?" from scratch. session_id is a
+  // client-generated id persisted in localStorage - matched to a lead once
+  // that visitor submits any contact form.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS visitor_events (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      session_id VARCHAR(100) NOT NULL,
+      brand_id UUID REFERENCES brands(id),
+      event_type VARCHAR(50) NOT NULL,   -- 'search', 'view_opportunity', 'view_seo_page'
+      event_label VARCHAR(500),          -- human-readable summary shown to staff
+      event_data JSONB,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS visitor_events_session ON visitor_events(session_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS visitor_events_created ON visitor_events(created_at)`);
+  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS session_id VARCHAR(100)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS crm_leads_session ON crm_leads(session_id)`);
+
+  // Prototype V17 rule: on a private tender / sous-traitance fiche, only the
+  // buyer's identity is ever locked (everything else - amount, tasks,
+  // deadline, score - is open like a public-market fiche). That identity
+  // unlocks ONLY when the visitor books a specific callback slot, never on
+  // "call me back, no particular time" and never on merely leaving an
+  // email. appointment_mode distinguishes the two; appointment_slot_at is
+  // only set for the 'slot' case.
+  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS appointment_mode VARCHAR(20)`);
+  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS appointment_slot_at TIMESTAMP`);
+
+  // Prototype V17 rule: `companyKnown` is a single global flag per browser
+  // session, not per-opportunity - once a visitor identifies their company
+  // via SIRET on any fiche, they're recognized everywhere without
+  // re-entering it, and the compatibility score never displays anywhere
+  // until this exists. Session-scoped (not user-scoped) because this
+  // happens before an account exists.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS siret_lookups (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      session_id VARCHAR(100) NOT NULL UNIQUE,
+      siret VARCHAR(14) NOT NULL,
+      company_data JSONB NOT NULL,   -- name, legal, created, capital, address, city, postal,
+                                      -- director, employees, ape, activity + detected online
+                                      -- presence (website/facebook/google) once that lookup exists
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS siret_lookups_session ON siret_lookups(session_id)`);
 };

@@ -57,20 +57,19 @@ const callClaudeAPI = async (
 // DCE ANALYSIS - TENDER DOCUMENT EXTRACTION (MILESTONE 6.1 / 9.1)
 // ============================================================================
 // Extracts selection criteria, required documents, scoring weights and
-// complexity from the tender's own record (title/description/raw_data as
-// currently ingested from the source connector). This intentionally does NOT
-// yet parse the actual RC/CCAP/CCTP PDF files referenced in section 6.1 of the
-// Technical Requirements - the connectors only ingest structured metadata
-// today, not the documents themselves. Downloading and OCR/text-extracting
-// those PDFs is a separate, larger connector-side task. Until that exists,
-// this analyzes the richest text already available per opportunity and is
-// honest about the gap via `source_completeness` in its own output rather
-// than pretending to have read documents it was never given.
+// complexity from the tender's record. Where documentIngestionService has
+// actually downloaded and parsed the real RC/CCAP/CCTP PDF(s) for this
+// opportunity (tender_documents.status = 'parsed'), their extracted text is
+// included below and `source_completeness` reflects that honestly. When
+// ingestion hasn't found a directly-downloadable file yet (still pending, or
+// only an external buyer-platform link was found), this falls back to the
+// notice's own metadata and says so via `source_completeness` rather than
+// pretending to have read documents it was never given.
 export const analyzeTenderDocuments = async (tenderId: string): Promise<boolean> => {
   try {
     const tenderResult = await db.query(
-      `SELECT t.*, o.title, o.description, o.raw_data, o.estimated_value,
-              o.deadline, o.contract_type, o.currency
+      `SELECT t.*, o.id as opportunity_id, o.title, o.description, o.raw_data, o.estimated_value,
+              o.deadline, o.contract_type, o.currency, o.dce_documents_status
        FROM tenders t
        JOIN opportunities o ON t.opportunity_id = o.id
        WHERE t.id = $1`,
@@ -82,6 +81,12 @@ export const analyzeTenderDocuments = async (tenderId: string): Promise<boolean>
     }
 
     const tender = tenderResult.rows[0];
+
+    const parsedDocs = await db.query(
+      `SELECT document_label, extracted_text FROM tender_documents
+       WHERE opportunity_id = $1 AND status = 'parsed' AND extracted_text IS NOT NULL AND extracted_text != ''`,
+      [tender.opportunity_id]
+    );
 
     await db.query('UPDATE tenders SET dce_analysis_status = $1 WHERE id = $2', ['processing', tenderId]);
 
@@ -107,18 +112,31 @@ Return ONLY valid JSON in this exact shape, no markdown, no extra text:
   "required_documents": ["DC1", "DC2", "Attestation d'assurance decennale", ...],
   "scoring_weights": {"price": 40, "technical_value": 45, "deadline": 15, "not_specified": false},
   "complexity_assessment": "medium",
-  "estimated_effort_hours": 12,
-  "source_completeness": "structured_metadata_only"
+  "estimated_effort_hours": 12
 }`;
+
+    const hasParsedDocs = parsedDocs.rows.length > 0;
+    const documentsBlock = hasParsedDocs
+      ? parsedDocs.rows
+          .map((d) => `--- Document: ${d.document_label || 'Autre'} ---\n${d.extracted_text.substring(0, 6000)}`)
+          .join('\n\n')
+      : 'None downloaded yet - analysis below is based on notice metadata only.';
 
     const userMessage = `Title: ${tender.title}
 Description: ${tender.description || 'Not provided by source'}
 Contract type: ${tender.contract_type || 'Not specified'}
 Estimated value: ${tender.estimated_value ? `${tender.estimated_value} ${tender.currency || 'EUR'}` : 'Not specified'}
 Deadline: ${tender.deadline || 'Not specified'}
-Additional source data: ${tender.raw_data ? JSON.stringify(tender.raw_data).substring(0, 1500) : 'None'}`;
+Additional source data: ${tender.raw_data ? JSON.stringify(tender.raw_data).substring(0, 1500) : 'None'}
 
-    const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 1500);
+Consultation file (DCE) documents actually downloaded and text-extracted for this tender:
+${documentsBlock}`;
+
+    const response = await callClaudeAPI(
+      [{ role: 'user', content: userMessage }],
+      systemPrompt,
+      hasParsedDocs ? 2500 : 1500
+    );
 
     let analysis;
     try {
@@ -128,6 +146,17 @@ Additional source data: ${tender.raw_data ? JSON.stringify(tender.raw_data).subs
       throw new Error('Invalid DCE analysis response format');
     }
 
+    // source_completeness is derived deterministically from what we actually
+    // fetched (tender_documents), never from what the model claims - the
+    // model has no way to know whether extracted text came from a real PDF
+    // or was absent, so trusting its self-report here would risk exactly the
+    // kind of invented-completeness the acceptance criteria forbid.
+    const sourceCompleteness = hasParsedDocs
+      ? 'includes_dce_documents'
+      : tender.dce_documents_status === 'external_platform_only'
+      ? 'external_platform_link_only'
+      : 'structured_metadata_only';
+
     await db.query(
       `UPDATE tenders SET
          dce_analysis_status = $1,
@@ -136,8 +165,9 @@ Additional source data: ${tender.raw_data ? JSON.stringify(tender.raw_data).subs
          scoring_weights = $4,
          complexity_assessment = $5,
          estimated_effort_hours = $6,
+         source_completeness = $7,
          updated_at = NOW()
-       WHERE id = $7`,
+       WHERE id = $8`,
       [
         'analyzed',
         JSON.stringify(analysis.selection_criteria || []),
@@ -145,6 +175,7 @@ Additional source data: ${tender.raw_data ? JSON.stringify(tender.raw_data).subs
         JSON.stringify(analysis.scoring_weights || {}),
         analysis.complexity_assessment || 'medium',
         analysis.estimated_effort_hours || null,
+        sourceCompleteness,
         tenderId,
       ]
     );
@@ -353,6 +384,7 @@ Environnement: ${envPolicy?.policy_text || 'non renseignee dans le profil entrep
 // source record, kept intentionally separate so extraction failures never
 // silently corrupt the classification pipeline.
 export type ExtractedFact = { value: string; available: boolean };
+export type ExtractedListFact = { value: string[]; available: boolean };
 export type ExtractedOpportunityFacts = {
   buyer_name: ExtractedFact;
   contract_object: ExtractedFact;
@@ -361,6 +393,15 @@ export type ExtractedOpportunityFacts = {
   estimated_value: ExtractedFact;
   contact_email: ExtractedFact;
   required_qualifications: ExtractedFact;
+  // Added for prototype V17 parity ("équipe attendue" / "points de
+  // vigilance"). Same hard rule as every other field: only ever populated
+  // from what the source literally states - team_size_estimate is a
+  // workforce figure explicitly mentioned in the notice (not a guess based
+  // on budget/scope), and key_risks only lists warnings the source itself
+  // calls out (site visit required, retenue de garantie, pénalités de
+  // retard, etc.) - never inferred generic boilerplate.
+  team_size_estimate: ExtractedFact;
+  key_risks: ExtractedListFact;
 };
 
 export const extractOpportunityFacts = async (
@@ -378,9 +419,13 @@ export const extractOpportunityFacts = async (
 
 HARD RULE: for every field, only use what is literally present in the source text/data given below.
 If a field is not present in the source, you MUST return {"value": "not available", "available": false}
-for it - never guess, infer, or fill it with a plausible-sounding value. This rule is the entire point
-of this extraction step and is checked directly, so treat every field independently: some fields may be
-present while others are genuinely absent from the same record.
+for it (or {"value": [], "available": false} for the list field) - never guess, infer, or fill it with a
+plausible-sounding value. This rule is the entire point of this extraction step and is checked directly,
+so treat every field independently: some fields may be present while others are genuinely absent from the
+same record. In particular: team_size_estimate must be a workforce figure the source explicitly states
+(e.g. "équipe de 3 à 5 personnes"), never something you back into from budget or task scope. key_risks
+must only list warnings the source itself raises (site visit mandatory, retenue de garantie, pénalités de
+retard, etc.) - not generic boilerplate about procurement in general.
 
 Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
 {
@@ -390,7 +435,9 @@ Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
   "submission_deadline": {"value": "...", "available": true},
   "estimated_value": {"value": "not available", "available": false},
   "contact_email": {"value": "not available", "available": false},
-  "required_qualifications": {"value": "...", "available": true}
+  "required_qualifications": {"value": "...", "available": true},
+  "team_size_estimate": {"value": "not available", "available": false},
+  "key_risks": {"value": ["..."], "available": true}
 }`;
 
   const userMessage = `SOURCE RECORD (raw, as ingested from the connector):
@@ -616,15 +663,18 @@ export const matchOpportunitiesToCompany = async (
            t.id IN (SELECT id FROM trades WHERE name = ANY($6::text[]))
            OR o.ai_matched_trades::text ILIKE ANY($6::text[])
          )
-         -- TODO(review with client): $7 is bound to company.annual_revenue below,
-         -- used here as a MINIMUM opportunity value. That means a company with high
-         -- annual revenue gets smaller/subcontracting opportunities filtered OUT
-         -- entirely, which seems backwards for a platform whose "sous-traitance"
-         -- journey is specifically about matching companies to smaller lots. Left
-         -- as-is rather than silently changed - needs a real business-rule decision,
-         -- not a guess.
+         -- Capacity check: don't recommend contracts far beyond what the
+         -- company can plausibly deliver/bond for. Public-procurement buyers
+         -- commonly expect a bidder's annual revenue to cover a multiple of
+         -- the contract value (a basic solvency signal) - 3x is a permissive,
+         -- conservative multiplier so this filters out only clearly-oversized
+         -- contracts, not merely "smaller than average" ones. This replaces
+         -- an earlier version of this filter that used annual_revenue as a
+         -- MINIMUM opportunity value instead, which had the effect backwards:
+         -- it hid smaller/typical tenders from higher-revenue companies
+         -- entirely, undermining the matching engine's core purpose.
          AND (
-           $7::decimal IS NULL OR o.estimated_value >= $7
+           $7::decimal IS NULL OR o.estimated_value <= $7 * 3
          )
          AND (
            $8::decimal IS NULL OR o.estimated_value <= $8
@@ -643,7 +693,7 @@ export const matchOpportunitiesToCompany = async (
         company.location_longitude,
         company.location_latitude,
         trades,
-        company.annual_revenue || 0,
+        company.annual_revenue || null,
         null,
         company.working_radius_km || 100,
       ]

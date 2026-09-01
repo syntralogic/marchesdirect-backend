@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
-import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { resolveBrand } from '../utils/brandResolution';
 
 const router = Router();
 
@@ -10,27 +10,19 @@ const router = Router();
 // callback forms could never actually submit successfully.
 //
 // Resolves by matching the request's Host header against brands.domain (for
-// when the second-brand duplication in Milestone 10 is live and each brand has
-// its own real domain); falls back to the first configured brand otherwise,
-// which is correct for local dev and for the single-brand site today.
+// the Milestone 10 second-brand duplication, now live - each brand carries
+// its own domain, logo and color scheme) with a fallback to the first
+// configured brand, which is correct for local dev and for a single-brand
+// deployment.
 router.get('/current', async (req: Request, res: Response) => {
   try {
-    const host = (req.hostname || '').replace(/^www\./, '');
+    const brand = await resolveBrand(req);
 
-    let result = await db.query(
-      'SELECT id, code, name, language FROM brands WHERE domain = $1 LIMIT 1',
-      [host]
-    );
-
-    if (result.rows.length === 0) {
-      result = await db.query('SELECT id, code, name, language FROM brands ORDER BY created_at ASC LIMIT 1');
-    }
-
-    if (result.rows.length === 0) {
+    if (!brand) {
       return res.status(404).json({ error: 'No brand configured' });
     }
 
-    res.json(result.rows[0]);
+    res.json(brand);
   } catch (err: any) {
     logger.error('Brand resolution error:', err);
     res.status(500).json({ error: 'Failed to resolve brand' });

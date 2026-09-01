@@ -13,6 +13,7 @@ import {
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { resolveBrandId } from '../utils/brandResolution';
 
 const router = Router();
 
@@ -33,10 +34,27 @@ router.post(
     }
 
     try {
-      const result = await registerCompanyAndUser(req.body);
+      // Resolve which brand this signup belongs to from the Host header the
+      // request actually arrived on (Milestone 10) - without this every
+      // signup silently landed on the first brand regardless of which
+      // brand's domain the person was actually using.
+      const brandId = await resolveBrandId(req);
+      const result = await registerCompanyAndUser(req.body, brandId);
       res.status(201).json(result);
     } catch (err: any) {
       logger.error('Register route error:', err);
+      // Never leak a raw Postgres error (e.g. "duplicate key value violates
+      // unique constraint...") straight to the signup form. err.code is only
+      // ever set on a raw pg driver error, never on the plain Error objects
+      // this service throws itself (like "Email already registered"), so it
+      // reliably tells apart "expected, safe to show" from "unexpected,
+      // translate to something generic".
+      if (err.code === '23505') {
+        return res.status(409).json({ error: 'Un compte existe déjà avec ces informations.' });
+      }
+      if (err.code) {
+        return res.status(500).json({ error: 'Une erreur est survenue. Veuillez réessayer.' });
+      }
       res.status(400).json({ error: err.message || 'Registration failed' });
     }
   }
@@ -126,6 +144,38 @@ router.post('/password-reset/confirm', authenticate, async (req: AuthRequest, re
 // GET /api/auth/me
 router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
   res.json({ user: req.user, company: req.company });
+});
+
+// PUT /api/auth/me/notification-preferences
+//
+// Backs the Profile > Notifications toggles, which previously had no table
+// to persist to at all (local-only React state that reset on every reload).
+// Whitelisted keys only - never trust the request body wholesale into a
+// JSONB column, or any junk key the client sends gets stored forever.
+const NOTIFICATION_PREFERENCE_KEYS = ['emailAlerts', 'newOpps', 'deadlineAlerts', 'weeklyDigest', 'mobileNotifs'];
+
+router.put('/me/notification-preferences', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const incoming = req.body || {};
+    const sanitized: Record<string, boolean> = { ...req.user!.notificationPreferences };
+
+    for (const key of NOTIFICATION_PREFERENCE_KEYS) {
+      if (typeof incoming[key] === 'boolean') {
+        sanitized[key] = incoming[key];
+      }
+    }
+
+    const result = await db.query(
+      `UPDATE users SET notification_preferences = $1, updated_at = NOW() WHERE id = $2
+       RETURNING notification_preferences`,
+      [JSON.stringify(sanitized), req.user!.id]
+    );
+
+    res.json({ notificationPreferences: result.rows[0].notification_preferences });
+  } catch (err: any) {
+    logger.error('Notification preferences update error:', err);
+    res.status(500).json({ error: 'Failed to update notification preferences' });
+  }
 });
 
 // DELETE /api/auth/account

@@ -64,6 +64,55 @@ export function validateUpload(file: Express.Multer.File) {
   }
 }
 
+const ALLOWED_AVATAR_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const MAX_AVATAR_SIZE_BYTES = 5 * 1024 * 1024; // 5MB - avatars are small, no reason to allow a 15MB upload
+
+export function validateAvatarUpload(file: Express.Multer.File) {
+  if (!ALLOWED_AVATAR_MIME_TYPES.has(file.mimetype)) {
+    throw new UploadValidationError(`Type de fichier non autorisé : ${file.mimetype}. Formats acceptés : JPG, PNG, WEBP.`);
+  }
+  if (file.size > MAX_AVATAR_SIZE_BYTES) {
+    throw new UploadValidationError('Image trop volumineuse (5 Mo maximum).');
+  }
+}
+
+/**
+ * Uploads a profile picture, keyed by userId rather than companyId - an
+ * avatar belongs to the person, not the company record, and multiple users
+ * can share one company account.
+ */
+export async function uploadAvatar(
+  userId: string,
+  mimetype: string,
+  buffer: Buffer
+): Promise<{ url: string; sizeBytes: number }> {
+  const ext = mimetype === 'image/png' ? 'png' : mimetype === 'image/webp' ? 'webp' : 'jpg';
+  // Fixed filename per user (not a random UUID) - a new upload should replace
+  // the old avatar file, not accumulate orphaned images in storage forever.
+  const key = `avatars/${userId}/avatar.${ext}`;
+
+  if (s3 && S3_BUCKET) {
+    await s3
+      .putObject({
+        Bucket: S3_BUCKET,
+        Key: key,
+        Body: buffer,
+        ContentType: mimetype,
+        ACL: 'public-read', // avatars are meant to be publicly viewable, unlike company documents
+      })
+      .promise();
+
+    return { url: key, sizeBytes: buffer.length };
+  }
+
+  const dir = path.join(LOCAL_UPLOAD_DIR, 'avatars', userId);
+  fs.mkdirSync(dir, { recursive: true });
+  const filepath = path.join(dir, `avatar.${ext}`);
+  fs.writeFileSync(filepath, buffer);
+
+  return { url: `/uploads/avatars/${userId}/avatar.${ext}`, sizeBytes: buffer.length };
+}
+
 /**
  * Uploads a file buffer and returns its publicly-fetchable URL.
  * companyId is used as a folder prefix so one company's documents are never
@@ -105,6 +154,43 @@ export async function uploadCompanyFile(
 }
 
 /**
+ * Uploads a downloaded DCE attachment (RC/CCAP/CCTP/etc.) fetched from a
+ * connector source. Same S3-with-local-disk-fallback behaviour as
+ * uploadCompanyFile, but keyed by opportunityId instead of companyId since
+ * these documents are shared across every company bidding on the tender, not
+ * owned by one company - see tender_documents in schema.sql.
+ */
+export async function uploadTenderDocument(
+  opportunityId: string,
+  safeName: string,
+  mimetype: string,
+  buffer: Buffer
+): Promise<{ url: string; sizeBytes: number }> {
+  const key = `tenders/${opportunityId}/${safeName}`;
+
+  if (s3 && S3_BUCKET) {
+    await s3
+      .putObject({
+        Bucket: S3_BUCKET,
+        Key: key,
+        Body: buffer,
+        ContentType: mimetype,
+        ACL: 'private',
+      })
+      .promise();
+
+    return { url: key, sizeBytes: buffer.length };
+  }
+
+  const dir = path.join(LOCAL_UPLOAD_DIR, 'tenders', opportunityId);
+  fs.mkdirSync(dir, { recursive: true });
+  const filepath = path.join(dir, safeName);
+  fs.writeFileSync(filepath, buffer);
+
+  return { url: `/uploads/tenders/${opportunityId}/${safeName}`, sizeBytes: buffer.length };
+}
+
+/**
  * Resolves a stored reference (S3 key or local path) into a URL the browser
  * can actually fetch. For S3, that means a short-lived presigned URL since
  * objects are private; for local disk, the static /uploads path already works.
@@ -116,6 +202,19 @@ export async function resolveFileUrl(storedRef: string): Promise<string> {
       Key: storedRef,
       Expires: 300, // 5 minutes
     });
+  }
+  return storedRef;
+}
+
+/**
+ * Same idea as resolveFileUrl, but for avatars specifically: they're
+ * uploaded with a public-read ACL (see uploadAvatar), so a permanent public
+ * URL is correct here rather than a 5-minute presigned link that would
+ * expire mid-page-load or break browser image caching.
+ */
+export function resolveAvatarUrl(storedRef: string): string {
+  if (s3 && S3_BUCKET && !storedRef.startsWith('/uploads/')) {
+    return `https://${S3_BUCKET}.s3.${S3_REGION}.amazonaws.com/${storedRef}`;
   }
   return storedRef;
 }

@@ -40,13 +40,15 @@ Vercel.
 
 ## 3. Vercel (frontend)
 
-1. Import `marchesdirect-frontend` as a new Vercel project (Next.js
+1. Import `MarchesDirect` (github.com/syntralogic/MarchesDirect - the Vite/React
+   frontend actually in use; `marchesdirect-frontend`, an earlier Next.js
+   attempt, is no longer the live frontend) as a new Vercel project (Vite
    auto-detected).
 2. Add one environment variable, for both Production and Preview:
 
    | Variable | Value |
    | --- | --- |
-   | `NEXT_PUBLIC_API_URL` | your Render backend URL, no trailing slash |
+   | `VITE_API_URL` | your Render backend URL, no trailing slash |
 
 3. Deploy.
 
@@ -55,7 +57,7 @@ Vercel.
 - Open a listing page (e.g. `/marches-publics`) — you should see real data,
   not the mock fallback.
 - Try registering/logging in. `"Impossible de contacter le serveur"` means
-  `NEXT_PUBLIC_API_URL` is wrong; a CORS error in the browser console means
+  `VITE_API_URL` is wrong; a CORS error in the browser console means
   `FRONTEND_URL` on Render doesn't match the actual Vercel URL.
 
 ## Troubleshooting

@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { resolveAvatarUrl } from '../services/storageService';
 
 // Fail fast rather than silently signing/verifying tokens with a known,
 // hardcoded string if these are ever left unset (e.g. a forgotten env var
@@ -25,9 +26,19 @@ export interface AuthRequest extends Request {
     firstName: string;
     lastName: string;
     mfaEnabled: boolean;
+    notificationPreferences: Record<string, boolean>;
+    avatarUrl: string | null;
   };
   company?: any;
 }
+
+const DEFAULT_NOTIFICATION_PREFERENCES: Record<string, boolean> = {
+  emailAlerts: true,
+  newOpps: true,
+  deadlineAlerts: true,
+  weeklyDigest: false,
+  mobileNotifs: true,
+};
 
 // Verify JWT token
 export const authenticate = async (
@@ -69,6 +80,8 @@ export const authenticate = async (
       firstName: user.first_name,
       lastName: user.last_name,
       mfaEnabled: !!user.mfa_enabled,
+      notificationPreferences: user.notification_preferences || DEFAULT_NOTIFICATION_PREFERENCES,
+      avatarUrl: user.avatar_url ? resolveAvatarUrl(user.avatar_url) : null,
     };
 
     // Attach company to request
@@ -175,6 +188,21 @@ export const verifyRefreshToken = (token: string) => {
 // ============================================================================
 // MFA HELPERS
 // ============================================================================
+
+// Gate for the paid-tier-only actions on a listing "fiche" (DCE analysis,
+// bid document generation): free/anonymous/trial companies can still browse
+// and read opportunities, but the AI-assisted candidature tools require an
+// active subscription. Runs after `authenticate`, which already attaches
+// req.company from a fresh DB read.
+export const requireActiveSubscription = (req: AuthRequest, res: Response, next: NextFunction) => {
+  if (req.company?.subscription_status !== 'active') {
+    return res.status(403).json({
+      error: 'active_subscription_required',
+      message: 'Cette action nécessite un abonnement actif.',
+    });
+  }
+  next();
+};
 
 export const generateMFASecret = () => {
   const speakeasy = require('speakeasy');

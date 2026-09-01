@@ -7,12 +7,28 @@ import { logger } from '../utils/logger';
 
 /**
  * Detect and merge duplicate opportunities across different data sources
- * Example: Same tender published on BOAMP and PLACE with slight formatting differences
+ * Example: Same tender published on BOAMP and PLACE with slight formatting differences,
+ * or on BOAMP and the buyer's own profil acheteur (both then re-surfaced via DECP) -
+ * this second case is the exact one the client called out as a good, 100%-legal
+ * training ground for this matcher (real open-data duplicates, no need to wait
+ * for private-source coverage to start tuning it).
+ *
+ * Scores on the 4 signals the client named - objet (title), acheteur (buyer_name),
+ * montant (estimated_value), date (deadline) - rather than title+deadline alone:
+ * title is the primary signal, buyer_name and montant corroborate it, which
+ * catches both false positives (similar title, different buyer/amount - a
+ * different lot of a recurring annual marché, say) and lets through matches a
+ * looser title match alone might miss (BOAMP's "objet" wording and a profil
+ * acheteur's manually re-typed one legitimately diverge more than a strict
+ * title-similarity threshold allows for).
  */
 
 export const deduplicateOpportunities = async (): Promise<number> => {
   try {
-    // Find potential duplicates by comparing similar titles and deadlines
+    // Cast a wider net at the SQL level than the old fixed thresholds (title
+    // similarity > 0.75, deadline within 24h) - the buyer_name/montant
+    // signals below now do the precision work in JS via a composite score,
+    // so a candidate just needs SOME plausible overlap to be worth scoring.
     const potentialDuplicates = await db.query(`
       SELECT 
         o1.id as id1,
@@ -20,13 +36,16 @@ export const deduplicateOpportunities = async (): Promise<number> => {
         o1.title,
         o2.title,
         similarity(o1.title, o2.title) as title_similarity,
-        ABS(EXTRACT(EPOCH FROM (o1.deadline - o2.deadline))) as deadline_diff_seconds
+        similarity(COALESCE(o1.buyer_name, ''), COALESCE(o2.buyer_name, '')) as buyer_similarity,
+        ABS(EXTRACT(EPOCH FROM (o1.deadline - o2.deadline))) as deadline_diff_seconds,
+        o1.estimated_value as value1,
+        o2.estimated_value as value2
       FROM opportunities o1
       JOIN opportunities o2 ON 
         o1.source_id < o2.source_id AND  -- Avoid duplicates
         o1.id < o2.id AND                 -- Ensure consistent ordering
-        similarity(o1.title, o2.title) > 0.75 AND  -- Title similarity threshold
-        ABS(EXTRACT(EPOCH FROM (o1.deadline - o2.deadline))) < 86400 AND  -- Within 24 hours
+        similarity(o1.title, o2.title) > 0.5 AND  -- wide candidate net - final decision is the composite score below
+        (o1.deadline IS NULL OR o2.deadline IS NULL OR ABS(EXTRACT(EPOCH FROM (o1.deadline - o2.deadline))) < 172800) AND  -- within 48h, or either side has no deadline (DECP has none - see collectDecpData)
         o1.deleted_at IS NULL AND o2.deleted_at IS NULL AND
         o1.status NOT IN ('cancelled', 'expired') AND o2.status NOT IN ('cancelled', 'expired')
       WHERE NOT EXISTS (
@@ -35,7 +54,7 @@ export const deduplicateOpportunities = async (): Promise<number> => {
            OR (primary_opportunity_id = o2.id AND duplicate_opportunity_id = o1.id)
       )
       ORDER BY title_similarity DESC
-      LIMIT 100
+      LIMIT 300
     `);
 
     logger.info(`Found ${potentialDuplicates.rows.length} potential duplicates`);
@@ -43,12 +62,38 @@ export const deduplicateOpportunities = async (): Promise<number> => {
     let mergedCount = 0;
 
     for (const dup of potentialDuplicates.rows) {
-      const similarity = dup.title_similarity;
-      const deadlineDiff = dup.deadline_diff_seconds;
+      const titleSim: number = dup.title_similarity;
+      const buyerSim: number = dup.buyer_similarity || 0;
+      const sameDay = dup.deadline_diff_seconds != null && dup.deadline_diff_seconds < 86400;
+      const hasBothValues = dup.value1 != null && dup.value2 != null && Number(dup.value1) > 0;
+      const valueDiffRatio = hasBothValues
+        ? Math.abs(Number(dup.value1) - Number(dup.value2)) / Number(dup.value1)
+        : null;
 
-      // More aggressive matching: if titles are 85%+ similar AND deadlines are within 24 hours
-      if (similarity > 0.85 && deadlineDiff < 86400) {
-        const merged = await mergeDuplicates(dup.id1, dup.id2, similarity);
+      // Composite confidence across the 4 client-named signals. Weighted
+      // toward title (the most reliable single signal in French tender
+      // notices) with buyer_name and montant corroborating; amount being
+      // meaningfully different actively counts against a match rather than
+      // being ignored, since two genuinely distinct lots from the same
+      // buyer around the same date is a real, common false-positive case.
+      let confidence = titleSim * 0.55 + buyerSim * 0.25;
+      if (sameDay) confidence += 0.1;
+      if (valueDiffRatio !== null) {
+        if (valueDiffRatio < 0.02) confidence += 0.1;
+        else if (valueDiffRatio > 0.15) confidence -= 0.2;
+      }
+
+      // Still require real title overlap even at high buyer/amount
+      // agreement - two different lots from the same recurring buyer for
+      // the same recurring amount shouldn't merge just because those two
+      // signals matched.
+      if (confidence >= 0.82 && titleSim > 0.6) {
+        const merged = await mergeDuplicates(dup.id1, dup.id2, confidence, {
+          title_similarity: Math.round(titleSim * 100) / 100,
+          buyer_similarity: Math.round(buyerSim * 100) / 100,
+          deadline_same_day: sameDay,
+          value_diff_ratio: valueDiffRatio !== null ? Math.round(valueDiffRatio * 1000) / 1000 : null,
+        });
         if (merged) mergedCount++;
       }
     }
@@ -67,7 +112,8 @@ export const deduplicateOpportunities = async (): Promise<number> => {
 const mergeDuplicates = async (
   primaryId: string,
   secondaryId: string,
-  similarity: number
+  confidence: number,
+  matchingFields: Record<string, any>
 ): Promise<boolean> => {
   try {
     await db.transaction(async (client) => {
@@ -79,8 +125,8 @@ const mergeDuplicates = async (
         [
           primaryId,
           secondaryId,
-          Math.round(similarity * 100) / 100,
-          JSON.stringify({ title: true, deadline: true }),
+          Math.round(confidence * 100) / 100,
+          JSON.stringify(matchingFields),
         ]
       );
 

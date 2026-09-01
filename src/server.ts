@@ -18,6 +18,18 @@ dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 const app: Express = express();
 const PORT = process.env.PORT || 5000;
 
+// Render (and most PaaS hosts) sit behind a reverse proxy, so the real
+// client IP arrives in the X-Forwarded-For header rather than the raw
+// socket address. Without this, Express doesn't trust that header, which
+// makes express-rate-limit unable to tell requests apart by IP - it logs
+// an ERR_ERL_UNEXPECTED_X_FORWARDED_FOR warning and, depending on version,
+// can fall back to lumping every visitor behind the proxy into the same
+// rate-limit bucket. That's a plausible reason signup ("too many
+// requests") could fail even for a person's very first attempt: someone
+// else's earlier attempts already used up the shared bucket.
+// "1" = trust exactly one hop of proxy, which matches Render's setup.
+app.set('trust proxy', 1);
+
 // ============================================================================
 // MIDDLEWARE SETUP
 // ============================================================================
@@ -84,10 +96,15 @@ app.use('/api/trades', require('./routes/trades').default);
 app.use('/api/brands', require('./routes/brandsPublic').default);
 app.use('/api/seo-pages', require('./routes/seoPagesPublic').default);
 app.use('/api/subscriptions', require('./routes/subscriptions').default);
+// Browsing subcontracting needs is public (mirrors opportunities); creating
+// one requires an account, enforced per-route inside the router itself.
+app.use('/api/subcontract-needs', require('./routes/subcontractNeeds').default);
 // CRM lead capture must be public: it's submitted from anonymous marketing
 // pages (pricing page, contact form) before someone has an account.
 // Admin viewing/managing of captured leads stays behind authenticate below.
 app.use('/api/crm/leads', require('./routes/crmPublic').default);
+app.use('/api/visitor-events', require('./routes/visitorEvents').default);
+app.use('/api/siret', require('./routes/siret').default);
 
 // Protected routes (require authentication)
 app.use('/api/companies', authenticate, require('./routes/companies').default);
@@ -138,6 +155,7 @@ const startServer = async () => {
 
     // Start background jobs
     require('./jobs/dataCollection').startScheduledJobs();
+    require('./jobs/documentIngestion').startDocumentIngestion();
     require('./jobs/documentExpiry').startExpiryCheck();
     require('./jobs/seoGeneration').startSEOGeneration();
     require('./jobs/backupManagement').startBackupSchedule();

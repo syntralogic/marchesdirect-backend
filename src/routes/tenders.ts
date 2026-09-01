@@ -1,16 +1,17 @@
 import { Router, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
-import { AuthRequest } from '../middleware/auth';
+import { AuthRequest, requireActiveSubscription } from '../middleware/auth';
 import { generateBidPackageZip, uploadToS3IfConfigured } from '../services/documentService';
 import { analyzeTenderDocuments, generateTechnicalMemo } from '../services/aiService';
+import { buildUnifiedDocumentChecklist } from '../utils/documentMatching';
 
 const router = Router();
 
 // POST /api/tenders/:tenderId/analyze - run DCE analysis (selection criteria, required
 // documents, scoring weights, complexity) via AI - Milestone 6.1. Not company-scoped:
 // a tender's DCE analysis is shared across every company bidding on it.
-router.post('/:tenderId/analyze', async (req: AuthRequest, res: Response) => {
+router.post('/:tenderId/analyze', requireActiveSubscription, async (req: AuthRequest, res: Response) => {
   try {
     const tenderResult = await db.query('SELECT id FROM tenders WHERE id = $1', [req.params.tenderId]);
     if (tenderResult.rows.length === 0) {
@@ -61,6 +62,35 @@ router.get('/bids/mine', async (req: AuthRequest, res: Response) => {
   } catch (err: any) {
     logger.error('My bids list error:', err);
     res.status(500).json({ error: 'Failed to fetch bid responses' });
+  }
+});
+
+// GET /api/tenders/:opportunityId/documents - list DCE attachments ingested for this
+// opportunity (see documentIngestionService.ts). Never returns extracted_text in full -
+// just enough for the UI to show what was actually found and its status honestly.
+router.get('/:opportunityId/documents', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await db.query(
+      `SELECT id, document_label, source_url, status, mime_type, file_size_bytes,
+              (extracted_text IS NOT NULL AND extracted_text != '') as has_extracted_text,
+              error_message, created_at
+       FROM tender_documents
+       WHERE opportunity_id = $1
+       ORDER BY created_at ASC`,
+      [req.params.opportunityId]
+    );
+
+    const oppResult = await db.query('SELECT dce_documents_status FROM opportunities WHERE id = $1', [
+      req.params.opportunityId,
+    ]);
+
+    res.json({
+      dce_documents_status: oppResult.rows[0]?.dce_documents_status || 'pending',
+      documents: result.rows,
+    });
+  } catch (err: any) {
+    logger.error('Tender documents list error:', err);
+    res.status(500).json({ error: 'Failed to fetch tender documents' });
   }
 });
 
@@ -116,7 +146,17 @@ router.get('/:tenderId/bid', async (req: AuthRequest, res: Response) => {
 });
 
 // PUT /api/tenders/bid/:bidId - update bid response (pricing, engagement act, memo edits)
-router.put('/bid/:bidId', async (req: AuthRequest, res: Response) => {
+// PUT /api/tenders/bid/:bidId - save/validate the candidature workspace
+// (mémoire technique, pricing schedule, engagement act, submission status).
+// Gated behind an active subscription like the rest of the candidature
+// flow ("Analyse du DCE et candidature : réservées à l'offre payante" is
+// shown everywhere else in the app) - this was the one write path that
+// wasn't actually checked: a free/trial company could type its own memo
+// text into this endpoint directly (bypassing the gated AI-generate step
+// entirely) and then successfully download the finished ZIP package, since
+// GET /bid/:bidId/package only checks whether technical_memo_text is
+// non-null, not how it got there.
+router.put('/bid/:bidId', requireActiveSubscription, async (req: AuthRequest, res: Response) => {
   try {
     const fields = [
       'technical_memo_text', 'is_technical_memo_approved', 'engagement_act_text',
@@ -144,6 +184,16 @@ router.put('/bid/:bidId', async (req: AuthRequest, res: Response) => {
     // actually transitions to 'submitted'.
     if (req.body.status === 'submitted') {
       updates.push(`submitted_at = NOW()`);
+    }
+
+    // Any direct edit to the pricing schedule through this endpoint means the
+    // company has taken over from the profile-catalog pre-fill - mark it
+    // 'manual' so a later POST /bid/:bidId/generate (e.g. after re-running
+    // the technical memo) never silently clobbers their edits back to catalog
+    // defaults. See /bid/:bidId/generate for the pre-fill side of this.
+    if (req.body.pricing_schedule_json !== undefined) {
+      updates.push(`pricing_schedule_source = $${idx++}`);
+      params.push('manual');
     }
 
     if (updates.length === 0) {
@@ -179,7 +229,7 @@ router.put('/bid/:bidId', async (req: AuthRequest, res: Response) => {
 // QSE measures) - grounded only in real company_resources/company_references/
 // company_policies data, with a deterministic no-AI fallback if the Claude API
 // call fails, so this endpoint never hard-fails on an AI outage.
-router.post('/bid/:bidId/generate', async (req: AuthRequest, res: Response) => {
+router.post('/bid/:bidId/generate', requireActiveSubscription, async (req: AuthRequest, res: Response) => {
   try {
     const bidResult = await db.query(
       `SELECT br.*, t.opportunity_id, t.required_documents as tender_required_documents, o.title as opportunity_title
@@ -195,11 +245,19 @@ router.post('/bid/:bidId/generate', async (req: AuthRequest, res: Response) => {
     }
     const bid = bidResult.rows[0];
 
-    const [companyResult, documentsResult] = await Promise.all([
+    const [companyResult, documentsResult, existingBidResult, pricingCatalogResult] = await Promise.all([
       db.query('SELECT * FROM companies WHERE id = $1', [req.user!.companyId]),
       db.query(
         `SELECT document_type FROM company_documents
          WHERE company_id = $1 AND deleted_at IS NULL AND (expiry_date IS NULL OR expiry_date > CURRENT_DATE)`,
+        [req.user!.companyId]
+      ),
+      db.query('SELECT pricing_schedule_json, pricing_schedule_source FROM bid_responses WHERE id = $1', [
+        req.params.bidId,
+      ]),
+      db.query(
+        `SELECT label, category, unit, default_unit_price FROM company_pricing_items
+         WHERE company_id = $1 AND is_active = true ORDER BY category, label`,
         [req.user!.companyId]
       ),
     ]);
@@ -207,16 +265,32 @@ router.post('/bid/:bidId/generate', async (req: AuthRequest, res: Response) => {
     const company = companyResult.rows[0];
     const availableDocTypes = documentsResult.rows.map((d) => d.document_type);
 
-    // Required documents for a standard French public tender response. The DCE
-    // analysis (tender.required_documents) extracts this same list in the buyer's
-    // own wording per tender (e.g. "Attestation d'assurance decennale") - it's
-    // surfaced separately below rather than auto-matched against this generic
-    // internal checklist, since the two use different vocabularies and a wrong
-    // silent auto-match could tell a company it's missing something it isn't (or
-    // vice versa) on a page whose whole purpose is compliance accuracy.
+    // Required documents for a standard French public tender response, merged
+    // with the DCE analysis's per-tender, buyer-worded list (tender.required_documents)
+    // via documentMatching.ts's deterministic keyword rules. Anything that doesn't
+    // confidently match an internal type is kept as 'needs_manual_review' rather
+    // than guessed - see documentMatching.ts for why.
     const requiredDocTypes = ['kbis', 'insurance', 'dc1', 'dc2', 'dume', 'attestation_fiscale', 'attestation_sociale'];
-    const missingDocuments = requiredDocTypes.filter((d) => !availableDocTypes.includes(d));
     const tenderSpecificRequiredDocuments: string[] = bid.tender_required_documents || [];
+    const documentChecklist = buildUnifiedDocumentChecklist(
+      tenderSpecificRequiredDocuments,
+      requiredDocTypes,
+      availableDocTypes
+    );
+    // Kept for backward compatibility with anything still reading the old
+    // internal-codes-only shape (e.g. dashboard widgets built against it).
+    const missingDocuments = requiredDocTypes.filter((d) => !availableDocTypes.includes(d));
+    // What actually gets printed in the downloadable bid package (see
+    // documentService.ts) - the merged, human-readable checklist, so a
+    // tender-specific requirement the DCE caught (even one with no internal
+    // type match) shows up in the pack instead of only the 7 generic codes.
+    const missingDocumentsForPackage = documentChecklist
+      .filter((item) => item.status !== 'present')
+      .map((item) =>
+        item.status === 'needs_manual_review'
+          ? `${item.requirement} (a verifier manuellement - non reconnu automatiquement)`
+          : item.requirement
+      );
 
     // Engagement act stays a direct template fill (per spec 6.3 this is a
     // pre-filled form the company reviews/signs, not AI-drafted prose) - but it
@@ -225,26 +299,68 @@ router.post('/bid/:bidId/generate', async (req: AuthRequest, res: Response) => {
 
     const memoResult = await generateTechnicalMemo(req.params.bidId);
 
+    // Pre-fill the pricing schedule from the company's reusable catalog only
+    // the first time this bid is generated (or if it was never customized) -
+    // once the company has edited it ('manual'), regenerating the technical
+    // memo/checklist must never silently overwrite their pricing work. This
+    // is the actual "adjust only what's specific to the new tender" behavior
+    // the profile-reuse requirement (section 6.7) asks for: quantities start
+    // blank (per-tender), unit prices start from the company's own defaults.
+    const existingBid = existingBidResult.rows[0];
+    const alreadyCustomized = existingBid?.pricing_schedule_source === 'manual';
+    let pricingScheduleJson = existingBid?.pricing_schedule_json;
+    let pricingScheduleSource = existingBid?.pricing_schedule_source;
+
+    if (!alreadyCustomized) {
+      if (pricingCatalogResult.rows.length > 0) {
+        pricingScheduleJson = pricingCatalogResult.rows.map((item) => ({
+          label: item.label,
+          category: item.category,
+          unit: item.unit,
+          unit_price: item.default_unit_price !== null ? Number(item.default_unit_price) : undefined,
+          quantity: undefined, // always tender-specific - never carried over from the catalog
+        }));
+        pricingScheduleSource = 'profile_catalog';
+      } else if (!pricingScheduleJson) {
+        pricingScheduleJson = [];
+      }
+    }
+
     await db.query(
       `UPDATE bid_responses SET
          engagement_act_text = $1,
          missing_documents = $2,
+         pricing_schedule_json = $3,
+         pricing_schedule_source = $4,
          status = 'in_progress',
          updated_at = NOW()
-       WHERE id = $3`,
-      [engagementActText, JSON.stringify(missingDocuments), req.params.bidId]
+       WHERE id = $5`,
+      [
+        engagementActText,
+        JSON.stringify(missingDocumentsForPackage),
+        JSON.stringify(pricingScheduleJson),
+        pricingScheduleSource,
+        req.params.bidId,
+      ]
     );
 
     const result = await db.query('SELECT * FROM bid_responses WHERE id = $1', [req.params.bidId]);
+    const needsManualReviewCount = documentChecklist.filter((i) => i.status === 'needs_manual_review').length;
 
     res.json({
       bid: result.rows[0],
       technicalMemoAiGenerated: memoResult.aiGenerated,
+      documentChecklist,
+      // Kept alongside documentChecklist for any existing frontend code built
+      // against the old two-list shape - documentChecklist is the merged,
+      // authoritative view and should be preferred for new UI.
       missingDocuments,
       tenderSpecificRequiredDocuments,
-      note: missingDocuments.length > 0
-        ? 'Certains documents obligatoires manquent dans le profil entreprise et doivent etre ajoutes avant soumission.'
-        : 'Tous les documents obligatoires sont presents dans le profil entreprise.',
+      note: missingDocumentsForPackage.length === 0
+        ? 'Tous les documents obligatoires sont presents dans le profil entreprise.'
+        : needsManualReviewCount > 0
+          ? `Certains documents manquent ou n'ont pas pu etre reconnus automatiquement (${needsManualReviewCount} a verifier manuellement).`
+          : 'Certains documents obligatoires manquent dans le profil entreprise et doivent etre ajoutes avant soumission.',
     });
   } catch (err: any) {
     logger.error('Bid document generation error:', err);

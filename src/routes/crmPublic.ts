@@ -26,6 +26,7 @@ router.post(
     body('brandId').notEmpty(),
     body('email').optional({ checkFalsy: true }).isEmail().normalizeEmail(),
     body('phone').optional({ checkFalsy: true }).isString().trim().isLength({ min: 6 }),
+    body('sessionId').optional({ checkFalsy: true }).isString().trim().isLength({ max: 100 }),
   ],
   async (req: Request, res: Response) => {
     const errors = validationResult(req);
@@ -39,18 +40,18 @@ router.post(
     try {
       const {
         brandId, firstName, lastName, email, phone, companyName,
-        industryTrade, locationCity, locationRegion, leadSource, message,
+        industryTrade, locationCity, locationRegion, leadSource, message, sessionId,
       } = req.body;
 
       const result = await db.query(
         `INSERT INTO crm_leads
           (brand_id, first_name, last_name, email, phone, company_name, industry_trade,
-           location_city, location_region, lead_source, message, crm_sync_status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending')
+           location_city, location_region, lead_source, message, session_id, crm_sync_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending')
          RETURNING id, created_at`,
         [
           brandId, firstName, lastName, email, phone, companyName,
-          industryTrade, locationCity, locationRegion, leadSource || 'website_form', message,
+          industryTrade, locationCity, locationRegion, leadSource || 'website_form', message, sessionId || null,
         ]
       );
 

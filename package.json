@@ -14,6 +14,7 @@
     "lint:fix": "eslint src --ext .ts --fix",
     "db:migrate": "node scripts/migrate.js",
     "db:seed": "node scripts/seed.js",
+    "backfill:opportunity-facts": "ts-node --files scripts/backfillOpportunityFacts.ts",
     "loadtest:generate": "node scripts/generateSyntheticListings.js",
     "loadtest:run": "node scripts/loadTest.js"
   },
@@ -47,6 +48,8 @@
     "pdfkit": "^0.13.0",
     "docx": "^8.5.0",
     "archiver": "^6.0.1",
+    "pdf-parse": "^1.1.1",
+    "@types/pdf-parse": "^1.1.4",
     "speakeasy": "^2.0.0",
     "@types/node": "^20.10.6",
     "@types/express": "^4.17.21",
