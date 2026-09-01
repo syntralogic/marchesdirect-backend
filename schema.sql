@@ -1165,3 +1165,19 @@ ON CONFLICT (name) DO NOTHING;
 -- when the buyer's identity itself is locked) groups by buyer_name on every
 -- fiche view - index it so that stays cheap as the table grows.
 CREATE INDEX IF NOT EXISTS opportunities_buyer_name ON opportunities(buyer_name);
+
+-- Client-recommended data sources (see aiService/dataCollectionService for
+-- the connectors): DECP consolidées (decp.info / data.economie.gouv.fr) is
+-- the most complete public-tender base - it aggregates BOAMP + every profil
+-- acheteur + PLACE, updated near-daily. Kept alongside BOAMP rather than
+-- replacing it: BOAMP still covers "en cours" notices before an award is
+-- made, which DECP (award data only) never shows. Batiweb's free
+-- actualités/marchés section is the one concretely-scrapable open private
+-- source identified so far (see collectBatiwebData) - inactive by default,
+-- flip to true once its markup has been checked against the live site.
+-- ON CONFLICT here (unlike the INSERT above) so this file stays safely
+-- re-runnable even though the original seed block above isn't.
+INSERT INTO data_sources (code, name, feed_type, frequency_hours, active) VALUES
+('decp', 'DECP Consolidées (data.economie.gouv.fr)', 'api', 24, false),
+('batiweb', 'Batiweb - actualités/marchés (accès libre)', 'scraper', 24, false)
+ON CONFLICT (code) DO NOTHING;

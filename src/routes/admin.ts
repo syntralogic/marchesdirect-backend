@@ -5,7 +5,7 @@ import { logger } from '../utils/logger';
 import { AuthRequest, requireRole } from '../middleware/auth';
 import { verifyDeduplicationQuality, getDeduplicationReport, deduplicateOpportunities } from '../services/deduplicationService';
 import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities } from '../services/aiService';
-import { collectBoampData, collectPlaceData, collectTedData } from '../services/dataCollectionService';
+import { collectBoampData, collectPlaceData, collectTedData, collectDecpData, collectBatiwebData } from '../services/dataCollectionService';
 import { runBackup, testRestore } from '../jobs/backupManagement';
 
 const router = Router();
@@ -141,11 +141,17 @@ router.post('/data-sources/:code/run', async (req: AuthRequest, res: Response) =
       case 'boamp':
         result = await collectBoampData(source.id);
         break;
+      case 'decp':
+        result = await collectDecpData(source.id);
+        break;
       case 'place':
         result = await collectPlaceData(source.id);
         break;
       case 'ted':
         result = await collectTedData(source.id);
+        break;
+      case 'batiweb':
+        result = await collectBatiwebData(source.id);
         break;
       default:
         return res.status(400).json({ error: `No connector implemented for source code: ${source.code}` });
