@@ -3,6 +3,7 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { AuthRequest } from '../middleware/auth';
 import { matchOpportunitiesToCompany } from '../services/aiService';
+import { resolveIdentityUnlocked } from './opportunities';
 
 const router = Router();
 
@@ -53,12 +54,24 @@ router.get('/matches', async (req: AuthRequest, res: Response) => {
     }
 
     const result = await db.query(
-      `SELECT id, title, deadline, estimated_value, location_city, location_region, ai_summary
-       FROM opportunities WHERE id = ANY($1::uuid[])`,
+      `SELECT o.id, o.title, o.deadline, o.estimated_value, o.location_city, o.location_region, o.ai_summary,
+              ot.code as journey
+       FROM opportunities o
+       LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+       WHERE o.id = ANY($1::uuid[])`,
       [matchedIds]
     );
 
-    res.json({ matches: result.rows });
+    // Dashboard cards for a locked private-tender match (prototype V17,
+    // section 3.6) show "Identité masquée + Prendre rendez-vous" instead of
+    // the normal "Préparer mon dossier" CTA - reuse the same resolver the
+    // fiche itself uses so the two can't disagree.
+    const matches = await Promise.all(result.rows.map(async (row) => ({
+      ...row,
+      identity_unlocked: await resolveIdentityUnlocked(row.id, row.journey, '', req.user!.email),
+    })));
+
+    res.json({ matches });
   } catch (err: any) {
     logger.error('Dashboard matches error:', err);
     res.status(500).json({ error: 'Failed to load matches' });

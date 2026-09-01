@@ -19,7 +19,7 @@ const router = Router();
 // identity, which unlocks only when the visitor books a *specific* callback
 // slot for that opportunity - never merely by leaving an email, and never
 // by choosing "call me back, no particular time".
-async function resolveIdentityUnlocked(opportunityId: string, journey: string, sessionId: string, email: string): Promise<boolean> {
+export async function resolveIdentityUnlocked(opportunityId: string, journey: string, sessionId: string, email: string): Promise<boolean> {
   if (journey === 'public_procurement') return true;
   if (!sessionId && !email) return false;
 
