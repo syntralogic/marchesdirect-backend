@@ -137,6 +137,15 @@ router.put('/bid/:bidId', async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // submitted_at was never set anywhere - a client marking status
+    // 'submitted' had no way to also set this column (it wasn't in the
+    // updatable field list, and shouldn't be client-supplied anyway since
+    // that's trivially spoofable). Stamp it server-side the moment status
+    // actually transitions to 'submitted'.
+    if (req.body.status === 'submitted') {
+      updates.push(`submitted_at = NOW()`);
+    }
+
     if (updates.length === 0) {
       return res.status(400).json({ error: 'No fields to update' });
     }

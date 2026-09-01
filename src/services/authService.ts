@@ -54,8 +54,8 @@ export const registerCompanyAndUser = async (data: RegisterParams) => {
     await client.query(
       `INSERT INTO companies 
         (id, brand_id, name, slug, email, phone, industry_sector, 
-         address_city, address_country, status, subscription_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+         address_city, address_country, status, subscription_status, subscription_tier, trial_ends_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW() + INTERVAL '14 days')`,
       [
         companyId,
         brandId,
@@ -67,7 +67,11 @@ export const registerCompanyAndUser = async (data: RegisterParams) => {
         data.region || null,
         'FR',
         'active',
-        'trial', // 14-day trial by default
+        'trial', // 14-day trial by default - trial_ends_at below is what actually
+                 // enforces that; it was previously never set at all (not in this
+                 // INSERT's column list), so signups got an unlimited "trial" that
+                 // never expired and had no end date to show the user.
+        'free',
       ]
     );
 

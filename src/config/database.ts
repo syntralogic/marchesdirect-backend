@@ -185,4 +185,14 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS favorites_company ON favorites(company_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS favorites_opportunity ON favorites(opportunity_id)`);
+
+  // Backfill trial_ends_at for companies that signed up before this column
+  // was actually populated at registration time (see authService.ts) -
+  // without this they're stuck showing a "trial" with no end date forever.
+  // Approximate their trial window as 14 days from when they actually
+  // registered (created_at), matching the real signup logic.
+  await pool.query(
+    `UPDATE companies SET trial_ends_at = created_at + INTERVAL '14 days'
+     WHERE subscription_status = 'trial' AND trial_ends_at IS NULL`
+  );
 };
