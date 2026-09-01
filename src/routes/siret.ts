@@ -123,7 +123,21 @@ async function lookupViaInsee(siret: string, apiKey: string): Promise<CompanyDat
   };
 }
 
-// GET /api/siret/status?sessionId=... - "companyKnown" is a single global
+// Resolves a free-text company name to a SIRET via Pappers' search endpoint
+// (client's ask: let the user type "SIRET ou entreprise" - either works).
+// Returns the first/best match's headquarters SIRET, or null if nothing
+// matched - callers should surface that as a normal "not found", not an
+// error, same as an unrecognized SIRET number.
+async function resolveCompanyNameToSiret(name: string, apiKey: string): Promise<string | null> {
+  const { data } = await axios.get('https://api.pappers.fr/v2/recherche', {
+    params: { api_token: apiKey, q: name, par_page: 1 },
+    timeout: 8000,
+  });
+  const first = (data.resultats || [])[0];
+  return first?.siege?.siret || first?.siret || null;
+}
+
+
 // flag per browser session (prototype V17, section 2.3), not per-opportunity:
 // once identified on any fiche, a visitor is recognized everywhere without
 // re-entering their SIRET. This is what the frontend calls on load to
@@ -142,15 +156,16 @@ router.get('/status', async (req: Request, res: Response) => {
 });
 
 // POST /api/siret/lookup - "reconnaissance d'entreprise" (prototype V17,
-// section 3.3). Validates the SIRET is exactly 14 digits (spec's own rule),
-// tries Pappers first (client's explicit priority - covers capital/dirigeant/
-// certifications), falls back to INSEE Sirene if Pappers isn't configured or
-// doesn't have the company, then caches whichever result against the
-// visitor's session so it's recognized on every fiche from then on.
+// section 3.3). Accepts either a 14-digit SIRET or a free-text company name
+// (client's ask: label the field "SIRET ou entreprise" so either works) -
+// a name is resolved to a SIRET via Pappers' search endpoint first, then
+// follows the exact same Pappers-primary/INSEE-fallback lookup as before.
+// Caches whichever result against the visitor's session so it's recognized
+// on every fiche from then on.
 router.post(
   '/lookup',
   [
-    body('siret').matches(/^\d{14}$/).withMessage('Le SIRET doit contenir 14 chiffres.'),
+    body('query').isString().trim().isLength({ min: 2, max: 200 }).withMessage("Indiquez un SIRET (14 chiffres) ou le nom de l'entreprise."),
     body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
   ],
   async (req: Request, res: Response) => {
@@ -164,11 +179,40 @@ router.post(
     if (!pappersKey && !inseeKey) {
       return res.status(501).json({
         error: 'company_lookup_not_configured',
-        message: "La reconnaissance d'entreprise par SIRET n'est pas encore configurée.",
+        message: "La reconnaissance d'entreprise n'est pas encore configurée.",
       });
     }
 
-    const { siret, sessionId } = req.body;
+    const { sessionId } = req.body;
+    const query: string = req.body.query;
+    let siret: string;
+
+    if (/^\d{14}$/.test(query)) {
+      siret = query;
+    } else {
+      // Not a SIRET - treat as a company name. Needs Pappers specifically
+      // (INSEE Sirene's own free-text search is a separate, differently-
+      // shaped endpoint not wired here yet - name search is Pappers-only
+      // for now, SIRET number entry still works either way).
+      if (!pappersKey) {
+        return res.status(400).json({
+          error: 'name_search_not_configured',
+          message: "La recherche par nom d'entreprise n'est pas disponible pour le moment. Indiquez le numéro de SIRET (14 chiffres).",
+        });
+      }
+      let resolved: string | null = null;
+      try {
+        resolved = await resolveCompanyNameToSiret(query, pappersKey);
+      } catch (err: any) {
+        logger.error('Pappers company-name search error:', err.response?.data || err.message);
+        return res.status(502).json({ error: 'siret_lookup_failed', message: 'La recherche a échoué. Réessayez.' });
+      }
+      if (!resolved) {
+        return res.status(404).json({ error: 'siret_not_found', message: "Aucune entreprise trouvée pour ce nom. Essayez avec le numéro de SIRET." });
+      }
+      siret = resolved;
+    }
+
     let company: CompanyData | null = null;
     let lastError: any = null;
 
