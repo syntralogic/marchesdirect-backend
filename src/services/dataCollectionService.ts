@@ -117,8 +117,20 @@ export const collectBoampData = async (sourceId: number) => {
 // endpoint returns fields flat on the result object directly (v1 nested
 // them under `record.fields`), and has no `recordid` wrapper - `idweb` is
 // BOAMP's own stable notice identifier, used here as the primary key.
+//
+// buyer_name tries several field-name candidates (see firstDefined below,
+// shared with the DECP normalizer) rather than only `nomacheteur` - BOAMP
+// covers many notice/procedure types and not all of them populate that
+// exact field. A real case this was missing: a notice whose buyer name
+// only showed up in `ville_avis` (BOAMP's own city field, seemingly
+// mis-populated with the institution's name for that notice) while
+// `nomacheteur` was empty - the public-market fiche then had to fall back
+// to a generic "Acheteur public" label despite the law requiring the real
+// name be shown. Public-transparency correctness matters more here than
+// on private sources, so this tries harder before giving up.
 const normalizeBoampRecord = (record: any) => {
   const f = record.fields ? record.fields : record; // tolerate either shape
+  const buyerName = firstDefined(f, ['nomacheteur', 'denominationacheteur', 'acheteur_nom', 'nom_acheteur']);
   return {
     source_reference: f.idweb || f.id || record.recordid,
     title: f.objet || f.titulaire || 'Sans titre',
@@ -126,10 +138,13 @@ const normalizeBoampRecord = (record: any) => {
     publication_date: f.dateparution || record.record_timestamp,
     deadline: f.datelimitereponse || null,
     estimated_value: f.montant ? parseFloat(f.montant) : null,
-    location_city: f.ville_avis || f.nomacheteur || null,
+    // ville_avis is a real city field and stays the primary source for
+    // location - buyerName is still an available last-resort fallback for
+    // display purposes only (better than nothing), same as before.
+    location_city: f.ville_avis || buyerName || null,
     location_region: f.region || null,
     location_department: f.departement || null,
-    buyer_name: f.nomacheteur || null,
+    buyer_name: buyerName,
     raw: record,
   };
 };
