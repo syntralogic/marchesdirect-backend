@@ -23,6 +23,15 @@ router.get('/plans', async (req: Request, res: Response) => {
 });
 
 // POST /api/subscriptions/checkout - create Stripe checkout session (requires auth)
+//
+// Not called from anywhere in the frontend as of the pricing-page fix that
+// removed the self-serve /checkout/:planId route: the client's explicit
+// instruction (WhatsApp) is that this site never sells a subscription
+// directly - every plan's CTA leads to a phone call with sales, not a card
+// form. Left in place rather than deleted since Stripe itself may still be
+// how sales actually charges a customer after that call (e.g. an admin-
+// generated payment link), just not through this self-serve endpoint from
+// the public site.
 router.post('/checkout', authenticate, async (req: AuthRequest, res: Response) => {
   if (!stripe) {
     return res.status(503).json({
