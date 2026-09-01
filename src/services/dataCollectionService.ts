@@ -19,26 +19,37 @@ export const collectBoampData = async (sourceId: number) => {
     logger.info(`[BOAMP] Starting collection (log: ${logId})`);
 
     // Real BOAMP open-data portal (Opendatasoft/DILA) - public dataset, no API key required.
-    // Docs: https://boamp-datadila.opendatasoft.com/explore/dataset/boamp/
-    const endpoint = process.env.BOAMP_API_ENDPOINT || 'https://boamp-datadila.opendatasoft.com/api/records/1.0/search/';
+    // Verified working (Feb 2026 community source list): this dataset has
+    // 1.68M+ notices with same-day data on the v2.1 Explore API. The old v1
+    // endpoint (/api/records/1.0/search/) this used to hit is Opendatasoft's
+    // legacy API - v2.1 is what's documented as "stable and production
+    // ready" going forward, with a different query language (ODSQL: `where`/
+    // `order_by` instead of `q`/`sort`) and response shape (fields flat on
+    // each result object, not nested under `.fields`).
+    // Docs: https://boamp-datadila.opendatasoft.com/api/explore/v2.1/console
+    const endpoint = process.env.BOAMP_API_ENDPOINT
+      || 'https://boamp-datadila.opendatasoft.com/api/explore/v2.1/catalog/datasets/boamp/records';
     // Optional - only needed if a higher-rate-limit / authenticated endpoint is used later.
     const apiKey = process.env.BOAMP_API_KEY;
 
     // Fetch data from BOAMP (last 24 hours), sorted by most recent publication first.
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
+    // limit=100 is v2.1's per-request cap (v1's `rows` went up to 1000) - a
+    // production run needs to page through `offset` until total_count is
+    // exhausted rather than assuming one call covers the day, which this
+    // does not yet do. Flagged rather than silently under-fetching forever.
     const response = await axios.get(endpoint, {
       params: {
-        dataset: 'boamp',
-        q: `dateparution>=${since}`,
-        sort: '-dateparution',
-        rows: 1000,
+        where: `dateparution >= date'${since}'`,
+        order_by: '-dateparution',
+        limit: 100,
         ...(apiKey ? { apikey: apiKey } : {}),
       },
       timeout: 30000,
     });
 
-    const rawRecords = response.data.records || [];
+    const rawRecords = response.data.results || [];
     const notices = rawRecords.map(normalizeBoampRecord);
     logger.info(`[BOAMP] Fetched ${notices.length} notices`);
 
@@ -102,11 +113,14 @@ export const collectBoampData = async (sourceId: number) => {
   }
 };
 
-// Normalize a raw BOAMP record (Opendatasoft "fields" object) into our internal shape.
+// Normalize a raw BOAMP record into our internal shape. v2.1's records
+// endpoint returns fields flat on the result object directly (v1 nested
+// them under `record.fields`), and has no `recordid` wrapper - `idweb` is
+// BOAMP's own stable notice identifier, used here as the primary key.
 const normalizeBoampRecord = (record: any) => {
-  const f = record.fields || {};
+  const f = record.fields ? record.fields : record; // tolerate either shape
   return {
-    source_reference: record.recordid || f.idweb || f.id,
+    source_reference: f.idweb || f.id || record.recordid,
     title: f.objet || f.titulaire || 'Sans titre',
     description: f.objet || f.resume || '',
     publication_date: f.dateparution || record.record_timestamp,
@@ -215,31 +229,39 @@ export const collectPlaceData = async (sourceId: number) => {
 // BOAMP + every profil acheteur + PLACE into one dataset, updated near-daily.
 // decp.info itself is just a datasette CSV/XLSX browser with no API of its
 // own - the real underlying data lives on data.economie.gouv.fr (mirrored on
-// opendatamef.opendatasoft.com), an Opendatasoft portal like BOAMP, dataset
-// "decp-v3-marches-valides". Same records/1.0/search shape as BOAMP below.
-//
-// HONESTY NOTE ON FIELD NAMES: this sandbox's network egress doesn't include
-// data.economie.gouv.fr / opendatamef.opendatasoft.com (see allowed domains),
-// so the exact flattened field names below could not be verified against a
-// live query from here - only that the dataset itself exists and uses the
-// Opendatasoft records API (confirmed via web search of the dataset's public
-// pages). The field names used are the DECP regulatory schema's own names
-// (objet, montant, dateNotification, acheteur.id, titulaires[].denomination-
-// Sociale - see the official schema at github.com/etalab/schema-decp), which
-// Opendatasoft typically flattens with dots/underscores. normalizeDecpRecord
-// tries multiple plausible flattenings per field and never throws on a
-// missing one, but running one real query via the API console
-// (https://opendatamef.opendatasoft.com/api-console/) and diffing the actual
-// field list against the candidates below is a required step before setting
-// this source's `active` to true in production - don't skip it.
+// opendatamef.opendatasoft.com), an Opendatasoft portal like BOAMP.
+// SOURCED LIVE (web search, since data.economie.gouv.fr/opendatamef aren't
+// reachable from this sandbox's network egress allowlist - see allowed
+// domains): a Feb 2026 community source-verification doc confirms the real,
+// current, working query against the Opendatasoft-hosted mirror of this
+// exact dataset:
+//   https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/
+//     decp-2022-marches-valides/records?where=titulaire_id_1="<siret>"
+// (656,837 records in the 2022 schema format). That confirms three things
+// the old code here only guessed at:
+//   1. The endpoint is Explore API v2.1 (`where`/`order_by`/`limit`, results
+//      flat on each record) - not the legacy v1 `/api/records/1.0/search/`
+//      this used to call, which Opendatasoft documents as superseded.
+//   2. The live dataset id is `decp-2022-marches-valides`, not
+//      `decp-v3-marches-valides` (that name still resolves as an asset page
+//      but the confirmed-working query above uses the 2022-schema id).
+//   3. Titulaires are flattened to fixed columns titulaire_id_1..3 (max 3
+//      per marché) rather than a nested array, and missing values are the
+//      literal string "CDL", not null/empty - firstDefined() below now
+//      filters that out explicitly.
+// Field names for objet/montant/dates are still the DECP regulatory
+// schema's own names (github.com/etalab/schema-decp) as Opendatasoft
+// typically flattens them - not independently re-verified beyond the
+// titulaire finding above, so still worth one real API-console check before
+// setting this source `active` in production.
 export const collectDecpData = async (sourceId: number) => {
   const startedAt = new Date();
 
   try {
     logger.info('[DECP] Starting collection');
 
-    const endpoint = process.env.DECP_API_ENDPOINT || 'https://opendatamef.opendatasoft.com/api/records/1.0/search/';
-    const dataset = process.env.DECP_DATASET || 'decp-v3-marches-valides';
+    const endpoint = process.env.DECP_API_ENDPOINT
+      || 'https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/decp-2022-marches-valides/records';
     const apiKey = process.env.DECP_API_KEY; // optional, public dataset works without one
 
     // DECP is award data (données de marchés déjà notifiés), not live "en
@@ -248,18 +270,19 @@ export const collectDecpData = async (sourceId: number) => {
     // whichever date field the live schema turns out to use for that.
     const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
+    // limit=100 is v2.1's per-request cap - same pagination caveat as the
+    // BOAMP connector above (offset paging not yet implemented).
     const response = await axios.get(endpoint, {
       params: {
-        dataset,
-        q: `datepublicationdonnees>=${since} OR datenotification>=${since}`,
-        sort: '-datepublicationdonnees',
-        rows: 1000,
+        where: `datepublicationdonnees >= date'${since}' OR datenotification >= date'${since}'`,
+        order_by: '-datepublicationdonnees',
+        limit: 100,
         ...(apiKey ? { apikey: apiKey } : {}),
       },
       timeout: 30000,
     });
 
-    const rawRecords = response.data.records || [];
+    const rawRecords = response.data.results || [];
     const notices = rawRecords.map(normalizeDecpRecord);
     logger.info(`[DECP] Fetched ${notices.length} notices`);
 
@@ -329,16 +352,23 @@ export const collectDecpData = async (sourceId: number) => {
 // field name (see the HONESTY NOTE above) - a candidate list, not a
 // confirmed schema. Returns 'not available'-style nulls rather than
 // guessing when none match, same discipline as aiService's extraction.
+// "CDL" is DECP's own literal sentinel for a missing/not-declared value
+// (confirmed live - see collectDecpData's sourcing note above), not an
+// Opendatasoft or project convention - filtered out here alongside the
+// usual null/undefined/empty-string checks so it never leaks into
+// opportunities as a fake city or buyer name.
 const firstDefined = (f: Record<string, any>, keys: string[]) => {
-  for (const k of keys) if (f[k] !== undefined && f[k] !== null && f[k] !== '') return f[k];
+  for (const k of keys) if (f[k] !== undefined && f[k] !== null && f[k] !== '' && f[k] !== 'CDL') return f[k];
   return null;
 };
 
+// v2.1 returns fields flat on the result object directly (v1 nested them
+// under `record.fields`) - same shape change as normalizeBoampRecord above.
 const normalizeDecpRecord = (record: any) => {
-  const f = record.fields || {};
+  const f = record.fields ? record.fields : record;
   const montantRaw = firstDefined(f, ['montant', 'montant_ht', 'montantht']);
   return {
-    source_reference: record.recordid || firstDefined(f, ['id', 'uid']),
+    source_reference: firstDefined(f, ['id', 'uid']) || record.recordid,
     title: firstDefined(f, ['objet']) || 'Marché public (DECP)',
     description: firstDefined(f, ['objet']) || '',
     publication_date: firstDefined(f, ['datepublicationdonnees', 'datenotification']) || record.record_timestamp,
@@ -347,6 +377,10 @@ const normalizeDecpRecord = (record: any) => {
     location_city: firstDefined(f, ['lieuexecution_nom', 'acheteur_nom']),
     location_region: firstDefined(f, ['lieuexecution_code_region', 'region']),
     location_department: firstDefined(f, ['lieuexecution_departement', 'departement']),
+    // titulaire_id_1/2/3 are the confirmed real column names (fixed columns,
+    // max 3 titulaires per marché - not the nested `titulaires[]` array the
+    // regulatory schema itself uses); acheteur_nom is still the best guess
+    // for buyer name pending the one live field-list check flagged above.
     buyer_name: firstDefined(f, ['acheteur_nom', 'nomacheteur', 'denominationacheteur']),
     raw: record,
   };
