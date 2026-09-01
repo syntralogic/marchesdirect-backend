@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { AuthRequest } from '../middleware/auth';
+import { resolveIdentityUnlocked } from './opportunities';
 
 const router = Router();
 
@@ -26,7 +27,15 @@ router.get('/', async (req: AuthRequest, res: Response) => {
        ORDER BY f.created_at DESC`,
       [req.user!.companyId]
     );
-    res.json({ results: result.rows });
+    // Dashboard "Annonces enregistrées" cards need the same locked/unlocked
+    // CTA the "Nouvelles opportunités" ones already get (spec 3.6) - reuse
+    // the same resolver the fiche and the matches endpoint use, so a saved
+    // card can never disagree with the fiche itself about its lock state.
+    const results = await Promise.all(result.rows.map(async (row) => ({
+      ...row,
+      identity_unlocked: await resolveIdentityUnlocked(row.id, row.journey, '', req.user!.email),
+    })));
+    res.json({ results });
   } catch (err: any) {
     logger.error('Favorites list error:', err);
     res.status(500).json({ error: 'Failed to fetch favorites' });
