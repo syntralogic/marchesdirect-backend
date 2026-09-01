@@ -96,6 +96,18 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     const params: any[] = [];
     let idx = 1;
 
+    // The view's own WHERE clause (schema.sql) excludes status IN
+    // ('cancelled','expired','merged'), but nothing ever flips an
+    // opportunity's status to 'expired' when its deadline actually passes -
+    // there's no cron job for it. Without this, a listing with a
+    // submission deadline in the past stays 'active' forever and keeps
+    // showing up in search (worse: sorted to the very top, since results
+    // are ORDER BY deadline ASC). Filtering here is an immediate, always-
+    // correct fix regardless of whether a status-flipping job ever gets
+    // built - deadline IS NULL is kept visible since a missing deadline
+    // isn't the same as a passed one.
+    conditions.push(`(osi.deadline IS NULL OR osi.deadline >= NOW())`);
+
     if (journey) {
       conditions.push(`osi.opportunity_type = $${idx++}`);
       params.push(journey);
