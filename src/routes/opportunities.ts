@@ -453,6 +453,56 @@ router.post(
 // GET /api/opportunities/:id/match-score - "Analyse stratégique" tab data.
 // Personalizes against the logged-in user's company profile when available,
 // otherwise returns the generic (non-personalized) breakdown.
+// POST /api/opportunities/match-scores - lightweight bulk scores for a
+// results list (prototype V17, section 3.1: a score badge on every card
+// once the visitor's company is identified, never before). Reuses
+// computeMatchScore per id rather than a separate calculation path, so a
+// card's badge and the fiche's full "Analyse stratégique" tab can never
+// disagree on the number. Capped at 30 ids - a results page, not a bulk
+// export.
+router.post(
+  '/match-scores',
+  [body('ids').isArray({ min: 1, max: 30 }), body('ids.*').isString()],
+  optionalAuth,
+  async (req: AuthRequest, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ error: 'Validation failed', details: errors.array() });
+    }
+    try {
+      let companyId: string | null = null;
+      if (req.user?.email) {
+        const userResult = await db.query('SELECT company_id FROM users WHERE email = $1 AND deleted_at IS NULL', [req.user.email]);
+        companyId = userResult.rows[0]?.company_id || null;
+      }
+      if (!companyId) {
+        const sessionId = req.body.sessionId as string;
+        const siretResult = sessionId
+          ? await db.query('SELECT 1 FROM siret_lookups WHERE session_id = $1', [sessionId])
+          : { rows: [] };
+        if (siretResult.rows.length === 0) {
+          return res.status(403).json({ error: 'company_not_identified' });
+        }
+      }
+
+      const scores: Record<string, { score: number; scoreTitle: string }> = {};
+      for (const oppId of req.body.ids as string[]) {
+        try {
+          const result = await computeMatchScore(oppId, companyId);
+          scores[oppId] = { score: result.score, scoreTitle: result.scoreTitle };
+        } catch {
+          // Skip an individual bad id rather than failing the whole batch -
+          // a card just shows no badge if its score couldn't be computed.
+        }
+      }
+      res.json({ scores });
+    } catch (err: any) {
+      logger.error('Bulk match score error:', err);
+      res.status(500).json({ error: 'Failed to compute match scores' });
+    }
+  }
+);
+
 router.get('/:id/match-score', optionalAuth, async (req: AuthRequest, res: Response) => {
   try {
     // optionalAuth only decodes the JWT (userId/email) - it does not run the
