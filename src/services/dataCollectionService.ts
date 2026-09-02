@@ -62,20 +62,26 @@ export const collectBoampData = async (sourceId: number) => {
     // Optional - only needed if a higher-rate-limit / authenticated endpoint is used later.
     const apiKey = process.env.BOAMP_API_KEY;
 
-    // Client's explicit ask (WhatsApp): the platform needs "several
-    // thousand, even tens of thousands" of listings before proper UX
-    // testing is possible - a rolling 24h window would only ever trickle in
-    // a day's worth of new notices even with pagination. Widened to 180
-    // days for a real one-time-feeling backfill; the steady-state trickle
-    // this naturally settles into afterward (re-running every 6h, existing
-    // rows just get updated not duplicated) still keeps recent notices
-    // fresh - this doesn't need separate "backfill mode" vs "daily mode"
-    // logic, just a wider window.
-    const since = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    // Filters on the actual submission deadline (datelimitereponse), not
+    // publication date. This was previously filtering on publication date
+    // within a 180-day window - but BOAMP deadlines typically land 3-8
+    // weeks *after* publication, so the "180 days back" backfill window
+    // mostly pulled in notices whose deadline had already elapsed by the
+    // time they were ingested, which then got immediately hidden again by
+    // the "filter expired opportunities out of search" fix (see
+    // opportunities.ts) - the two fixes were silently fighting each other,
+    // which is exactly why the listing count stayed low despite both
+    // changes. Filtering on deadline directly instead means everything
+    // ingested is, by construction, still open right now - solves "too few
+    // listings" and "no expired ones showing" at the same time, and there's
+    // no reason to cap this to a rolling window at all: every open BOAMP
+    // notice across all of France/every sector is fair game up to the
+    // MAX_RECORDS_PER_RUN safety cap.
+    const today = new Date().toISOString().slice(0, 10);
 
     const rawRecords = await fetchAllPages(endpoint, {
-      where: `dateparution >= date'${since}'`,
-      order_by: '-dateparution',
+      where: `datelimitereponse >= date'${today}'`,
+      order_by: 'datelimitereponse',
       ...(apiKey ? { apikey: apiKey } : {}),
     }, 'BOAMP');
 

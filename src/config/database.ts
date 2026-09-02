@@ -440,5 +440,22 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // dispatch switch, it could never actually run. Flipping both here
   // (idempotent - safe to run on every boot) rather than only in schema.sql
   // since that file doesn't re-run against an already-provisioned database.
-  await pool.query(`UPDATE data_sources SET active = true WHERE code IN ('boamp', 'decp')`);
+  // DECP reactivation from the earlier commit is being reverted here: further
+  // research (web search, since this sandbox can't reach data.economie.gouv.fr
+  // directly) found that decp-2022-marches-valides is a frozen/deprecated
+  // dataset - "[DEPRECIE]... ne sera plus maintenu à compter du 16 novembre
+  // 2023". Since Jan 2024, DECP publication moved to per-buyer files on
+  // data.gouv.fr, consolidated into a single ~234MB Parquet/CSV file updated
+  // daily (decp.info / github.com/ColinMaudry/decp-processing) - there's no
+  // small, query-able records API for it anymore, so collectDecpData() as
+  // currently written can only ever return near-nothing from a filter like
+  // "published in the last N days" against data that stopped growing in
+  // 2023. Rather than leave it silently running and producing ~0 useful
+  // rows, deactivating again until a real fix (streaming-download +
+  // parse the live consolidated file, likely as a one-off backfill script
+  // rather than this connector's incremental-run shape) is built.
+  // BOAMP alone is unaffected and does the real work for "several thousand
+  // public-market listings" now that its deadline-filter bug (see the
+  // dataCollectionService.ts commit right before this one) is fixed.
+  await pool.query(`UPDATE data_sources SET active = false WHERE code = 'decp'`);
 };

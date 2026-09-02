@@ -1178,6 +1178,10 @@ CREATE INDEX IF NOT EXISTS opportunities_buyer_name ON opportunities(buyer_name)
 -- ON CONFLICT here (unlike the INSERT above) so this file stays safely
 -- re-runnable even though the original seed block above isn't.
 INSERT INTO data_sources (code, name, feed_type, frequency_hours, active) VALUES
-('decp', 'DECP Consolidées (data.economie.gouv.fr)', 'api', 24, true),
+-- Inactive: the specific dataset this connector queries
+-- (decp-2022-marches-valides) is frozen/deprecated since Nov 2023 - see the
+-- detailed note in database.ts's applyIncrementalMigrations. Re-activate
+-- once collectDecpData() targets the live consolidated file instead.
+('decp', 'DECP Consolidées (data.economie.gouv.fr) - DEPRECATED SOURCE, see note', 'api', 24, false),
 ('batiweb', 'Batiweb - actualités/marchés (accès libre)', 'scraper', 24, false)
 ON CONFLICT (code) DO NOTHING;
