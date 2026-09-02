@@ -38,6 +38,23 @@ export const startScheduledJobs = () => {
     }
   });
 
+  // The cron above only fires at fixed clock marks (00:00, 02:00, 04:00...),
+  // never "2h after the process started" - on a free-tier host that spins
+  // down after ~15min idle and only wakes on an incoming HTTP request (no
+  // request = no process = no chance for a cron tick to ever fire), a
+  // redeploy could go a very long time before collection runs even once,
+  // which is exactly why "only ~50 listings" persisted even after the
+  // BOAMP fix and DECP reactivation/deactivation churn - the fixed
+  // connector was simply never getting a chance to run. Fire one run
+  // immediately on boot (in the background, doesn't block server startup)
+  // so every deploy/restart guarantees at least one real attempt,
+  // regardless of the cron schedule or host sleep behavior.
+  logger.info('[Job] Running an immediate data collection pass on boot (see comment above for why)...');
+  scheduleDataCollection()
+    .then(() => deduplicateOpportunities())
+    .then((merged) => logger.info(`[Job] Boot-time data collection pass complete, ${merged} duplicate pairs merged`))
+    .catch((err) => logger.error('[Job] Boot-time data collection pass failed (non-fatal, next cron tick or restart will retry):', err));
+
   logger.info('✅ Data collection job scheduled (every 2h). AI classification runs separately - see jobs/aiProcessing.ts.');
 };
 
