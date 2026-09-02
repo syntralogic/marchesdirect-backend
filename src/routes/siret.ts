@@ -45,8 +45,37 @@ interface CompanyData {
   // champs_supplementaires=labels, which INSEE Sirene has no equivalent
   // for at all.
   certifications: string[];
-  source: 'pappers' | 'insee';
+  source: 'pappers' | 'insee' | 'demo';
 }
+
+// Fixed demo SIRET so the whole SIRET-recognition -> score -> lead flow is
+// testable end-to-end with zero external API keys configured (no
+// PAPPERS_API_KEY, no INSEE_API_KEY) - matches the client's own reference
+// screenshots (KB Electricite / Karim Benali) exactly, paired with the
+// DEMO-PUB-4 Bordeaux electricite listing seed.js inserts fully pre-
+// analyzed. Works even when both keys ARE configured (checked first), so a
+// developer testing locally never needs real credentials just to see the
+// full journey once - short-circuits before the "not configured" 501 below.
+const DEMO_SIRET = '12345678900012';
+const DEMO_COMPANY: CompanyData = {
+  name: 'KB Électricité',
+  legal: 'SASU',
+  created: '14 mars 2018',
+  capital: '25 000 €',
+  address: '12 avenue des Artisans',
+  city: 'Bordeaux',
+  postal: '33000',
+  director: 'Karim Benali',
+  employees: '6 à 9 salariés',
+  ape: '4321A',
+  activity: "Travaux d'installation électrique",
+  website: 'kbelectricite.fr',
+  facebook: 'KB Électricité Bordeaux',
+  googleRating: '4.7',
+  googleReviewCount: 32,
+  certifications: ['RGE'],
+  source: 'demo',
+};
 
 // Client's explicit instruction (WhatsApp, 31 Aug): use Pappers as the
 // primary source for SIRET auto-fill, since it covers capital/dirigeant/
@@ -266,6 +295,22 @@ router.post(
       return res.status(400).json({ error: errors.array()[0].msg });
     }
 
+    const { sessionId } = req.body;
+    const query: string = req.body.query;
+
+    // Demo shortcut - checked before the key-configured gate, and before
+    // treating the query as a name-search, so it works identically whether
+    // or not PAPPERS_API_KEY/INSEE_API_KEY are set.
+    if (query.trim() === DEMO_SIRET) {
+      await db.query(
+        `INSERT INTO siret_lookups (session_id, siret, company_data)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
+        [sessionId, DEMO_SIRET, JSON.stringify(DEMO_COMPANY)]
+      );
+      return res.json({ companyKnown: true, siret: DEMO_SIRET, company: DEMO_COMPANY });
+    }
+
     const pappersKey = process.env.PAPPERS_API_KEY;
     const inseeKey = process.env.INSEE_API_KEY;
     if (!pappersKey && !inseeKey) {
@@ -275,8 +320,6 @@ router.post(
       });
     }
 
-    const { sessionId } = req.body;
-    const query: string = req.body.query;
     let siret: string;
 
     if (/^\d{14}$/.test(query)) {
