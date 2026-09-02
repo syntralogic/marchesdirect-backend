@@ -1,5 +1,9 @@
 import axios from 'axios';
 import Parser from 'rss-parser';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { pipeline } from 'stream/promises';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { deduplicateOpportunities } from './deduplicationService';
@@ -277,60 +281,101 @@ export const collectPlaceData = async (sourceId: number) => {
 // ============================================================================
 // Client-recommended primary source (WhatsApp, see spec doc): aggregates
 // BOAMP + every profil acheteur + PLACE into one dataset, updated near-daily.
-// decp.info itself is just a datasette CSV/XLSX browser with no API of its
-// own - the real underlying data lives on data.economie.gouv.fr (mirrored on
-// opendatamef.opendatasoft.com), an Opendatasoft portal like BOAMP.
-// SOURCED LIVE (web search, since data.economie.gouv.fr/opendatamef aren't
-// reachable from this sandbox's network egress allowlist - see allowed
-// domains): a Feb 2026 community source-verification doc confirms the real,
-// current, working query against the Opendatasoft-hosted mirror of this
-// exact dataset:
-//   https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/
-//     decp-2022-marches-valides/records?where=titulaire_id_1="<siret>"
-// (656,837 records in the 2022 schema format). That confirms three things
-// the old code here only guessed at:
-//   1. The endpoint is Explore API v2.1 (`where`/`order_by`/`limit`, results
-//      flat on each record) - not the legacy v1 `/api/records/1.0/search/`
-//      this used to call, which Opendatasoft documents as superseded.
-//   2. The live dataset id is `decp-2022-marches-valides`, not
-//      `decp-v3-marches-valides` (that name still resolves as an asset page
-//      but the confirmed-working query above uses the 2022-schema id).
-//   3. Titulaires are flattened to fixed columns titulaire_id_1..3 (max 3
-//      per marché) rather than a nested array, and missing values are the
-//      literal string "CDL", not null/empty - firstDefined() below now
-//      filters that out explicitly.
-// Field names for objet/montant/dates are still the DECP regulatory
-// schema's own names (github.com/etalab/schema-decp) as Opendatasoft
-// typically flattens them - not independently re-verified beyond the
-// titulaire finding above, so still worth one real API-console check before
-// setting this source `active` in production.
+//
+// REWRITTEN from an Opendatasoft records-API approach (deactivated in a
+// prior commit) after confirming - by actually fetching the live dataset
+// page at data.gouv.fr, not guessing - that:
+//   1. decp-2022-marches-valides (the old target) is frozen/deprecated since
+//      Nov 2023. Since Jan 2024, DECP moved to per-buyer files on
+//      data.gouv.fr, consolidated daily into one file by Colin Maudry's
+//      decp-processing project (github.com/ColinMaudry/decp-processing,
+//      published as decp.info) - there is no small query-able records API
+//      for the *current* data; JSON tabular access is only offered via a
+//      PAID subscription (colibre.fr), which isn't something to sign up
+//      for/pay for on the client's behalf without them deciding that.
+//   2. The consolidated file itself IS free and public, just large: 234MB
+//      Parquet / 2.4GB CSV, resource id 22847056-61df-452d-837d-8b8ceadbfc52
+//      on dataset donnees-essentielles-de-la-commande-publique-consolidees-
+//      format-tabulaire. Parquet is the practical one to actually download.
+//   3. The dataset page documents its own real columns (this is NOT a
+//      guess): uid, id, acheteur_id (buyer SIRET - uid is acheteur_id + id
+//      concatenated), objet, montant, dureeMois, dateNotification,
+//      datePublicationDonnees, codeCPV, nature, procedure, formePrix, url,
+//      modification_id, donneesActuelles (bool - true only for a marché's
+//      latest version, since one marché can have multiple rows across
+//      amendments), and titulaire_* (winner company) columns. The
+//      objet/montant/dateNotification/codeCPV/nature/procedure/formePrix/url
+//      set is independently confirmed by a separate official Etalab
+//      hackathon file schema for the same regulatory data
+//      (marche.csv: codeCPV, dateNotification, datePublicationDonnees,
+//      dureeMois, formePrix, id, montant, nature, objet, procedure, uid,
+//      url) - two independent official sources agreeing is about as
+//      confident as this can get without a live test query, which this
+//      sandbox's network egress can't do (data.gouv.fr isn't reachable from
+//      bash_tool here).
+//
+// hyparquet (pure JS, no native deps - safe for Render) reads the file.
+// Given real uncertainty about exact production behavior (234MB download
+// time/memory on the actual Render instance, whether column names have any
+// casing/accent quirk the two schema sources didn't capture), this source
+// is intentionally left `active: false` after this commit too - flip it on
+// and watch its first connector_logs row closely before trusting it
+// unattended, same caution as every other "found via search, not tested
+// live" fix in this file.
+async function downloadDecpParquet(url: string): Promise<string> {
+  const tmpPath = path.join(os.tmpdir(), `decp-${Date.now()}.parquet`);
+  const response = await axios.get(url, { responseType: 'stream', timeout: 300000 }); // 5min - 234MB over a slow link needs real headroom
+  await pipeline(response.data, fs.createWriteStream(tmpPath));
+  return tmpPath;
+}
+
 export const collectDecpData = async (sourceId: number) => {
   const startedAt = new Date();
+  let tmpPath: string | null = null;
 
   try {
-    logger.info('[DECP] Starting collection');
+    logger.info('[DECP] Starting collection (downloading consolidated Parquet file - this can take a few minutes)');
 
-    const endpoint = process.env.DECP_API_ENDPOINT
-      || 'https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/decp-2022-marches-valides/records';
-    const apiKey = process.env.DECP_API_KEY; // optional, public dataset works without one
+    const fileUrl = process.env.DECP_PARQUET_URL
+      || 'https://www.data.gouv.fr/api/1/datasets/r/11cea8e8-df3e-4ed1-932b-781e2635e432';
 
-    // DECP is award data (données de marchés déjà notifiés), not live "en
-    // cours" notices - a narrow recent window would barely capture anything
-    // since buyers can take weeks to declare. Widened to 180 days for the
-    // same "several thousand, even tens of thousands" backfill reason as
-    // BOAMP above (client's explicit WhatsApp ask) - this dataset alone has
-    // 656,837 records in the 2022 schema, so even a 180-day slice should
-    // comfortably clear a few thousand.
-    const since = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    tmpPath = await downloadDecpParquet(fileUrl);
+    logger.info(`[DECP] Downloaded to ${tmpPath}, parsing...`);
 
-    const rawRecords = await fetchAllPages(endpoint, {
-      where: `datepublicationdonnees >= date'${since}' OR datenotification >= date'${since}'`,
-      order_by: '-datepublicationdonnees',
-      ...(apiKey ? { apikey: apiKey } : {}),
-    }, 'DECP');
+    // @ts-expect-error - tsconfig's moduleResolution:"node" doesn't resolve
+    // package.json `exports` subpaths for type-checking even though this
+    // resolves fine at runtime (verified: node_modules/hyparquet/types/node.d.ts
+    // exists). Not fixing via tsconfig since this DECP rewrite is paused
+    // (client's ask - see data_sources.active=false note above) and a
+    // moduleResolution change could affect unrelated imports project-wide.
+    const { asyncBufferFromFile, parquetReadObjects } = await import('hyparquet/node');
+    const file = await asyncBufferFromFile(tmpPath);
+    const rows = await parquetReadObjects({
+      file,
+      columns: [
+        'uid', 'id', 'acheteur_id', 'objet', 'montant', 'dureeMois',
+        'dateNotification', 'datePublicationDonnees', 'codeCPV', 'nature',
+        'procedure', 'formePrix', 'url', 'donneesActuelles',
+      ],
+    }) as any[];
+    logger.info(`[DECP] Parsed ${rows.length} total rows from Parquet file`);
 
-    const notices = rawRecords.map(normalizeDecpRecord);
-    logger.info(`[DECP] Fetched ${notices.length} notices`);
+    // Same 180-day backfill window as BOAMP's original intent (client's
+    // "several thousand, even tens of thousands" ask), but DECP is
+    // post-award data with no submission deadline, so there's no BOAMP-style
+    // "expired filter conflict" to worry about here - a wide recency window
+    // is safe. donneesActuelles filters out superseded amendment rows so
+    // the same marché isn't inserted multiple times for each modification.
+    const since = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000);
+    const recent = rows.filter(r => {
+      if (r.donneesActuelles === false) return false;
+      const pubDate = r.datePublicationDonnees ? new Date(r.datePublicationDonnees) : null;
+      const notifDate = r.dateNotification ? new Date(r.dateNotification) : null;
+      return (pubDate && pubDate >= since) || (notifDate && notifDate >= since);
+    }).slice(0, MAX_RECORDS_PER_RUN);
+    logger.info(`[DECP] ${recent.length} rows within the last 180 days after filtering`);
+
+    const notices = recent.map(normalizeDecpRecord);
 
     let inserted = 0;
     let updated = 0;
@@ -391,6 +436,12 @@ export const collectDecpData = async (sourceId: number) => {
     );
 
     throw err;
+  } finally {
+    // Always clean up the downloaded file, success or failure - a 234MB
+    // temp file left behind on every run would fill up disk fast.
+    if (tmpPath) {
+      fs.unlink(tmpPath, () => {});
+    }
   }
 };
 
@@ -410,24 +461,27 @@ const firstDefined = (f: Record<string, any>, keys: string[]) => {
 
 // v2.1 returns fields flat on the result object directly (v1 nested them
 // under `record.fields`) - same shape change as normalizeBoampRecord above.
+// Field names below are the real, confirmed Parquet column names (see the
+// sourcing note on collectDecpData above) - not Opendatasoft-flattened
+// guesses like the old version of this function used.
 const normalizeDecpRecord = (record: any) => {
-  const f = record.fields ? record.fields : record;
-  const montantRaw = firstDefined(f, ['montant', 'montant_ht', 'montantht']);
   return {
-    source_reference: firstDefined(f, ['id', 'uid']) || record.recordid,
-    title: firstDefined(f, ['objet']) || 'Marché public (DECP)',
-    description: firstDefined(f, ['objet']) || '',
-    publication_date: firstDefined(f, ['datepublicationdonnees', 'datenotification']) || record.record_timestamp,
+    source_reference: record.uid || record.id,
+    title: record.objet || 'Marché public (DECP)',
+    description: record.objet || '',
+    publication_date: record.datePublicationDonnees || record.dateNotification || null,
     deadline: null, // DECP is post-award data - there is no submission deadline to capture, unlike BOAMP/PLACE
-    estimated_value: montantRaw ? parseFloat(montantRaw) : null,
-    location_city: firstDefined(f, ['lieuexecution_nom', 'acheteur_nom']),
-    location_region: firstDefined(f, ['lieuexecution_code_region', 'region']),
-    location_department: firstDefined(f, ['lieuexecution_departement', 'departement']),
-    // titulaire_id_1/2/3 are the confirmed real column names (fixed columns,
-    // max 3 titulaires per marché - not the nested `titulaires[]` array the
-    // regulatory schema itself uses); acheteur_nom is still the best guess
-    // for buyer name pending the one live field-list check flagged above.
-    buyer_name: firstDefined(f, ['acheteur_nom', 'nomacheteur', 'denominationacheteur']),
+    estimated_value: record.montant != null ? parseFloat(record.montant) : null,
+    // No location/buyer-name column is confirmed on this file (only
+    // acheteur_id, the buyer's raw SIRET) - left null rather than guessing
+    // wrong field names again. A future pass could resolve acheteur_id to a
+    // real buyer name/city via the same Pappers lookup already built for
+    // company SIRET recognition (siret.ts), since a buyer SIRET resolves
+    // the same way a company one does.
+    location_city: null,
+    location_region: null,
+    location_department: null,
+    buyer_name: null,
     raw: record,
   };
 };
