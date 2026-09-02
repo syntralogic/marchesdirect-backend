@@ -19,7 +19,13 @@ import { classifyOpportunity, generateOpportunitySummary } from '../services/aiS
 // bursting past rate limits when a connector run just inserted hundreds of
 // records at once.
 
-const BATCH_SIZE = 20;
+// Bumped from 20: the BOAMP/DECP connectors (dataCollectionService.ts) now
+// pull up to 3000 records per source per run instead of ~100, so this queue
+// needs meaningfully higher throughput to keep up - at 20/15min that backlog
+// alone would take days to clear, leaving most new listings showing raw
+// unprocessed text (no ai_summary) the whole time. 50/15min is still well
+// within a normal Claude API rate limit for sequential single-item calls.
+const BATCH_SIZE = 50;
 const DELAY_BETWEEN_CALLS_MS = 500;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
