@@ -50,7 +50,7 @@ export const startScheduledJobs = () => {
   // so every deploy/restart guarantees at least one real attempt,
   // regardless of the cron schedule or host sleep behavior.
   logger.info('[Job] Running an immediate data collection pass on boot (see comment above for why)...');
-  scheduleDataCollection()
+  scheduleDataCollection(true)
     .then(() => deduplicateOpportunities())
     .then((merged) => logger.info(`[Job] Boot-time data collection pass complete, ${merged} duplicate pairs merged`))
     .catch((err) => logger.error('[Job] Boot-time data collection pass failed (non-fatal, next cron tick or restart will retry):', err));
@@ -58,10 +58,14 @@ export const startScheduledJobs = () => {
   logger.info('✅ Data collection job scheduled (every 2h). AI classification runs separately - see jobs/aiProcessing.ts.');
 };
 
-// Manual trigger, useful for demonstrating "3 automatic runs" proof (Milestone 2)
+// Manual trigger, useful for demonstrating "3 automatic runs" proof (Milestone 2).
+// Not currently wired to any route (admin.ts's per-source /data-sources/:code/run
+// calls the individual collectXData() functions directly instead) - kept here
+// for whoever wires up a "run all now" admin action next. force=true since a
+// manual "run it now" button should mean now, not "now, if the schedule agrees".
 export const runOnce = async () => {
   logger.info('[Job] Manual data collection run triggered');
-  await scheduleDataCollection();
+  await scheduleDataCollection(true);
   const merged = await deduplicateOpportunities();
   return { merged };
 };
