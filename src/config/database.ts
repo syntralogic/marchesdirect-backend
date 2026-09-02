@@ -465,248 +465,40 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // public-market listings" now that its deadline-filter bug (see the
   // dataCollectionService.ts commit right before this one) is fixed.
 
-  // Client's explicit ask (Aug/Sep 2026 session): pause on live external
-  // sources entirely for now (no Anthropic API key configured yet, so
-  // ai_classification/ai_summary can't run on freshly-ingested BOAMP data
-  // anyway; also on Render's free tier with no shell access, debugging a
-  // live connector mid-testing is painful). Deactivating boamp alongside
-  // decp so the only opportunities in the system right now are the
-  // pre-classified demo set below - predictable content to actually test
-  // the SIRET->score->lead-capture->dashboard flow against, no dependency
-  // on a live API behaving. Re-activate boamp (UPDATE data_sources SET
-  // active = true WHERE code = 'boamp', or just remove this line) once
-  // ready to test against real data again - its query itself is fixed and
-  // doesn't need further code changes.
-  await pool.query(`UPDATE data_sources SET active = false WHERE code = 'boamp'`);
+  // Reverted (Sep 2026): the two lines that used to be here auto-disabled
+  // boamp and auto-seeded ~75 demo opportunities on every single boot. That
+  // was a deliberate temporary measure for one testing session and was
+  // never meant to stay - but because this file runs unattended on every
+  // Render deploy (free tier, no shell), it kept silently re-disabling
+  // boamp and re-seeding demo rows after every redeploy even once real
+  // BOAMP data collection was wanted again. Removed for good; see the
+  // one-time cleanup below for undoing what those lines already left in
+  // production databases.
+  await removeDemoSeedData();
 
-  await seedDemoOpportunities();
-
-  // opportunity_search_index is a materialized view - inserting into
-  // `opportunities` directly (as seedDemoOpportunities does) doesn't make
-  // the new rows searchable until something refreshes it. That normally
-  // happens on its own 15-minute cron (jobs/searchIndexRefresh.ts), but on
-  // a fresh boot after just seeding demo data for testing, waiting up to
-  // 15 minutes for it to show up in search is exactly the kind of "is this
-  // even working?" confusion to avoid - refresh once immediately here too.
-  try {
-    const { refreshSearchIndex } = await import('../jobs/searchIndexRefresh');
-    await refreshSearchIndex();
-  } catch (err) {
-    logger.error('⚠️ Post-seed search index refresh failed (will still catch up on its own 15-min cron)', err);
-  }
+  // Same no-shell-on-Render reasoning: force boamp back to active in code
+  // rather than relying on someone running `psql ... UPDATE data_sources`
+  // by hand. Harmless no-op once it's already true.
+  await pool.query(`UPDATE data_sources SET active = true WHERE code = 'boamp'`);
 };
 
-// ============================================================================
-// DEMO OPPORTUNITY SEED
-// ============================================================================
-// Client's ask: pause live BOAMP/DECP ingestion for now (no Anthropic key
-// configured yet, Render free tier has no shell access for live debugging)
-// and populate the platform with enough realistic, fully-classified content
-// to actually test the SIRET -> compatibility score -> lead capture ->
-// dashboard flow end-to-end. Unlike real ingested data, these are inserted
-// pre-classified (ai_classification_status='classified', trade_id and
-// ai_summary already set) so nothing here depends on the AI processing job
-// running - it can't, without an API key.
-//
-// Idempotent: keyed by a dedicated 'demo_seed' data_sources row and fixed
-// source_reference values (demo-001, demo-002...), ON CONFLICT DO NOTHING -
-// safe to run on every boot, never creates duplicates on redeploy.
-const DEMO_CITIES: { city: string; region: string; department: string }[] = [
-  { city: 'Bordeaux', region: 'Nouvelle-Aquitaine', department: '33' },
-  { city: 'Toulouse', region: 'Occitanie', department: '31' },
-  { city: 'Nantes', region: 'Pays de la Loire', department: '44' },
-  { city: 'Lille', region: 'Hauts-de-France', department: '59' },
-  { city: 'Strasbourg', region: 'Grand Est', department: '67' },
-  { city: 'Rennes', region: 'Bretagne', department: '35' },
-  { city: 'Montpellier', region: 'Occitanie', department: '34' },
-  { city: 'Nice', region: "Provence-Alpes-Côte d'Azur", department: '06' },
-  { city: 'Grenoble', region: 'Auvergne-Rhône-Alpes', department: '38' },
-  { city: 'Reims', region: 'Grand Est', department: '51' },
-  { city: 'Dijon', region: 'Bourgogne-Franche-Comté', department: '21' },
-  { city: 'Angers', region: 'Pays de la Loire', department: '49' },
-  { city: 'Villeurbanne', region: 'Auvergne-Rhône-Alpes', department: '69' },
-  { city: 'Clermont-Ferrand', region: 'Auvergne-Rhône-Alpes', department: '63' },
-  { city: 'Tours', region: 'Centre-Val de Loire', department: '37' },
-  { city: 'Limoges', region: 'Nouvelle-Aquitaine', department: '87' },
-  { city: 'Amiens', region: 'Hauts-de-France', department: '80' },
-  { city: 'Metz', region: 'Grand Est', department: '57' },
-  { city: 'Besançon', region: 'Bourgogne-Franche-Comté', department: '25' },
-  { city: 'Orléans', region: 'Centre-Val de Loire', department: '45' },
-  { city: 'Rouen', region: 'Normandie', department: '76' },
-  { city: 'Caen', region: 'Normandie', department: '14' },
-  { city: 'Nancy', region: 'Grand Est', department: '54' },
-  { city: 'Perpignan', region: 'Occitanie', department: '66' },
-];
+// One-time (but safe-to-repeat) cleanup of the demo data the old
+// seedDemoOpportunities() call above used to insert on every boot - deletes
+// the demo_seed source's opportunities plus the source row itself. Does
+// NOT touch the separate, manually-run scripts/seed.js demo rows
+// (source_reference LIKE 'DEMO-%' under the real 'boamp' source id) -
+// those were an intentional one-off for browsing the app pre-launch and
+// aren't inserted automatically, so removing them is a separate decision.
+async function removeDemoSeedData(): Promise<void> {
+  const source = await pool.query(`SELECT id FROM data_sources WHERE code = 'demo_seed'`);
+  if (source.rows.length === 0) return; // nothing to clean up
 
-const DEMO_TRADES: { slug: string; label: string }[] = [
-  { slug: 'gros-oeuvre', label: 'gros œuvre' },
-  { slug: 'couverture', label: 'couverture' },
-  { slug: 'electricite', label: 'électricité' },
-  { slug: 'plomberie', label: 'plomberie' },
-  { slug: 'cvc', label: 'chauffage-ventilation-climatisation' },
-  { slug: 'isolation', label: 'isolation thermique' },
-  { slug: 'menuiserie', label: 'menuiserie' },
-  { slug: 'peinture', label: 'peinture' },
-  { slug: 'vrd', label: 'voirie et réseaux divers' },
-  { slug: 'platrerie', label: 'plâtrerie-cloisons' },
-  { slug: 'carrelage', label: 'carrelage' },
-  { slug: 'batiment-general', label: 'tous corps d\'état' },
-];
+  const sourceId = source.rows[0].id;
+  const deleted = await pool.query(`DELETE FROM opportunities WHERE source_id = $1`, [sourceId]);
+  await pool.query(`DELETE FROM data_sources WHERE id = $1`, [sourceId]);
 
-const PUBLIC_BUYER_TEMPLATES = (city: string, dept: string) => [
-  `Mairie de ${city}`,
-  `Communauté d'agglomération de ${city}`,
-  `Conseil départemental de ${dept}`,
-  `Centre Hospitalier de ${city}`,
-  `Office Public de l'Habitat de ${city}`,
-  `Région - Lycée de ${city}`,
-];
-
-const PRIVATE_BUYER_TEMPLATES = (city: string) => [
-  `Promoteur immobilier - Résidence Les Jardins de ${city}`,
-  `${city} Habitat - Bailleur social`,
-  `SCI Le Clos ${city}`,
-  `Groupe immobilier ${city} Développement`,
-];
-
-const SUBCONTRACT_BUYER_TEMPLATES = (city: string) => [
-  `${city} BTP Constructions - Entreprise générale`,
-  `Groupe ${city} Bâtiment`,
-  `${city} Rénovation - Tous corps d'état`,
-];
-
-const PUBLIC_TITLE_TEMPLATES: Record<string, string[]> = {
-  'gros-oeuvre': ['Construction d\'un bâtiment communal - lot gros œuvre', 'Extension d\'une école - lot gros œuvre'],
-  'couverture': ['Réfection de toiture d\'un bâtiment public', 'Réfection d\'étanchéité de toiture-terrasse'],
-  'electricite': ['Mise aux normes électriques d\'un bâtiment communal', 'Rénovation de l\'éclairage public'],
-  'plomberie': ['Rénovation des réseaux de plomberie d\'un groupe scolaire', 'Remplacement de la chaufferie et réseaux sanitaires'],
-  'cvc': ['Remplacement du système de chauffage collectif', 'Installation d\'une pompe à chaleur - bâtiment public'],
-  'isolation': ['Travaux d\'isolation thermique par l\'extérieur', 'Rénovation énergétique d\'un bâtiment communal'],
-  'menuiserie': ['Remplacement des menuiseries extérieures', 'Fourniture et pose de menuiseries bois - bâtiment public'],
-  'peinture': ['Travaux de peinture et ravalement de façade', 'Rénovation des peintures intérieures d\'un établissement scolaire'],
-  'vrd': ['Aménagement de voirie et réseaux divers', 'Réfection de voirie communale'],
-  'platrerie': ['Cloisonnement et faux plafonds - rénovation intérieure', 'Travaux de plâtrerie dans un établissement public'],
-  'carrelage': ['Rénovation des revêtements de sols - bâtiment public', 'Travaux de carrelage dans des sanitaires collectifs'],
-  'batiment-general': ['Rénovation complète d\'un bâtiment communal - tous corps d\'état', 'Réhabilitation d\'un ancien bâtiment public'],
-};
-
-const PRIVATE_TITLE_TEMPLATES: Record<string, string[]> = {
-  'gros-oeuvre': ['Construction d\'une résidence - lot gros œuvre'],
-  'couverture': ['Réfection de toiture d\'une copropriété'],
-  'electricite': ['Rénovation électrique d\'un immeuble résidentiel'],
-  'plomberie': ['Rénovation des colonnes montantes - immeuble résidentiel'],
-  'cvc': ['Installation de chauffage collectif - programme immobilier neuf'],
-  'isolation': ['Isolation thermique par l\'extérieur d\'une copropriété'],
-  'menuiserie': ['Remplacement des menuiseries d\'une résidence'],
-  'peinture': ['Ravalement de façade d\'une copropriété'],
-  'vrd': ['Aménagement des espaces extérieurs d\'un programme immobilier'],
-  'platrerie': ['Second œuvre - lot plâtrerie, programme résidentiel neuf'],
-  'carrelage': ['Fourniture et pose de carrelage - programme immobilier neuf'],
-  'batiment-general': ['Réhabilitation d\'un immeuble résidentiel - tous corps d\'état'],
-};
-
-const SUBCONTRACT_TITLE_TEMPLATES: Record<string, string[]> = {
-  'gros-oeuvre': ['Recherche sous-traitant lot gros œuvre - chantier en cours'],
-  'couverture': ['Recherche sous-traitant couvreur - chantier tertiaire'],
-  'electricite': ['Recherche sous-traitant électricien - chantier neuf'],
-  'plomberie': ['Recherche sous-traitant plombier - chantier de rénovation'],
-  'cvc': ['Recherche sous-traitant CVC - programme tertiaire'],
-  'isolation': ['Recherche sous-traitant isolation - chantier de rénovation énergétique'],
-  'menuiserie': ['Recherche sous-traitant menuisier - programme résidentiel'],
-  'peinture': ['Recherche sous-traitant peintre - chantier de finition'],
-  'vrd': ['Recherche sous-traitant VRD - aménagement de zone d\'activité'],
-  'platrerie': ['Recherche sous-traitant plaquiste - chantier tertiaire'],
-  'carrelage': ['Recherche sous-traitant carreleur - programme résidentiel'],
-  'batiment-general': ['Recherche sous-traitant tous corps d\'état - chantier en cours'],
-};
-
-function buildDemoOpportunity(index: number, journey: 'public_procurement' | 'tender' | 'subcontracting') {
-  const loc = DEMO_CITIES[index % DEMO_CITIES.length];
-  const trade = DEMO_TRADES[index % DEMO_TRADES.length];
-  const titleTemplates =
-    journey === 'public_procurement' ? PUBLIC_TITLE_TEMPLATES[trade.slug]
-    : journey === 'tender' ? PRIVATE_TITLE_TEMPLATES[trade.slug]
-    : SUBCONTRACT_TITLE_TEMPLATES[trade.slug];
-  const title = titleTemplates[Math.floor(index / DEMO_TRADES.length) % titleTemplates.length];
-  const buyerTemplates =
-    journey === 'public_procurement' ? PUBLIC_BUYER_TEMPLATES(loc.city, loc.department)
-    : journey === 'tender' ? PRIVATE_BUYER_TEMPLATES(loc.city)
-    : SUBCONTRACT_BUYER_TEMPLATES(loc.city);
-  const buyerName = buyerTemplates[index % buyerTemplates.length];
-
-  // Amounts scaled loosely by trade "size" (gros oeuvre/batiment-general run
-  // much larger than a single-lot peinture/carrelage job) with some spread
-  // via the index so cards don't all show suspiciously round numbers.
-  const bigTrades = ['gros-oeuvre', 'batiment-general', 'vrd'];
-  const base = bigTrades.includes(trade.slug) ? 280000 : 45000;
-  const estimatedValue = base + (index * 3700) % (base * 2);
-
-  const daysOut = 12 + (index * 5) % 55; // spread deadlines 12-67 days out, always in the future
-  const deadline = new Date(Date.now() + daysOut * 24 * 60 * 60 * 1000);
-  const publicationDate = new Date(Date.now() - (3 + (index % 10)) * 24 * 60 * 60 * 1000);
-
-  const summary = journey === 'public_procurement'
-    ? `${buyerName} lance une consultation pour des travaux de ${trade.label} à ${loc.city}. Le marché porte sur ${title.toLowerCase()}, pour un montant estimé à ${Math.round(estimatedValue / 1000)} k€ HT. Les candidatures sont ouvertes jusqu'au dépôt des offres, avec une notation classique prix/valeur technique/délai.`
-    : journey === 'tender'
-    ? `${title} à ${loc.city} pour un programme immobilier privé, lot ${trade.label}. Montant estimé ${Math.round(estimatedValue / 1000)} k€ HT. L'identité du donneur d'ordre est communiquée après prise de rendez-vous.`
-    : `Entreprise générale recherche un sous-traitant qualifié en ${trade.label} pour un chantier en cours à ${loc.city}. Montant du lot estimé à ${Math.round(estimatedValue / 1000)} k€ HT. Intervention à planifier rapidement.`;
-
-  return {
-    source_reference: `demo-${journey}-${index.toString().padStart(3, '0')}`,
-    title,
-    description: summary,
-    ai_summary: summary,
-    publication_date: publicationDate,
-    deadline,
-    estimated_value: estimatedValue,
-    location_city: loc.city,
-    location_region: loc.region,
-    location_department: loc.department,
-    buyer_name: buyerName,
-    trade_slug: trade.slug,
-    journey,
-  };
-}
-
-async function seedDemoOpportunities(): Promise<void> {
-  const sourceResult = await pool.query(
-    `INSERT INTO data_sources (code, name, feed_type, frequency_hours, active)
-     VALUES ('demo_seed', 'Demo seed data (manual)', 'manual', 999999, false)
-     ON CONFLICT (code) DO UPDATE SET code = EXCLUDED.code
-     RETURNING id`
-  );
-  const sourceId = sourceResult.rows[0].id;
-
-  // 40 public_procurement + 20 tender (private) + 15 subcontracting = 75,
-  // comfortably clearing the "150+ total across categories" volume the
-  // client asked for once combined with whatever's already in the DB.
-  const demoData = [
-    ...Array.from({ length: 40 }, (_, i) => buildDemoOpportunity(i, 'public_procurement')),
-    ...Array.from({ length: 20 }, (_, i) => buildDemoOpportunity(i, 'tender')),
-    ...Array.from({ length: 15 }, (_, i) => buildDemoOpportunity(i, 'subcontracting')),
-  ];
-
-  let inserted = 0;
-  for (const d of demoData) {
-    const result = await pool.query(
-      `INSERT INTO opportunities
-        (source_id, source_reference, opportunity_type_id, trade_id, title, description,
-         publication_date, deadline, estimated_value, currency, location_city, location_region,
-         location_department, buyer_name, status, ai_classification_status, ai_summary_status, ai_summary)
-       VALUES ($1, $2, (SELECT id FROM opportunity_types WHERE code = $3), (SELECT id FROM trades WHERE slug = $4),
-         $5, $6, $7, $8, $9, 'EUR', $10, $11, $12, $13, 'active', 'classified', 'generated', $14)
-       ON CONFLICT (source_id, source_reference) DO NOTHING
-       RETURNING id`,
-      [
-        sourceId, d.source_reference, d.journey, d.trade_slug, d.title, d.description,
-        d.publication_date, d.deadline, d.estimated_value, d.location_city, d.location_region,
-        d.location_department, d.buyer_name, d.ai_summary,
-      ]
-    );
-    if (result.rows.length > 0) inserted++;
-  }
-
-  if (inserted > 0) {
-    logger.info(`✅ Seeded ${inserted} demo opportunities (${demoData.length} total defined, rest already present)`);
+  if (deleted.rowCount && deleted.rowCount > 0) {
+    logger.info(`🧹 Removed ${deleted.rowCount} auto-seeded demo opportunities and the demo_seed source`);
   }
 }
+
