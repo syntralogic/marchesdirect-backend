@@ -11,6 +11,12 @@
  * This script re-runs extraction on both groups so the fiche shows real data
  * instead of nothing, retroactively.
  *
+ * UPDATE: key_risks later gained a per-item "severity" (obligatoire vs
+ * recommandee - client's rule against showing a recommended item as if it
+ * were mandatory). Opportunities extracted before that upgrade have
+ * key_risks in the old flat-string shape; this script now also catches and
+ * re-processes those, not just opportunities missing the key entirely.
+ *
  * COST NOTE: this calls the LLM once per opportunity that needs it. Sized to
  * your DB, that can be non-trivial - the script prints a count and asks for
  * confirmation before spending anything (skippable with --yes for cron use).
@@ -76,6 +82,11 @@ async function main() {
         ai_extracted_facts IS NULL
         OR ai_extracted_facts->'team_size_estimate' IS NULL
         OR ai_extracted_facts->'key_risks' IS NULL
+        -- key_risks existed before the severity upgrade (client's gap #3:
+        -- never show a recommended item as if it were mandatory) as a flat
+        -- array of strings. Catch that old shape too, not just a missing
+        -- key, or those opportunities would silently never get severity.
+        OR jsonb_typeof(ai_extracted_facts->'key_risks'->'value'->0) = 'string'
       )
     ORDER BY created_at DESC
     ${limit ? `LIMIT ${limit}` : ''}
