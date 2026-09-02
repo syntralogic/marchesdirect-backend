@@ -144,6 +144,13 @@ export const ensureSchema = async (): Promise<void> => {
 const applyIncrementalMigrations = async (): Promise<void> => {
   await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
 
+  // "lead" gate (client's newest brief): phone + email captured after SIRET
+  // recognition, before the full analysis breakdown - global per session,
+  // same pattern as companyKnown. See POST /siret/lead + GET /siret/status.
+  await pool.query(`ALTER TABLE siret_lookups ADD COLUMN IF NOT EXISTS phone VARCHAR(20)`);
+  await pool.query(`ALTER TABLE siret_lookups ADD COLUMN IF NOT EXISTS email VARCHAR(255)`);
+  await pool.query(`ALTER TABLE siret_lookups ADD COLUMN IF NOT EXISTS lead_captured_at TIMESTAMP`);
+
   // Stable identifier for the 3 pricing tiers (decouverte/pro/entreprise) so
   // the frontend Tarifs page and the checkout endpoint can agree on which
   // row is which without guessing from price - a `code` never changes even
