@@ -3,6 +3,7 @@ import { body, validationResult } from 'express-validator';
 import axios from 'axios';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { syncLeadToCrm } from '../services/crmSyncService';
 
 const router = Router();
 
@@ -44,8 +45,37 @@ interface CompanyData {
   // champs_supplementaires=labels, which INSEE Sirene has no equivalent
   // for at all.
   certifications: string[];
-  source: 'pappers' | 'insee';
+  source: 'pappers' | 'insee' | 'demo';
 }
+
+// Fixed demo SIRET so the whole SIRET-recognition -> score -> lead flow is
+// testable end-to-end with zero external API keys configured (no
+// PAPPERS_API_KEY, no INSEE_API_KEY) - matches the client's own reference
+// screenshots (KB Electricite / Karim Benali) exactly, paired with the
+// DEMO-PUB-4 Bordeaux electricite listing seed.js inserts fully pre-
+// analyzed. Works even when both keys ARE configured (checked first), so a
+// developer testing locally never needs real credentials just to see the
+// full journey once - short-circuits before the "not configured" 501 below.
+const DEMO_SIRET = '12345678900012';
+const DEMO_COMPANY: CompanyData = {
+  name: 'KB Électricité',
+  legal: 'SASU',
+  created: '14 mars 2018',
+  capital: '25 000 €',
+  address: '12 avenue des Artisans',
+  city: 'Bordeaux',
+  postal: '33000',
+  director: 'Karim Benali',
+  employees: '6 à 9 salariés',
+  ape: '4321A',
+  activity: "Travaux d'installation électrique",
+  website: 'kbelectricite.fr',
+  facebook: 'KB Électricité Bordeaux',
+  googleRating: '4.7',
+  googleReviewCount: 32,
+  certifications: ['RGE'],
+  source: 'demo',
+};
 
 // Client's explicit instruction (WhatsApp, 31 Aug): use Pappers as the
 // primary source for SIRET auto-fill, since it covers capital/dirigeant/
@@ -145,15 +175,106 @@ async function resolveCompanyNameToSiret(name: string, apiKey: string): Promise<
 router.get('/status', async (req: Request, res: Response) => {
   try {
     const sessionId = req.query.sessionId as string;
-    if (!sessionId) return res.json({ companyKnown: false });
-    const result = await db.query('SELECT siret, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
-    if (result.rows.length === 0) return res.json({ companyKnown: false });
-    res.json({ companyKnown: true, siret: result.rows[0].siret, company: result.rows[0].company_data });
+    if (!sessionId) return res.json({ companyKnown: false, leadCaptured: false });
+    const result = await db.query(
+      'SELECT siret, company_data, phone, email, lead_captured_at FROM siret_lookups WHERE session_id = $1',
+      [sessionId]
+    );
+    if (result.rows.length === 0) return res.json({ companyKnown: false, leadCaptured: false });
+    const row = result.rows[0];
+    res.json({
+      companyKnown: true,
+      siret: row.siret,
+      company: row.company_data,
+      leadCaptured: !!row.lead_captured_at,
+      phone: row.phone || null,
+      email: row.email || null,
+    });
   } catch (err: any) {
     logger.error('SIRET status error:', err);
     res.status(500).json({ error: 'Failed to check status' });
   }
 });
+
+// POST /api/siret/lead - client's newest brief: phone + email are requested
+// once the visitor has already seen value (score + why-it-matches), and
+// gate the fuller breakdown (criteria weighting, eligibility checklist,
+// "Affinez votre analyse") - global per session once given, per prototype
+// V17's `lead` state (section 2.3), never re-asked on another opportunity.
+// Requires the company to already be SIRET-identified (this session must
+// have a siret_lookups row) - the lead gate only ever follows recognition,
+// never replaces it.
+// Also creates/updates a crm_leads row tied to the specific opportunity
+// being viewed, per the client's explicit ask ("les coordonnées doivent
+// être rattachées à l'entreprise et à l'opportunité consultée afin que le
+// chargé d'affaires sache exactement pourquoi rappeler le prospect") -
+// reuses the same brand-resolution pattern as POST /opportunities/:id/request-access.
+router.post(
+  '/lead',
+  [
+    body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
+    body('phone').matches(/^\d{10}$/).withMessage('Le téléphone doit contenir 10 chiffres.'),
+    body('email').isEmail().withMessage("L'e-mail n'est pas valide.").normalizeEmail(),
+    body('opportunityId').optional({ checkFalsy: true }).isUUID(),
+  ],
+  async (req: Request, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ error: errors.array()[0].msg });
+    }
+
+    const { sessionId, phone, email, opportunityId } = req.body;
+
+    const existing = await db.query('SELECT id, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
+    if (existing.rows.length === 0) {
+      return res.status(409).json({ error: 'company_not_identified', message: "Identifiez d'abord votre entreprise." });
+    }
+
+    await db.query(
+      `UPDATE siret_lookups SET phone = $1, email = $2, lead_captured_at = NOW() WHERE session_id = $3`,
+      [phone, email, sessionId]
+    );
+
+    if (opportunityId) {
+      try {
+        const companyName = existing.rows[0].company_data?.name || null;
+        const oppResult = await db.query(
+          `SELECT o.id, ot.brand_id FROM opportunities o
+           LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+           WHERE o.id = $1 AND o.deleted_at IS NULL`,
+          [opportunityId]
+        );
+        if (oppResult.rows.length > 0) {
+          let brandId = oppResult.rows[0].brand_id;
+          if (!brandId) {
+            const brandResult = await db.query('SELECT id FROM brands ORDER BY created_at ASC LIMIT 1');
+            brandId = brandResult.rows[0]?.id;
+          }
+          const dup = await db.query(
+            `SELECT id FROM crm_leads WHERE opportunity_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
+            [opportunityId, email]
+          );
+          if (dup.rows.length === 0 && brandId) {
+            const insertResult = await db.query(
+              `INSERT INTO crm_leads
+                (brand_id, email, phone, company_name, lead_source, opportunity_id, session_id, crm_sync_status)
+               VALUES ($1, $2, $3, $4, 'analysis_gate', $5, $6, 'pending')
+               RETURNING id`,
+              [brandId, email, phone, companyName, opportunityId, sessionId]
+            );
+            syncLeadToCrm(insertResult.rows[0].id).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
+          }
+        }
+      } catch (err) {
+        // Non-fatal: the session-level lead gate above already succeeded -
+        // a CRM sync hiccup shouldn't block the visitor from proceeding.
+        logger.error('Lead-capture CRM linking error (non-fatal):', err);
+      }
+    }
+
+    res.json({ leadCaptured: true });
+  }
+);
 
 // POST /api/siret/lookup - "reconnaissance d'entreprise" (prototype V17,
 // section 3.3). Accepts either a 14-digit SIRET or a free-text company name
@@ -174,6 +295,22 @@ router.post(
       return res.status(400).json({ error: errors.array()[0].msg });
     }
 
+    const { sessionId } = req.body;
+    const query: string = req.body.query;
+
+    // Demo shortcut - checked before the key-configured gate, and before
+    // treating the query as a name-search, so it works identically whether
+    // or not PAPPERS_API_KEY/INSEE_API_KEY are set.
+    if (query.trim() === DEMO_SIRET) {
+      await db.query(
+        `INSERT INTO siret_lookups (session_id, siret, company_data)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
+        [sessionId, DEMO_SIRET, JSON.stringify(DEMO_COMPANY)]
+      );
+      return res.json({ companyKnown: true, siret: DEMO_SIRET, company: DEMO_COMPANY });
+    }
+
     const pappersKey = process.env.PAPPERS_API_KEY;
     const inseeKey = process.env.INSEE_API_KEY;
     if (!pappersKey && !inseeKey) {
@@ -183,8 +320,6 @@ router.post(
       });
     }
 
-    const { sessionId } = req.body;
-    const query: string = req.body.query;
     let siret: string;
 
     if (/^\d{14}$/.test(query)) {

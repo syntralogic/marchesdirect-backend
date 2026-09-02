@@ -153,6 +153,32 @@ const startServer = async () => {
     // Supabase project) — no manual psql step required.
     await ensureSchema();
 
+    // Auto-run the demo-data seed script (scripts/seed.js) on every boot,
+    // same reasoning as ensureSchema() above: on Render's free tier there's
+    // no shell to run `npm run db:seed` by hand, so it has to happen as
+    // part of the normal deploy/restart. Fully idempotent (every insert is
+    // ON CONFLICT ... DO UPDATE keyed on a fixed source_reference/email),
+    // so running it again on every restart just re-confirms the same rows
+    // rather than duplicating them - safe to leave on by default. Spawned
+    // as a child process (own Pool, own exit) rather than require()'d
+    // in-process, so it can't call pool.end() on the main app's connection
+    // pool. Set SKIP_DEMO_SEED=true to turn this off later (e.g. closer to
+    // a real launch, once DEMO-* listings shouldn't appear next to live
+    // BOAMP/DECP data for real visitors).
+    if (process.env.SKIP_DEMO_SEED !== 'true') {
+      const { execFile } = require('child_process');
+      const seedScriptPath = require('path').resolve(process.cwd(), 'scripts', 'seed.js');
+      execFile('node', [seedScriptPath], (err: any, stdout: string, stderr: string) => {
+        if (stdout) logger.info(`[demo seed] ${stdout.trim()}`);
+        if (err) {
+          // Non-fatal: the server must still come up even if seeding fails
+          // (e.g. a transient DB hiccup) - this is demo convenience data,
+          // never a requirement for the app to function.
+          logger.error('[demo seed] failed (non-fatal):', stderr || err.message);
+        }
+      });
+    }
+
     // Start background jobs
     require('./jobs/dataCollection').startScheduledJobs();
     require('./jobs/documentIngestion').startDocumentIngestion();

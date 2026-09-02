@@ -770,6 +770,12 @@ CREATE TABLE siret_lookups (
   session_id VARCHAR(100) NOT NULL UNIQUE,
   siret VARCHAR(14) NOT NULL,
   company_data JSONB NOT NULL,
+  -- "lead" (prototype V17 state model, section 2.3): phone + email once
+  -- captured are global for the session, same as companyKnown - never
+  -- re-asked on a different opportunity. NULL until POST /siret/lead runs.
+  phone VARCHAR(20),
+  email VARCHAR(255),
+  lead_captured_at TIMESTAMP,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX siret_lookups_session ON siret_lookups(session_id);

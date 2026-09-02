@@ -385,6 +385,12 @@ Environnement: ${envPolicy?.policy_text || 'non renseignee dans le profil entrep
 // silently corrupt the classification pipeline.
 export type ExtractedFact = { value: string; available: boolean };
 export type ExtractedListFact = { value: string[]; available: boolean };
+// Client's rule (10-image brief, gap #3): never present a recommended item
+// as if it were mandatory, or vice versa - "ne pas afficher 'visite
+// recommandée' si le règlement indique qu'elle est obligatoire". Each risk
+// carries the severity as literally stated by the source, not inferred.
+export type ExtractedRisk = { label: string; severity: 'obligatoire' | 'recommandee' };
+export type ExtractedRiskList = { value: ExtractedRisk[]; available: boolean };
 export type ExtractedOpportunityFacts = {
   buyer_name: ExtractedFact;
   contract_object: ExtractedFact;
@@ -401,7 +407,7 @@ export type ExtractedOpportunityFacts = {
   // calls out (site visit required, retenue de garantie, pénalités de
   // retard, etc.) - never inferred generic boilerplate.
   team_size_estimate: ExtractedFact;
-  key_risks: ExtractedListFact;
+  key_risks: ExtractedRiskList;
 };
 
 export const extractOpportunityFacts = async (
@@ -427,6 +433,14 @@ same record. In particular: team_size_estimate must be a workforce figure the so
 must only list warnings the source itself raises (site visit mandatory, retenue de garantie, pénalités de
 retard, etc.) - not generic boilerplate about procurement in general.
 
+CRITICAL for key_risks specifically: each risk needs a "severity" of either "obligatoire" or "recommandee",
+set from the source's own wording - never guessed or defaulted. If the source says a site visit is
+"obligatoire"/"impérative"/"sous peine de rejet", severity is "obligatoire". If it says "recommandée"/
+"conseillée"/"souhaitable", severity is "recommandee". If the source states the risk exists but its wording
+doesn't clearly indicate which of the two it is, use "recommandee" (the less alarming label is the safe
+default when genuinely ambiguous) - never upgrade something to "obligatoire" without clear textual support,
+since overstating an obligation is worse than understating one.
+
 Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
 {
   "buyer_name": {"value": "...", "available": true},
@@ -437,7 +451,7 @@ Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
   "contact_email": {"value": "not available", "available": false},
   "required_qualifications": {"value": "...", "available": true},
   "team_size_estimate": {"value": "not available", "available": false},
-  "key_risks": {"value": ["..."], "available": true}
+  "key_risks": {"value": [{"label": "...", "severity": "obligatoire"}], "available": true}
 }`;
 
   const userMessage = `SOURCE RECORD (raw, as ingested from the connector):

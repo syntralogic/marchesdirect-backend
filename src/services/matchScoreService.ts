@@ -36,12 +36,36 @@ export interface MatchScoreResult {
   score: number;
   scoreTitle: string;
   scoreNote: string;
+  // Client's explicit wording requirement: the percentage must always be
+  // labeled "Indice de correspondance" and carry this fixed disclaimer so
+  // it's never read as an odds-of-winning estimate - it measures fit
+  // between known company traits and detected requirements, nothing more.
+  scoreDisclaimer: string;
+  // Short qualitative tier for card badges ("Très pertinent" etc.) -
+  // derived from score, not a separate computation, so it can never
+  // disagree with the percentage shown next to it.
+  matchLabel: string;
   positiveFactors: ScoreFactor[];
   warning: string | null;
   criteria: CriterionWeight[];
   eligibility: EligibilityItem[];
   whyRespond: string;
 }
+
+const SCORE_DISCLAIMER = "Cet indice mesure la correspondance entre les caractéristiques connues de votre entreprise et les exigences détectées dans le marché. Il ne constitue pas une estimation des chances d'attribution.";
+
+const matchLabelFor = (s: number): string =>
+  s >= 80 ? 'Très pertinent' : s >= 60 ? 'Pertinent' : s >= 40 ? 'À examiner' : 'Peu pertinent';
+
+// Only used once a real company profile is behind the score (personalized
+// case) - the anonymous/generic case keeps its own explanatory note instead,
+// since there's no company profile yet for "correspond fortement" to be
+// making a claim about.
+const correspondenceNoteFor = (s: number): string =>
+  s >= 80 ? 'Cette opportunité correspond fortement au profil de votre entreprise.'
+  : s >= 60 ? 'Cette opportunité correspond bien au profil de votre entreprise.'
+  : s >= 40 ? 'Cette opportunité correspond partiellement au profil de votre entreprise.'
+  : "Cette opportunité correspond faiblement au profil de votre entreprise, d'après les informations disponibles.";
 
 // Buyers score bids on different weightings depending on the opportunity
 // type - these are the standard defaults used across French procurement
@@ -125,7 +149,7 @@ export const computeMatchScore = async (
     // the opportunity's own listing is - this is what every visitor sees
     // before they're identified (anonymous, or a public-market listing which
     // never personalizes since it's open to everyone anyway).
-    scoreTitle = isPublic ? 'Qualité et exploitabilité du dossier' : 'Compatibilité avec votre entreprise';
+    scoreTitle = 'Indice de correspondance';
     scoreNote = isPublic
       ? 'Score du dossier public, non personnalisé.'
       : 'Calculée à partir du profil renseigné après transmission de vos coordonnées.';
@@ -136,8 +160,8 @@ export const computeMatchScore = async (
     if (opp.location_city) positiveFactors.push({ label: 'Localisation précisée', points: 10 });
     score = positiveFactors.reduce((sum, f) => sum + f.points, 0);
   } else {
-    scoreTitle = 'Compatibilité avec votre entreprise';
-    scoreNote = 'Calculée à partir de votre profil et de cette opportunité.';
+    scoreTitle = 'Indice de correspondance';
+    scoreNote = 'Calculée à partir de votre profil et de cette opportunité.'; // overwritten below with the real tiered note once `score` is final
 
     // Trade match
     if (opp.trade_id && company.industry_sector && opp.trade_name &&
@@ -193,6 +217,13 @@ export const computeMatchScore = async (
 
   score = Math.max(0, Math.min(100, score || (isPublic ? 60 : 40)));
 
+  // Now that score is final: personalized case gets the tiered
+  // "correspond fortement/bien/..." note: the generic/anonymous case above
+  // keeps its own explanatory note since there's no company profile yet for
+  // a correspondence claim to be about.
+  if (company) scoreNote = correspondenceNoteFor(score);
+  const matchLabel = matchLabelFor(score);
+
   // Eligibility checklist - if we know the company, actually check its
   // documents/certifications on file; otherwise every line is just shown as
   // "required" with no check mark (met: null), matching the anonymous/public
@@ -228,7 +259,7 @@ export const computeMatchScore = async (
     ? 'Cette opportunité correspond à votre métier et votre zone d’intervention d’après votre profil renseigné.'
     : 'Laissez vos coordonnées pour recevoir une analyse personnalisée à partir de votre profil d’entreprise.';
 
-  return { score, scoreTitle, scoreNote, positiveFactors, warning, criteria, eligibility, whyRespond };
+  return { score, scoreTitle, scoreNote, scoreDisclaimer: SCORE_DISCLAIMER, matchLabel, positiveFactors, warning, criteria, eligibility, whyRespond };
 };
 
 export const computeSubcontractNeedMatchScore = (need: {
@@ -246,10 +277,13 @@ export const computeSubcontractNeedMatchScore = (need: {
   if (need.budget_min || need.budget_max) positiveFactors.push({ label: 'Budget et durée renseignés', points: 20 });
   if (need.qualifications) positiveFactors.push({ label: 'Qualifications demandées', points: 14 });
 
+  const score = Math.min(100, 22 + positiveFactors.reduce((s, f) => s + f.points, 0));
   return {
-    score: Math.min(100, 22 + positiveFactors.reduce((s, f) => s + f.points, 0)),
+    score,
     scoreTitle: 'Qualité de votre demande',
     scoreNote: 'Calculée à partir des informations réellement saisies.',
+    scoreDisclaimer: SCORE_DISCLAIMER,
+    matchLabel: matchLabelFor(score),
     positiveFactors,
     warning: !need.team_size ? 'Précisez l’effectif recherché pour affiner les candidatures reçues.' : null,
     criteria: CRITERIA_BY_JOURNEY.subcontracting,

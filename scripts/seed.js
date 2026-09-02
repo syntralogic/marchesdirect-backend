@@ -133,6 +133,45 @@ const demoOpportunities = [
     value: 45000,
     contractType: "work",
   },
+  // Fully AI-processed demo record (client's reference screenshots: Bordeaux
+  // electricite school renovation) so the fiche's Resume/Analyse
+  // strategique/Points de vigilance sections render real content without
+  // needing ANTHROPIC_API_KEY configured - every other demo row above stays
+  // 'not_analyzed' and needs the real classify/extract-facts jobs to run.
+  // Every value below is what a real extraction pass would have produced
+  // for this listing, not a fabricated number for its own sake.
+  {
+    sourceRef: "DEMO-PUB-4",
+    buyerName: "Ville de Bordeaux \u2014 Direction des b\u00e2timents",
+    typeCode: "public_procurement",
+    tradeSlug: "electricite",
+    title: "R\u00e9novation \u00e9nerg\u00e9tique d'un groupe scolaire \u2014 lot \u00e9lectricit\u00e9",
+    description: "310 luminaires LED, reprise de 3 tableaux \u00e9lectriques, 86 prises, 42 points r\u00e9seau, \u00e9clairage de s\u00e9curit\u00e9, essais et DOE.",
+    city: "Bordeaux",
+    department: "33",
+    region: "Nouvelle-Aquitaine",
+    value: 124800,
+    contractType: "work",
+    summary: "Lot \u00e9lectricit\u00e9 dans le cadre de la r\u00e9novation \u00e9nerg\u00e9tique d'un groupe scolaire \u00e0 Bordeaux : remplacement de l'\u00e9clairage par du LED, reprise partielle des tableaux \u00e9lectriques et mise \u00e0 niveau des installations courants forts/faibles.",
+    extractedFacts: {
+      buyer_name: { value: "Ville de Bordeaux \u2014 Direction des b\u00e2timents", available: true },
+      contract_object: { value: "Travaux d'installation \u00e9lectrique \u2014 r\u00e9novation \u00e9nerg\u00e9tique d'un groupe scolaire", available: true },
+      procedure_type: { value: "Proc\u00e9dure adapt\u00e9e (MAPA)", available: true },
+      submission_deadline: { value: "28 ao\u00fbt 2026", available: true },
+      estimated_value: { value: "124 800 \u20ac HT", available: true },
+      contact_email: { value: "marches.travaux@bordeaux.fr", available: true },
+      required_qualifications: { value: "Qualification RGE ou \u00e9quivalente pour travaux d'efficacit\u00e9 \u00e9nerg\u00e9tique", available: true },
+      team_size_estimate: { value: "3 \u00e0 5 \u00e9lectriciens", available: true },
+      key_risks: {
+        value: [
+          { label: "Visite du site recommand\u00e9e avant remise de l'offre", severity: "recommandee" },
+          { label: "Retenue de garantie de 5 %", severity: "obligatoire" },
+          { label: "P\u00e9nalit\u00e9s de retard : 150 \u20ac / jour", severity: "obligatoire" },
+        ],
+        available: true,
+      },
+    },
+  },
 ];
 
 async function main() {
@@ -150,13 +189,14 @@ async function main() {
 
   console.log(`Seeding ${demoOpportunities.length} demo opportunities...`);
   for (const o of demoOpportunities) {
+    const isFullyProcessed = !!o.summary;
     await pool.query(
       `INSERT INTO opportunities (
          source_id, source_reference, opportunity_type_id, trade_id,
          title, description, publication_date, deadline,
          estimated_value, currency, contract_type,
          location_city, location_department, location_region, buyer_name,
-         status, ai_classification_status, ai_summary_status
+         status, ai_classification_status, ai_summary_status, ai_summary, ai_extracted_facts
        ) VALUES (
          $1, $2,
          (SELECT id FROM opportunity_types WHERE code = $3),
@@ -164,11 +204,15 @@ async function main() {
          $5, $6, NOW(), NOW() + INTERVAL '21 days',
          $7, 'EUR', $8,
          $9, $10, $11, $12,
-         'active', 'not_analyzed', 'not_generated'
+         'active', $13, $14, $15, $16
        )
        ON CONFLICT (source_id, source_reference) DO UPDATE SET
          title = EXCLUDED.title,
          description = EXCLUDED.description,
+         ai_classification_status = EXCLUDED.ai_classification_status,
+         ai_summary_status = EXCLUDED.ai_summary_status,
+         ai_summary = EXCLUDED.ai_summary,
+         ai_extracted_facts = EXCLUDED.ai_extracted_facts,
          updated_at = CURRENT_TIMESTAMP`,
       [
         sourceId,
@@ -183,6 +227,10 @@ async function main() {
         o.department,
         o.region,
         o.buyerName || null,
+        isFullyProcessed ? 'analyzed' : 'not_analyzed',
+        isFullyProcessed ? 'generated' : 'not_generated',
+        o.summary || null,
+        o.extractedFacts ? JSON.stringify(o.extractedFacts) : null,
       ]
     );
   }
@@ -214,6 +262,8 @@ async function main() {
   );
 
   console.log("Seed complete.");
+  console.log("Demo login: demo@marchesdirect.fr / DemoPass123!");
+  console.log("Demo SIRET (no PAPPERS_API_KEY/INSEE_API_KEY needed): 12345678900012 -> KB Electricite, matches DEMO-PUB-4 (Bordeaux electricite school renovation)");
 }
 
 main()

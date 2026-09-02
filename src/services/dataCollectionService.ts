@@ -732,8 +732,8 @@ const updateOpportunity = async (opportunityId: string, data: any) => {
 // SCHEDULE COLLECTION JOBS
 // ============================================================================
 
-export const scheduleDataCollection = async () => {
-  logger.info('Scheduling data collection jobs...');
+export const scheduleDataCollection = async (force: boolean = false) => {
+  logger.info(`Scheduling data collection jobs...${force ? ' (forced - ignoring next_run)' : ''}`);
 
   // Only collect from sources that are actually due, per that source's own
   // frequency_hours (next_run is set after each successful run above). The
@@ -742,8 +742,20 @@ export const scheduleDataCollection = async () => {
   // this filter, a source configured for e.g. 12-hourly collection (TED) would
   // get hit every 2 hours anyway, wasting calls against that source's real
   // rate limits and ignoring the per-source frequency_hours config entirely.
+  //
+  // force=true (boot-time call only, see jobs/dataCollection.ts) skips this
+  // filter entirely. Without it, a source whose next_run was set by an old
+  // run *before* a connector bugfix landed (e.g. BOAMP's deadline-filter fix)
+  // would silently do nothing on the very next deploy - "guarantee at least
+  // one real attempt on every boot" otherwise isn't actually guaranteed, it's
+  // still gated on timing from before the fix existed. This was reported as
+  // "still only ~50 listings" persisting even after that fix + the boot-time
+  // trigger were both live - the boot-time call was running, just no-oping
+  // every time because next_run hadn't caught up yet.
   const sources = await db.query(
-    `SELECT * FROM data_sources WHERE active = true AND (next_run IS NULL OR next_run <= NOW())`
+    force
+      ? `SELECT * FROM data_sources WHERE active = true`
+      : `SELECT * FROM data_sources WHERE active = true AND (next_run IS NULL OR next_run <= NOW())`
   );
 
   if (sources.rows.length === 0) {
