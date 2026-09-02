@@ -8,7 +8,7 @@ import { logger } from '../utils/logger';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const API_KEY = process.env.ANTHROPIC_API_KEY;
-const MODEL = process.env.LLM_MODEL || 'claude-3-5-sonnet-20241022';
+const MODEL = process.env.LLM_MODEL || 'claude-sonnet-5';
 const TEMPERATURE = parseFloat(process.env.AI_TEMPERATURE || '0.7');
 const MAX_TOKENS = parseInt(process.env.AI_MAX_TOKENS || '2000');
 
