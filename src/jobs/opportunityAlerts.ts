@@ -123,6 +123,14 @@ export const startOpportunityAlerts = () => {
     alertUpcomingDeadlines();
   });
 
+  // Free-tier-host reasoning again: both sweeps are dedup'd against existing
+  // company_alerts rows (see comments above), so re-running them - including
+  // right on boot - can never create a duplicate alert. Fire one combined
+  // pass immediately so companies aren't waiting on a cron tick that might
+  // not happen for a while on a host that spins down between requests.
+  logger.info('[Job] Running an immediate opportunity alert sweep on boot...');
+  runAlertSweepsOnce().catch((err) => logger.error('[Job] Boot-time alert sweep failed (non-fatal):', err));
+
   logger.info('✅ Opportunity alert jobs scheduled (new matches every 30min, deadline reminders daily at 08:00)');
 };
 

@@ -36,5 +36,13 @@ export const startSearchIndexRefresh = () => {
     refreshSearchIndex();
   });
 
+  // Critical on a free-tier host that spins down on idle: GET /api/opportunities
+  // reads from this view, not the base table, so if the fixed-clock cron never
+  // gets a chance to fire, newly-collected/classified opportunities can sit in
+  // the DB but never actually appear in search/browse. REFRESH CONCURRENTLY is
+  // safe to run redundantly, so fire one immediately on boot too.
+  logger.info('[Job] Running an immediate search index refresh on boot...');
+  refreshSearchIndex().catch((err) => logger.error('[Job] Boot-time search index refresh failed (non-fatal):', err));
+
   logger.info('✅ Search index refresh scheduled (every 15 minutes)');
 };

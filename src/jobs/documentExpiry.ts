@@ -129,6 +129,15 @@ export const startExpiryCheck = () => {
     checkExpiringDocuments();
   });
 
+  // Free-tier-host reasoning: the expiry-marking update and reminder sweep
+  // above only ever touch rows where is_expired/expiry_reminder_sent is
+  // still false, so re-running - including on boot - can never re-alert on
+  // the same document twice. Fire one pass immediately so expired documents
+  // don't sit unflagged until a 3am cron tick that might never come on a
+  // host that spins down between requests.
+  logger.info('[Job] Running an immediate document expiry check on boot...');
+  checkExpiringDocuments();
+
   logger.info('✅ Document expiry job scheduled (daily at 03:00)');
 };
 

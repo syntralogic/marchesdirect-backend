@@ -259,6 +259,15 @@ export const startSEOGeneration = () => {
     runSEOGeneration();
   });
 
+  // Free-tier-host reasoning: page generation is create-or-update against
+  // real current opportunity counts (see comments above), so re-running -
+  // including on boot - just refreshes the same pages rather than
+  // duplicating anything. Fire one pass immediately so SEO pages don't sit
+  // stale until a 4am cron tick that might never come on a host that spins
+  // down between requests.
+  logger.info('[Job] Running an immediate SEO page generation pass on boot...');
+  runSEOGeneration();
+
   logger.info('✅ SEO generation job scheduled (daily at 04:00)');
 };
 
