@@ -192,29 +192,50 @@ const startServer = async () => {
     require('./jobs/crmRetry').startCrmRetrySchedule();
 
     // Start server
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       logger.info(`🚀 Server running on http://localhost:${PORT}`);
       logger.info(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
       logger.info(`🎨 Frontend URL: ${process.env.FRONTEND_URL}`);
     });
+
+    // Graceful shutdown - was previously registered outside startServer()
+    // and called db.end() (closing the pg pool) immediately on SIGTERM,
+    // with no server.close() first. Render sends SIGTERM on every deploy
+    // and every free-tier spin-down, so any request still in flight at that
+    // exact instant (auth middleware's user lookup, a cron job's query,
+    // etc.) hit the DB *after* the pool was already ended - "Cannot use a
+    // pool after calling end on the pool", visible as request failures on
+    // every single redeploy. Now: stop accepting new connections, let
+    // in-flight ones finish, only then close the pool - with a hard-exit
+    // fallback in case something never finishes, so a deploy can't hang
+    // forever either.
+    const shutdown = (signal: string) => {
+      logger.info(`${signal} received, shutting down gracefully...`);
+      const forceExit = setTimeout(() => {
+        logger.warn('Graceful shutdown timed out after 10s, forcing exit.');
+        process.exit(1);
+      }, 10_000);
+      forceExit.unref();
+
+      server.close(async (err) => {
+        if (err) logger.error('Error while closing HTTP server:', err);
+        try {
+          await db.end();
+        } catch (dbErr) {
+          logger.error('Error while closing DB pool:', dbErr);
+        }
+        clearTimeout(forceExit);
+        process.exit(0);
+      });
+    };
+
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
   } catch (err) {
     logger.error('❌ Failed to start server:', err);
     process.exit(1);
   }
 };
-
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM received, shutting down gracefully...');
-  await db.end();
-  process.exit(0);
-});
-
-process.on('SIGINT', async () => {
-  logger.info('SIGINT received, shutting down gracefully...');
-  await db.end();
-  process.exit(0);
-});
 
 // Start server
 startServer();
