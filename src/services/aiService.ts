@@ -23,6 +23,9 @@ interface ClaudeMessage {
 
 // Helper: Clean JSON response from Claude
 const cleanJsonResponse = (raw: string): string => {
+  if (typeof raw !== 'string') {
+    throw new Error(`Expected a text response from Claude API, got: ${typeof raw}`);
+  }
   let cleaned = raw.trim();
   // Remove markdown code blocks
   cleaned = cleaned.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
@@ -65,11 +68,21 @@ const callClaudeAPI = async (
       }
     );
 
-    if (response.data.content && response.data.content[0]) {
-      return response.data.content[0].text;
+    // Previously assumed content[0] was always the text block and returned
+    // content[0].text unconditionally - if content[0] is any other block
+    // type (e.g. a thinking block ahead of the text, or a tool_use block),
+    // .text is undefined there, and that undefined then got returned
+    // straight through to cleanJsonResponse(), which crashed with
+    // "Cannot read properties of undefined (reading 'trim')". This searches
+    // for the actual text block instead of assuming its position, and fails
+    // with a clear, catchable error if the response genuinely has none.
+    const textBlock = response.data.content?.find((block: any) => block.type === 'text' && typeof block.text === 'string');
+    if (textBlock) {
+      return textBlock.text;
     }
 
     throw new Error('No response from Claude API');
+
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     logger.error(`Claude API error: ${errorMessage}`);
