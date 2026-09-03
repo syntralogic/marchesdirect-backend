@@ -406,6 +406,8 @@ Environnement: ${envPolicy?.policy_text || 'non renseignee dans le profil entrep
 export type ExtractedFact = { value: string; available: boolean };
 export type ExtractedRisk = { label: string; severity: 'obligatoire' | 'recommandee' };
 export type ExtractedRiskList = { value: ExtractedRisk[]; available: boolean };
+export type ExtractedCriterion = { label: string; weight_percent: number | null; not_specified: boolean };
+export type ExtractedCriteriaList = { value: ExtractedCriterion[]; available: boolean };
 export type ExtractedOpportunityFacts = {
   buyer_name: ExtractedFact;
   contract_object: ExtractedFact;
@@ -422,6 +424,12 @@ export type ExtractedOpportunityFacts = {
   submission_method: ExtractedFact;
   allotment: ExtractedFact;
   technical_visit: ExtractedFact;
+  // Client's "Critères de notation" card (dix images de référence, écran
+  // "Détails du dossier") - mirrors the exact selection_criteria shape
+  // already proven in the paid tender DCE analysis above, but run for
+  // every opportunity (public included) since that block is free-tier in
+  // the reference screenshots, not gated behind a subscription.
+  selection_criteria: ExtractedCriteriaList;
 };
 
 export const extractOpportunityFacts = async (
@@ -439,7 +447,7 @@ export const extractOpportunityFacts = async (
 
 HARD RULE: for every field, only use what is literally present in the source text/data given below.
 If a field is not present in the source, you MUST return {"value": "not available", "available": false}
-for it (or {"value": [], "available": false} for the list field) - never guess, infer, or fill it with a
+for it (or {"value": [], "available": false} for a list field) - never guess, infer, or fill it with a
 plausible-sounding value.
 
 Additionally extract these four fields, same "not available" rule if the source doesn't state them:
@@ -447,6 +455,12 @@ Additionally extract these four fields, same "not available" rule if the source 
 - submission_method: how a candidate must actually submit their bid (e.g. "Depot exclusivement dematerialise via le profil acheteur", "Par courrier recommande avec AR"). Not the deadline itself, the delivery method/channel.
 - allotment: whether the marché is split into lots, and which/how many (e.g. "Marche alloti en 3 lots", "Marche unique, non alloti"). If the source is silent on lots, treat as not available rather than assuming "non alloti".
 - technical_visit: whether a site visit is mentioned as obligatory or optional (e.g. "Visite du site obligatoire avant remise des offres"). If never mentioned, not available.
+
+Also extract selection_criteria: the award/scoring criteria and their weighting, if explicitly stated
+(e.g. "Critere prix: 40%, Critere valeur technique: 45%, Critere delais: 15%"). Only include criteria the
+source actually names; if a weight isn't given for a named criterion, set weight_percent to null and
+not_specified to true for that entry. If the source states no criteria at all, return
+{"value": [], "available": false}. Never invent a weighting breakdown that isn't in the source.
 
 Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
 {
@@ -462,7 +476,8 @@ Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
   "contract_duration": {"value": "not available", "available": false},
   "submission_method": {"value": "not available", "available": false},
   "allotment": {"value": "not available", "available": false},
-  "technical_visit": {"value": "not available", "available": false}
+  "technical_visit": {"value": "not available", "available": false},
+  "selection_criteria": {"value": [{"label": "Prix", "weight_percent": 40, "not_specified": false}], "available": true}
 }`;
 
   const userMessage = `SOURCE RECORD (raw, as ingested from the connector):
@@ -500,6 +515,10 @@ Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 2
   if (facts.key_risks && !Array.isArray(facts.key_risks.value)) {
     logger.warn(`key_risks.value was not an array for opportunity ${opportunityId}, coercing to empty list. Raw value: ${JSON.stringify(facts.key_risks.value)}`);
     facts.key_risks = { value: [], available: false };
+  }
+  if (facts.selection_criteria && !Array.isArray(facts.selection_criteria.value)) {
+    logger.warn(`selection_criteria.value was not an array for opportunity ${opportunityId}, coercing to empty list. Raw value: ${JSON.stringify(facts.selection_criteria.value)}`);
+    facts.selection_criteria = { value: [], available: false };
   }
 
   await db.query(
