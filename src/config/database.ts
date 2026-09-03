@@ -293,18 +293,30 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // this gets populated on ingest.
   await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS buyer_name VARCHAR(500)`);
 
+  // Client reported long BOAMP buyer names / titles getting cut off (source
+  // data can exceed 500 chars). Widening a VARCHAR is a metadata-only change
+  // in Postgres - no table rewrite, no data loss - so this is safe/cheap to
+  // re-run on every boot.
+  await pool.query(`ALTER TABLE opportunities ALTER COLUMN buyer_name TYPE VARCHAR(1000)`);
+  await pool.query(`ALTER TABLE opportunities ALTER COLUMN title TYPE VARCHAR(1000)`);
+
   // opportunity_search_index is a MATERIALIZED VIEW, so a plain ALTER can't
-  // add a column to it the way it can for a table - the view has to be
-  // dropped and recreated with the new column in its SELECT. Only do that
-  // once (checked via information_schema) so a normal boot doesn't pay for
-  // a full view rebuild every time.
-  const viewHasBuyerName = await pool.query(
-    `SELECT EXISTS (
-       SELECT FROM information_schema.columns
-       WHERE table_name = 'opportunity_search_index' AND column_name = 'buyer_name'
-     ) AS exists`
+  // add a column to it (or widen a column already in it) the way it can for
+  // a table - the view has to be dropped and recreated. Only do that when
+  // actually needed (checked via information_schema) so a normal boot
+  // doesn't pay for a full view rebuild every time.
+  const viewNeedsRebuild = await pool.query(
+    `SELECT
+       NOT EXISTS (
+         SELECT FROM information_schema.columns
+         WHERE table_name = 'opportunity_search_index' AND column_name = 'buyer_name'
+       ) AS missing_buyer_name,
+       COALESCE((
+         SELECT character_maximum_length FROM information_schema.columns
+         WHERE table_name = 'opportunity_search_index' AND column_name = 'title'
+       ), 0) < 1000 AS title_too_narrow`
   );
-  if (!viewHasBuyerName.rows[0]?.exists) {
+  if (viewNeedsRebuild.rows[0]?.missing_buyer_name || viewNeedsRebuild.rows[0]?.title_too_narrow) {
     await pool.query(`DROP MATERIALIZED VIEW IF EXISTS opportunity_search_index`);
     await pool.query(`
       CREATE MATERIALIZED VIEW opportunity_search_index AS
