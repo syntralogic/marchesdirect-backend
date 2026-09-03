@@ -309,84 +309,120 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // in Postgres - no table rewrite, no data loss - so this is safe/cheap to
   // re-run on every boot.
   //
-  // BUG (found live on Render, 2026-09-03): opportunity_search_index's rule
-  // depends on both buyer_name and title, so Postgres refuses ALTER COLUMN
-  // TYPE on either while the view still exists ("cannot alter type of a
-  // column used by a view or rule") - this step was throwing on every boot,
-  // silently leaving both columns at their old width. That's why inserts
-  // were still failing with "value too long for type character varying(255)"
-  // on BOAMP titles/buyer names well after this migration first landed - it
-  // never actually ran. Determine widening need from the TABLE's own
-  // metadata (not the view's, since the view may already be dropped below)
-  // and drop the view *before* the ALTER whenever widening is still needed,
-  // so the DROP MATERIALIZED VIEW below has nothing left to recreate this
-  // check against for buyer_name specifically - it's still needed for the
-  // "does the view exist at all / is its own title column wide enough" case.
-  const columnsNeedWidening = await pool.query(
+  // BUG #1 (found live on Render, 2026-09-03, first fix attempt): the view's
+  // rule depends on both buyer_name and title, so Postgres refuses ALTER
+  // COLUMN TYPE on either while the view exists ("cannot alter type of a
+  // column used by a view or rule"). Fixed by dropping the view first.
+  //
+  // BUG #2 (found live on Render, 2026-09-03, immediately after deploying
+  // the fix for BUG #1): title is ALSO referenced by a GENERATED column,
+  // opportunities.search_vector ("cannot alter type of a column used by a
+  // generated column" - a separate Postgres restriction from the view one
+  // above). That exception was thrown *after* the view had already been
+  // dropped, and since a thrown error aborts the rest of this async
+  // function, the CREATE MATERIALIZED VIEW further down never ran either -
+  // opportunity_search_index was left *missing entirely* on production
+  // (confirmed by the next boot's "relation ... does not exist" errors),
+  // which is what GET /api/opportunities reads from - hence tenders/
+  // opportunities showing no data on the frontend.
+  //
+  // Fixed properly this time: everything below (dropping the view, dropping
+  // + re-adding the generated column + its index around the title ALTER,
+  // and recreating the view) runs inside one explicit transaction. Postgres
+  // supports transactional DDL, so if any statement fails the whole thing
+  // rolls back - the view can never again be left dropped-but-not-recreated
+  // by a mid-migration exception. The `view_missing` check also means this
+  // block self-heals the *current* broken production state (view already
+  // gone) even once buyer_name/title report as already wide enough.
+  const state = await pool.query(
     `SELECT
        COALESCE((SELECT character_maximum_length FROM information_schema.columns
          WHERE table_name = 'opportunities' AND column_name = 'buyer_name'), 0) < 1000 AS buyer_name_narrow,
        COALESCE((SELECT character_maximum_length FROM information_schema.columns
-         WHERE table_name = 'opportunities' AND column_name = 'title'), 0) < 1000 AS title_narrow`
+         WHERE table_name = 'opportunities' AND column_name = 'title'), 0) < 1000 AS title_narrow,
+       (to_regclass('opportunity_search_index') IS NULL) AS view_missing`
   );
-  const needsWidening =
-    columnsNeedWidening.rows[0]?.buyer_name_narrow || columnsNeedWidening.rows[0]?.title_narrow;
+  const { buyer_name_narrow, title_narrow, view_missing } = state.rows[0] || {};
 
-  if (needsWidening) {
-    await pool.query(`DROP MATERIALIZED VIEW IF EXISTS opportunity_search_index`);
-    await pool.query(`ALTER TABLE opportunities ALTER COLUMN buyer_name TYPE VARCHAR(1000)`);
-    await pool.query(`ALTER TABLE opportunities ALTER COLUMN title TYPE VARCHAR(1000)`);
-  }
+  if (buyer_name_narrow || title_narrow || view_missing) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
 
-  // opportunity_search_index is a MATERIALIZED VIEW, so a plain ALTER can't
-  // add a column to it (or widen a column already in it) the way it can for
-  // a table - the view has to be dropped and recreated. Only do that when
-  // actually needed (checked via information_schema) so a normal boot
-  // doesn't pay for a full view rebuild every time. If `needsWidening` was
-  // true above, the view was already dropped, so `to_regclass` below is
-  // what actually triggers the recreate in that case too - no separate
-  // "was it dropped" flag needed.
-  const viewExists = await pool.query(`SELECT to_regclass('opportunity_search_index') AS v`);
-  if (!viewExists.rows[0]?.v) {
-    await pool.query(`
-      CREATE MATERIALIZED VIEW opportunity_search_index AS
-      SELECT 
-        o.id,
-        o.title,
-        o.description,
-        o.deadline,
-        o.publication_date,
-        o.estimated_value,
-        o.currency,
-        o.location_city,
-        o.location_region,
-        o.location_department,
-        o.estimated_start_date,
-        o.estimated_end_date,
-        o.ai_classification_status,
-        o.ai_summary,
-        o.ai_matched_trades,
-        o.status,
-        o.trade_id,
-        o.buyer_name,
-        ot.code as opportunity_type,
-        t.name as trade_name,
-        c.code as brand_code,
-        ds.code as source_code,
-        (
-          to_tsvector('french', COALESCE(o.title, '')) ||
-          to_tsvector('french', COALESCE(o.description, ''))
-        ) as search_vector
-      FROM opportunities o
-      LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
-      LEFT JOIN trades t ON o.trade_id = t.id
-      LEFT JOIN data_sources ds ON o.source_id = ds.id
-      LEFT JOIN brands c ON ot.brand_id = c.id
-      WHERE o.deleted_at IS NULL AND o.status NOT IN ('cancelled', 'expired', 'merged')
-    `);
-    await pool.query(`CREATE INDEX opportunity_search_index_search ON opportunity_search_index USING GIN(search_vector)`);
-    await pool.query(`CREATE INDEX opportunity_search_index_deadline ON opportunity_search_index(deadline)`);
-    await pool.query(`CREATE UNIQUE INDEX opportunity_search_index_id ON opportunity_search_index(id)`);
+      await client.query(`DROP MATERIALIZED VIEW IF EXISTS opportunity_search_index`);
+
+      if (title_narrow) {
+        // search_vector (GENERATED ALWAYS AS ... STORED) must be dropped
+        // before title can be widened, then recreated identically after.
+        await client.query(`DROP INDEX IF EXISTS opportunities_search`);
+        await client.query(`ALTER TABLE opportunities DROP COLUMN IF EXISTS search_vector`);
+      }
+
+      if (buyer_name_narrow) {
+        await client.query(`ALTER TABLE opportunities ALTER COLUMN buyer_name TYPE VARCHAR(1000)`);
+      }
+
+      if (title_narrow) {
+        await client.query(`ALTER TABLE opportunities ALTER COLUMN title TYPE VARCHAR(1000)`);
+        await client.query(`
+          ALTER TABLE opportunities ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (
+            to_tsvector('french', COALESCE(title, '') || ' ' || COALESCE(description, ''))
+          ) STORED
+        `);
+        await client.query(`CREATE INDEX opportunities_search ON opportunities USING GIN(search_vector)`);
+      }
+
+      // opportunity_search_index is a MATERIALIZED VIEW, so it always has to
+      // be dropped+recreated (never ALTERed) for a column change on the
+      // underlying table to show up in it. Recreated here, inside the same
+      // transaction as the drop above, so it's never left missing.
+      await client.query(`
+        CREATE MATERIALIZED VIEW opportunity_search_index AS
+        SELECT 
+          o.id,
+          o.title,
+          o.description,
+          o.deadline,
+          o.publication_date,
+          o.estimated_value,
+          o.currency,
+          o.location_city,
+          o.location_region,
+          o.location_department,
+          o.estimated_start_date,
+          o.estimated_end_date,
+          o.ai_classification_status,
+          o.ai_summary,
+          o.ai_matched_trades,
+          o.status,
+          o.trade_id,
+          o.buyer_name,
+          ot.code as opportunity_type,
+          t.name as trade_name,
+          c.code as brand_code,
+          ds.code as source_code,
+          (
+            to_tsvector('french', COALESCE(o.title, '')) ||
+            to_tsvector('french', COALESCE(o.description, ''))
+          ) as search_vector
+        FROM opportunities o
+        LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+        LEFT JOIN trades t ON o.trade_id = t.id
+        LEFT JOIN data_sources ds ON o.source_id = ds.id
+        LEFT JOIN brands c ON ot.brand_id = c.id
+        WHERE o.deleted_at IS NULL AND o.status NOT IN ('cancelled', 'expired', 'merged')
+      `);
+      await client.query(`CREATE INDEX opportunity_search_index_search ON opportunity_search_index USING GIN(search_vector)`);
+      await client.query(`CREATE INDEX opportunity_search_index_deadline ON opportunity_search_index(deadline)`);
+      await client.query(`CREATE UNIQUE INDEX opportunity_search_index_id ON opportunity_search_index(id)`);
+
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   // Opportunity detail page graduated access (level1 teaser -> level2 after
