@@ -67,7 +67,8 @@ const callClaudeAPI = async (
 
     throw new Error('No response from Claude API');
   } catch (err) {
-    logger.error('Claude API error:', err);
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logger.error(`Claude API error: ${errorMessage}`);
     throw err;
   }
 };
@@ -156,10 +157,11 @@ ${documentsBlock}`;
     try {
       analysis = JSON.parse(cleanedResponse);
     } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
       logger.error(`Raw DCE response: ${response}`);
       logger.error(`Cleaned DCE response: ${cleanedResponse}`);
-      logger.warn(`Failed to parse DCE analysis response for tender ${tenderId}`);
-      throw new Error('Invalid DCE analysis response format');
+      logger.warn(`Failed to parse DCE analysis response for tender ${tenderId}: ${errorMessage}`);
+      throw new Error(`Invalid DCE analysis response format: ${errorMessage}`);
     }
 
     const sourceCompleteness = hasParsedDocs
@@ -194,7 +196,8 @@ ${documentsBlock}`;
     logger.info(`✅ Analyzed DCE for tender ${tenderId}`);
     return true;
   } catch (err) {
-    logger.error(`DCE analysis failed for tender ${tenderId}:`, err);
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logger.error(`DCE analysis failed for tender ${tenderId}: ${errorMessage}`);
     await db.query('UPDATE tenders SET dce_analysis_status = $1 WHERE id = $2', ['failed', tenderId]);
     return false;
   }
@@ -307,7 +310,8 @@ ${policies.length ? policies.map((p) => `- [${p.policy_type}] ${p.policy_text}`)
     logger.info(`✅ AI-generated technical memo for bid ${bidId}`);
     return { text: memoText, aiGenerated: true };
   } catch (err) {
-    logger.warn(`AI technical memo generation failed for bid ${bidId}, using grounded fallback template:`, err);
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logger.warn(`AI technical memo generation failed for bid ${bidId}, using grounded fallback template: ${errorMessage}`);
 
     await db.query(
       `UPDATE bid_responses SET
@@ -445,10 +449,11 @@ Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 2
   try {
     facts = JSON.parse(cleanedResponse);
   } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
     logger.error(`Raw fact extraction response: ${response}`);
     logger.error(`Cleaned fact extraction response: ${cleanedResponse}`);
-    logger.warn(`Failed to parse fact extraction response for ${opportunityId}`);
-    throw new Error('Invalid fact extraction response format');
+    logger.warn(`Failed to parse fact extraction response for ${opportunityId}: ${errorMessage}`);
+    throw new Error(`Invalid fact extraction response format: ${errorMessage}`);
   }
 
   await db.query(
@@ -520,9 +525,10 @@ Estimated Value: ${opp.estimated_value || 'Not specified'}`;
     try {
       classification = JSON.parse(cleanedResponse);
     } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
       logger.error(`Raw classification response: ${response}`);
       logger.error(`Cleaned classification response: ${cleanedResponse}`);
-      throw new Error(`Invalid classification response format: ${err.message}`);
+      throw new Error(`Invalid classification response format: ${errorMessage}`);
     }
 
     // Validate classification structure
@@ -596,7 +602,8 @@ Estimated Value: ${opp.estimated_value || 'Not specified'}`;
     logger.info(`✅ Classified opportunity ${opportunityId}: ${tradeIds.map(t => t.name).join(', ')}`);
     return true;
   } catch (err) {
-    logger.error(`Classification failed for ${opportunityId}:`, err);
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logger.error(`Classification failed for ${opportunityId}: ${errorMessage}`);
 
     await db.query(
       'UPDATE opportunities SET ai_classification_status = $1 WHERE id = $2',
@@ -670,7 +677,8 @@ export const matchOpportunitiesToCompany = async (
 
     return matchedIds;
   } catch (err) {
-    logger.error(`Matching failed for company ${companyId}:`, err);
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logger.error(`Matching failed for company ${companyId}: ${errorMessage}`);
     return [];
   }
 };
@@ -720,7 +728,8 @@ Location: ${opp.location_city}, ${opp.location_region}`;
 
     return summary;
   } catch (err) {
-    logger.error(`Summary generation failed for ${opportunityId}:`, err);
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logger.error(`Summary generation failed for ${opportunityId}: ${errorMessage}`);
     throw err;
   }
 };
@@ -815,7 +824,8 @@ ${context}`;
 
     return response;
   } catch (err) {
-    logger.error(`Chatbot error for conversation ${conversationId}:`, err);
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logger.error(`Chatbot error for conversation ${conversationId}: ${errorMessage}`);
     throw err;
   }
 };
@@ -850,7 +860,8 @@ export const classifyUnanalyzedOpportunities = async (limit: number = 100) => {
     logger.info(`Classification batch complete: ${classified} succeeded, ${failed} failed`);
     return { classified, failed };
   } catch (err) {
-    logger.error('Batch classification error:', err);
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logger.error(`Batch classification error: ${errorMessage}`);
     return { classified: 0, failed: 0 };
   }
 };
@@ -874,14 +885,16 @@ export const generateSummariesForOpportunities = async (limit: number = 50) => {
         await generateOpportunitySummary(opp.id);
         generated++;
       } catch (err) {
-        logger.warn(`Failed to generate summary for ${opp.id}`);
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        logger.warn(`Failed to generate summary for ${opp.id}: ${errorMessage}`);
       }
     }
 
     logger.info(`Generated ${generated} summaries`);
     return generated;
   } catch (err) {
-    logger.error('Summary generation batch error:', err);
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logger.error(`Summary generation batch error: ${errorMessage}`);
     return 0;
   }
 };
