@@ -112,7 +112,7 @@ CREATE TABLE opportunities (
   cpv_code_id INTEGER REFERENCES cpv_codes(id),
   
   -- Core fields
-  title VARCHAR(500) NOT NULL,
+  title VARCHAR(1000) NOT NULL,
   description TEXT,
   raw_data JSONB,                           -- Full original record from source
   
@@ -134,7 +134,7 @@ CREATE TABLE opportunities (
   location_department VARCHAR(100),         -- French department code
   location_latitude DECIMAL(10, 8),
   location_longitude DECIMAL(11, 8),
-  buyer_name VARCHAR(500),                  -- Awarding buyer / requesting company name
+  buyer_name VARCHAR(1000),                 -- Awarding buyer / requesting company name
                                              -- (BOAMP 'nomacheteur' etc.) - shown on the
                                              -- fiche and used for sous-traitance mise en
                                              -- relation, kept separate from location_city.
@@ -388,6 +388,13 @@ CREATE TABLE company_certifications (
 -- Safe to re-run: covers anyone who already loaded schema.sql once before this
 -- column was added to the CREATE TABLE above (which only applies on first create).
 ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS buyer_name VARCHAR(500);
+
+-- Safe to re-run: widens buyer_name/title on a DB that already exists from
+-- before this pass (fresh CREATE TABLE above already uses VARCHAR(1000)).
+-- Client reported long BOAMP buyer names / titles getting cut off - widening
+-- a VARCHAR is metadata-only in Postgres, no rewrite/no data loss.
+ALTER TABLE opportunities ALTER COLUMN buyer_name TYPE VARCHAR(1000);
+ALTER TABLE opportunities ALTER COLUMN title TYPE VARCHAR(1000);
 
 -- Safe to re-run: covers anyone who already loaded schema.sql once before this
 -- column was added to the CREATE TABLE above (which only applies on first create).
