@@ -158,6 +158,13 @@ export const computeMatchScore = async (
     if (opp.estimated_value && opp.deadline) positiveFactors.push({ label: 'Budget et calendrier clairement définis', points: 25 });
     if (opp.estimated_value && Number(opp.estimated_value) < 300000) positiveFactors.push({ label: 'Montant adapté aux PME', points: 18 });
     if (opp.location_city) positiveFactors.push({ label: 'Localisation précisée', points: 10 });
+    // Two more factors, deliberately based on fields that are populated on
+    // almost every listing (unlike estimated_value, which is null on most
+    // BOAMP records - "Montant non communiqué" on the listing card) so a
+    // real, opportunity-specific score can be computed instead of falling
+    // through to the flat isPublic ? 60 : 40 default below on most listings.
+    if (opp.deadline) positiveFactors.push({ label: 'Calendrier de réponse identifié', points: 15 });
+    if (opp.trade_name) positiveFactors.push({ label: 'Lot / métier identifié', points: 10 });
     score = positiveFactors.reduce((sum, f) => sum + f.points, 0);
   } else {
     scoreTitle = 'Indice de correspondance';
@@ -215,6 +222,10 @@ export const computeMatchScore = async (
     }
   }
 
+  // Last-resort floor for the rare listing with none of the factors above
+  // (no description, no deadline, no trade, no location) - not expected to
+  // fire often now that deadline/trade_name are scored above, since those
+  // two are populated on nearly every ingested listing.
   score = Math.max(0, Math.min(100, score || (isPublic ? 60 : 40)));
 
   // Now that score is final: personalized case gets the tiered
