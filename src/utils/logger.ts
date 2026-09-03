@@ -92,7 +92,9 @@ const logFormat = LOG_FORMAT === 'json'
         // fresh object here would drop the hidden LEVEL/MESSAGE/SPLAT
         // symbols logform attaches to `info`, which silently breaks
         // level-based file routing and the final json() format downstream.
-        const { level, message, timestamp, service, ...meta } = info;
+        // Prefixed with `_` on purpose - these are destructured out only to
+        // exclude them from `meta` below, never read directly.
+        const { level: _level, message: _message, timestamp: _timestamp, service: _service, ...meta } = info;
         const safeMeta = toSafeMeta(meta) as Record<string, unknown>;
         for (const key of Object.keys(meta)) delete (info as any)[key];
         Object.assign(info, safeMeta);
