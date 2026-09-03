@@ -8,7 +8,11 @@ import { logger } from '../utils/logger';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const API_KEY = process.env.ANTHROPIC_API_KEY;
-const MODEL = process.env.LLM_MODEL || 'claude-sonnet-5';
+// 'claude-3-5-sonnet-20241022' was deprecated 2025-08-13 and fully retired
+// 2025-10-28. Using 'claude-haiku-4-5-20251001' - Anthropic's current fast/
+// cheap Haiku model, a good fit for this platform's high-volume
+// classification/summary/chatbot workload.
+const MODEL = process.env.LLM_MODEL || 'claude-haiku-4-5-20251001';
 const TEMPERATURE = process.env.AI_TEMPERATURE ? parseFloat(process.env.AI_TEMPERATURE) : undefined;
 const MAX_TOKENS = parseInt(process.env.AI_MAX_TOKENS || '2000');
 
