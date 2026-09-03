@@ -94,6 +94,10 @@ async function main() {
         -- fiche page outright (key_risks.value.map is not a function), so
         -- these rows need reprocessing even more than the ones above.
         OR jsonb_typeof(ai_extracted_facts->'key_risks'->'value') NOT IN ('array')
+        -- Richer "Détails du dossier" (client ask): four fields added later
+        -- (contract_duration, submission_method, allotment, technical_visit).
+        -- Rows extracted before this catch up here too.
+        OR ai_extracted_facts->'contract_duration' IS NULL
       )
     ORDER BY created_at DESC
     ${limit ? `LIMIT ${limit}` : ''}

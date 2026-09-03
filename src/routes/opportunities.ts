@@ -77,6 +77,9 @@ function factsNeedExtraction(facts: Record<string, any> | null | undefined): boo
   if (!facts.team_size_estimate) return true;
   if (!facts.key_risks) return true;
   if (!Array.isArray(facts.key_risks.value)) return true;
+  // Richer "Détails du dossier" (client ask): four fields added later. A
+  // record extracted before this exists but is missing them - re-run it too.
+  if (!facts.contract_duration) return true;
   return false;
 }
 

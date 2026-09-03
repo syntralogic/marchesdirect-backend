@@ -37,6 +37,10 @@ const NEEDS_BACKFILL_QUERY = `
       OR ai_extracted_facts->'key_risks' IS NULL
       OR jsonb_typeof(ai_extracted_facts->'key_risks'->'value'->0) = 'string'
       OR jsonb_typeof(ai_extracted_facts->'key_risks'->'value') NOT IN ('array')
+      -- Richer "Détails du dossier" (client ask): four fields added later
+      -- (contract_duration, submission_method, allotment, technical_visit).
+      -- Rows extracted before this catch up here too, same as the script.
+      OR ai_extracted_facts->'contract_duration' IS NULL
     )
   ORDER BY created_at DESC
   LIMIT $1
