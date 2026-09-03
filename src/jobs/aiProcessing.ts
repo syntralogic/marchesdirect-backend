@@ -113,5 +113,20 @@ export const startAIProcessing = () => {
     await processMissingSummaries();
   });
 
+  // Same reasoning as dataCollection.ts's boot-time run: on a free-tier host
+  // that spins down after idle and only wakes on an incoming HTTP request, a
+  // fixed-clock cron (*/15 * * * *) may never get a chance to fire between
+  // deploys/restarts - a listing collected by the boot-time data-collection
+  // pass could sit at ai_classification_status='not_analyzed' (no ai_summary,
+  // detail page shows only the raw title/description) indefinitely, since
+  // nothing else ever triggers classification. Run one pass immediately on
+  // boot, in the background, so every deploy/restart guarantees at least one
+  // real attempt at clearing the backlog, same as the data collection job.
+  logger.info('[Job] Running an immediate AI processing pass on boot (see comment above for why)...');
+  processUnclassifiedOpportunities()
+    .then(() => processMissingSummaries())
+    .then(() => logger.info('[Job] Boot-time AI processing pass complete'))
+    .catch((err) => logger.error('[Job] Boot-time AI processing pass failed (non-fatal, next cron tick or restart will retry):', err));
+
   logger.info('✅ AI processing scheduler started (runs every 15 minutes)');
 };
