@@ -186,6 +186,7 @@ const startServer = async () => {
     require('./jobs/seoGeneration').startSEOGeneration();
     require('./jobs/backupManagement').startBackupSchedule();
     require('./jobs/searchIndexRefresh').startSearchIndexRefresh();
+    require('./jobs/factsBackfillJob').startFactsBackfillJob();
     require('./jobs/aiProcessing').startAIProcessing();
     require('./jobs/opportunityAlerts').startOpportunityAlerts();
     require('./jobs/crmRetry').startCrmRetrySchedule();
