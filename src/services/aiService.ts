@@ -416,6 +416,12 @@ export type ExtractedOpportunityFacts = {
   required_qualifications: ExtractedFact;
   team_size_estimate: ExtractedFact;
   key_risks: ExtractedRiskList;
+  // Added later (client ask: richer "Détails du dossier") - same
+  // available/not-available contract as every other field above.
+  contract_duration: ExtractedFact;
+  submission_method: ExtractedFact;
+  allotment: ExtractedFact;
+  technical_visit: ExtractedFact;
 };
 
 export const extractOpportunityFacts = async (
@@ -436,6 +442,12 @@ If a field is not present in the source, you MUST return {"value": "not availabl
 for it (or {"value": [], "available": false} for the list field) - never guess, infer, or fill it with a
 plausible-sounding value.
 
+Additionally extract these four fields, same "not available" rule if the source doesn't state them:
+- contract_duration: how long the contract/marché runs once awarded (e.g. "12 mois reconductible 3 fois", "Duree: 24 mois").
+- submission_method: how a candidate must actually submit their bid (e.g. "Depot exclusivement dematerialise via le profil acheteur", "Par courrier recommande avec AR"). Not the deadline itself, the delivery method/channel.
+- allotment: whether the marché is split into lots, and which/how many (e.g. "Marche alloti en 3 lots", "Marche unique, non alloti"). If the source is silent on lots, treat as not available rather than assuming "non alloti".
+- technical_visit: whether a site visit is mentioned as obligatory or optional (e.g. "Visite du site obligatoire avant remise des offres"). If never mentioned, not available.
+
 Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
 {
   "buyer_name": {"value": "...", "available": true},
@@ -446,7 +458,11 @@ Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
   "contact_email": {"value": "not available", "available": false},
   "required_qualifications": {"value": "...", "available": true},
   "team_size_estimate": {"value": "not available", "available": false},
-  "key_risks": {"value": [{"label": "...", "severity": "obligatoire"}], "available": true}
+  "key_risks": {"value": [{"label": "...", "severity": "obligatoire"}], "available": true},
+  "contract_duration": {"value": "not available", "available": false},
+  "submission_method": {"value": "not available", "available": false},
+  "allotment": {"value": "not available", "available": false},
+  "technical_visit": {"value": "not available", "available": false}
 }`;
 
   const userMessage = `SOURCE RECORD (raw, as ingested from the connector):
@@ -457,7 +473,7 @@ Estimated value field: ${opp.estimated_value || ''}
 Location: ${opp.location_city || ''}, ${opp.location_region || ''}
 Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 2000) : '{}'}`;
 
-  const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 1000);
+  const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 1300);
 
   // Clean and parse response
   const cleanedResponse = cleanJsonResponse(response);
