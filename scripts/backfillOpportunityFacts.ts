@@ -87,6 +87,13 @@ async function main() {
         -- array of strings. Catch that old shape too, not just a missing
         -- key, or those opportunities would silently never get severity.
         OR jsonb_typeof(ai_extracted_facts->'key_risks'->'value'->0) = 'string'
+        -- The LLM occasionally returned key_risks.value as a bare string
+        -- (e.g. "Aucun risque identifié") instead of an array at all - not
+        -- caught by the ->0 check above (array-index into a non-array JSONB
+        -- just yields NULL, not 'string'). This shape crashed the frontend
+        -- fiche page outright (key_risks.value.map is not a function), so
+        -- these rows need reprocessing even more than the ones above.
+        OR jsonb_typeof(ai_extracted_facts->'key_risks'->'value') NOT IN ('array')
       )
     ORDER BY created_at DESC
     ${limit ? `LIMIT ${limit}` : ''}

@@ -460,6 +460,19 @@ Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 2
     throw new Error(`Invalid fact extraction response format: ${errorMessage}`);
   }
 
+  // The LLM's JSON output is never schema-validated, and it occasionally
+  // returns key_risks.value as a plain string ("Aucun risque identifié")
+  // instead of the required array-of-{label,severity} shape. That silently
+  // got saved as-is and crashed the frontend fiche page (key_risks.value.map
+  // is not a function) for that opportunity - not just the risks section,
+  // the whole page, since nothing there catches a render error more locally
+  // than the app's single top-level error boundary. Coerce it to a safe
+  // empty (unavailable) list rather than trusting the model's shape.
+  if (facts.key_risks && !Array.isArray(facts.key_risks.value)) {
+    logger.warn(`key_risks.value was not an array for opportunity ${opportunityId}, coercing to empty list. Raw value: ${JSON.stringify(facts.key_risks.value)}`);
+    facts.key_risks = { value: [], available: false };
+  }
+
   await db.query(
     `UPDATE opportunities SET ai_extracted_facts = $1, updated_at = NOW() WHERE id = $2`,
     [JSON.stringify(facts), opportunityId]
