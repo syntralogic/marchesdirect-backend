@@ -9,7 +9,14 @@ import { logger } from '../utils/logger';
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 const MODEL = process.env.LLM_MODEL || 'claude-sonnet-5';
-const TEMPERATURE = parseFloat(process.env.AI_TEMPERATURE || '0.7');
+// Claude Sonnet 5 (and Opus 5) reject any request that sets temperature/top_p/top_k
+// to a non-default value - the API returns a 400 error instead of a completion.
+// This was previously hardcoded to 0.7 on every single call, which meant every
+// AI generation (summaries, technical memos, DCE analysis, chatbot, everything)
+// silently 400'd against Sonnet 5 even with a perfectly valid API key. Only set
+// it when the operator has explicitly opted in via AI_TEMPERATURE, and only pass
+// it through when it's actually set - never send the field to the API otherwise.
+const TEMPERATURE = process.env.AI_TEMPERATURE ? parseFloat(process.env.AI_TEMPERATURE) : undefined;
 const MAX_TOKENS = parseInt(process.env.AI_MAX_TOKENS || '2000');
 
 interface ClaudeMessage {
@@ -28,7 +35,9 @@ const callClaudeAPI = async (
       {
         model: MODEL,
         max_tokens: maxTokens,
-        temperature: TEMPERATURE,
+        // Omit temperature entirely unless explicitly configured - see comment
+        // on TEMPERATURE above for why sending the default broke every call.
+        ...(TEMPERATURE !== undefined ? { temperature: TEMPERATURE } : {}),
         system: systemPrompt,
         messages: messages,
       },
