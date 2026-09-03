@@ -432,20 +432,24 @@ router.get('/:id/access', optionalAuth, async (req: AuthRequest, res: Response) 
 router.post(
   '/:id/request-access',
   [
-    body('email').isEmail().normalizeEmail(),
+    body('email').trim().isEmail().withMessage("L'adresse e-mail n'est pas valide.").normalizeEmail(),
     body('phone').optional({ checkFalsy: true }).isString().trim(),
     body('firstName').optional({ checkFalsy: true }).isString().trim(),
     body('lastName').optional({ checkFalsy: true }).isString().trim(),
     body('companyName').optional({ checkFalsy: true }).isString().trim(),
     body('sessionId').optional({ checkFalsy: true }).isString().trim().isLength({ max: 100 }),
-    body('mode').isIn(['slot', 'callback']),
-    body('slotLabel').if(body('mode').equals('slot')).isString().trim().isLength({ min: 1, max: 100 }),
+    body('mode').isIn(['slot', 'callback']).withMessage("Mode d'accès invalide."),
+    body('slotLabel').if(body('mode').equals('slot')).isString().trim().isLength({ min: 1, max: 100 }).withMessage('Créneau invalide.'),
     body('slotAt').optional({ checkFalsy: true }).isISO8601(),
   ],
   async (req: Request, res: Response) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ error: 'Validation failed', details: errors.array() });
+      // Same fix as crmPublic.ts's lead form: this used to always send back
+      // the literal string 'Validation failed' with no field-level detail,
+      // so a rejected "request a callback" / "book a slot" submission gave
+      // the visitor nothing to act on regardless of the actual cause.
+      return res.status(400).json({ error: errors.array()[0].msg || 'Validation failed', details: errors.array() });
     }
     try {
       const oppResult = await db.query(

@@ -23,15 +23,25 @@ const router = Router();
 router.post(
   '/',
   [
-    body('brandId').notEmpty(),
-    body('email').optional({ checkFalsy: true }).isEmail().normalizeEmail(),
-    body('phone').optional({ checkFalsy: true }).isString().trim().isLength({ min: 6 }),
+    body('brandId').notEmpty().withMessage('brandId manquant'),
+    body('email').optional({ checkFalsy: true }).trim().isEmail().withMessage("L'adresse e-mail n'est pas valide.").normalizeEmail(),
+    // Was isLength({ min: 6 }) - rejected a visitor with a generic "Validation
+    // failed" the moment their phone was under 6 characters after trim
+    // (e.g. a partial number, or a single leftover space that trims to '').
+    // This field is informational for a human callback, not dialed
+    // automatically - not worth hard-rejecting the whole form over.
+    body('phone').optional({ checkFalsy: true }).isString().trim(),
     body('sessionId').optional({ checkFalsy: true }).isString().trim().isLength({ max: 100 }),
   ],
   async (req: Request, res: Response) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ error: 'Validation failed', details: errors.array() });
+      // Was always the literal string 'Validation failed' with no detail -
+      // getApiErrorMessage() on the frontend reads exactly that and only
+      // that, so every rejection here (whatever the actual field/reason)
+      // showed the same unhelpful message with nothing to act on. Surface
+      // the first concrete validator message instead.
+      return res.status(400).json({ error: errors.array()[0].msg || 'Validation failed', details: errors.array() });
     }
     if (!req.body.email && !req.body.phone) {
       return res.status(400).json({ error: 'Un email ou un téléphone est requis' });
