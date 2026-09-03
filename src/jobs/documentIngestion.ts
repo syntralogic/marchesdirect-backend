@@ -33,6 +33,14 @@ export const startDocumentIngestion = () => {
     runBatch();
   });
 
+  // Same free-tier-host reasoning as dataCollection.ts/aiProcessing.ts: a
+  // fixed-clock cron may never get a chance to fire if the process spins
+  // down on idle, leaving dce_documents_status stuck at 'pending'
+  // indefinitely. Run one batch immediately on boot so every deploy/restart
+  // guarantees at least one real attempt.
+  logger.info('[Job] Running an immediate DCE document ingestion pass on boot...');
+  runBatch().catch((err) => logger.error('[Job] Boot-time document ingestion pass failed (non-fatal):', err));
+
   logger.info('✅ DCE document ingestion job scheduled (every 15 min)');
 };
 
