@@ -42,7 +42,7 @@ const NEEDS_BACKFILL_QUERY = `
   LIMIT $1
 `;
 
-export async function runFactsBackfillBatch(batchSize = 25, delayMs = 500) {
+export async function runFactsBackfillBatch(batchSize = 50, delayMs = 500) {
   let rows: { id: string; title: string }[];
   try {
     const result = await db.query(NEEDS_BACKFILL_QUERY, [batchSize]);
@@ -87,12 +87,18 @@ export const startFactsBackfillJob = () => {
     runFactsBackfillBatch().catch(err => logger.error('[Job] Boot-time facts backfill failed (non-fatal):', err));
   }, 10_000);
 
-  // Then once a day - small, cheap batches rather than one big sweep, and
-  // it naturally catches any new opportunity whose extraction comes back
-  // malformed in the future too, not just today's known-bad rows.
-  cron.schedule('0 3 * * *', () => {
+  // Was once/day at batch 25 - far too slow against connectors that can
+  // insert up to 3000 records per source per run (see aiProcessing.ts's
+  // BATCH_SIZE comment for the same math). At 25/day the backlog never
+  // clears, so most opportunity fiches permanently show no "Détails du
+  // dossier" (contract object, procedure type, value, qualifications) even
+  // though ai_summary/classification keep up fine at their own 50/15min
+  // cadence. Aligned to the same */15 * * * * cadence and batch size as
+  // aiProcessing.ts so facts extraction can't lag classification/summary
+  // by orders of magnitude.
+  cron.schedule('*/15 * * * *', () => {
     runFactsBackfillBatch().catch(err => logger.error('[Job] Scheduled facts backfill failed (non-fatal):', err));
   });
 
-  logger.info('✅ Facts backfill job scheduled (batch of 25 on boot, then daily at 03:00)');
+  logger.info('✅ Facts backfill job scheduled (batch of 50 on boot, then every 15 minutes)');
 };
