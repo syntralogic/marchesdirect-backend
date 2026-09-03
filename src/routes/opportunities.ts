@@ -65,6 +65,46 @@ function redactExtractedFacts(facts: Record<string, any> | null | undefined) {
   return redacted;
 }
 
+// Same "needs backfill" shape as jobs/factsBackfillJob.ts's SQL condition,
+// checked in JS here since we already have the row in hand. Used by GET
+// /:id below to extract on the spot for whatever opportunity a visitor
+// actually opens, instead of making them wait for that opportunity's turn
+// in the 15-minute batch job - the client's explicit ask ("jo bhi click
+// karoon uska data extract kare", not just whichever 50 the cron reaches
+// first).
+function factsNeedExtraction(facts: Record<string, any> | null | undefined): boolean {
+  if (!facts) return true;
+  if (!facts.team_size_estimate) return true;
+  if (!facts.key_risks) return true;
+  if (!Array.isArray(facts.key_risks.value)) return true;
+  return false;
+}
+
+// De-dupes concurrent extraction calls for the same opportunity id within
+// this process - e.g. several visitors opening the same freshly-ingested,
+// not-yet-processed fiche at nearly the same moment would otherwise each
+// fire their own Claude API call for identical work. Lives only for the
+// process's lifetime; that's fine, this only matters for the short window
+// before an opportunity has been processed once.
+const inFlightFactsExtractions = new Map<string, Promise<any>>();
+
+async function ensureFactsExtracted(opportunityId: string, currentFacts: Record<string, any> | null | undefined) {
+  if (!factsNeedExtraction(currentFacts)) return currentFacts;
+  try {
+    let pending = inFlightFactsExtractions.get(opportunityId);
+    if (!pending) {
+      pending = extractOpportunityFacts(opportunityId).finally(() => inFlightFactsExtractions.delete(opportunityId));
+      inFlightFactsExtractions.set(opportunityId, pending);
+    }
+    return await pending;
+  } catch (err) {
+    logger.warn(`On-demand facts extraction failed for ${opportunityId} while serving a detail view: ${err instanceof Error ? err.message : err}`);
+    // Fall through with whatever facts already existed (likely none) - the
+    // rest of the fiche still renders, and the batch job will retry later.
+    return currentFacts;
+  }
+}
+
 // GET /api/opportunities - search & filter listings (public, powers the 3 journeys)
 router.get('/', optionalAuth, async (req: Request, res: Response) => {
   try {
@@ -309,6 +349,15 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     }
 
     const opportunity = result.rows[0];
+
+    // On-demand extraction: whatever opportunity a visitor actually opens
+    // gets its facts filled in right now if the batch job hasn't reached it
+    // yet, rather than showing an empty "Détails du dossier" until its turn
+    // comes up in a future 15-minute run. Only fires when facts are
+    // genuinely missing/malformed (see factsNeedExtraction) - already-good
+    // records never re-call the LLM here.
+    opportunity.ai_extracted_facts = await ensureFactsExtracted(opportunity.id, opportunity.ai_extracted_facts);
+
     const sessionId = (req.query.sessionId as string) || '';
     const email = (req.user?.email || (req.query.email as string) || '');
     const unlocked = await resolveIdentityUnlocked(req.params.id, opportunity.journey, sessionId, email);
