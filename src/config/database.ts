@@ -144,6 +144,17 @@ export const ensureSchema = async (): Promise<void> => {
 const applyIncrementalMigrations = async (): Promise<void> => {
   await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
 
+  // BUG (found live on Render, 2026-09-03): documentExpiry.ts's daily sweep
+  // reads/writes expiry_reminder_sent on both company_documents and
+  // company_certifications, but that column only ever existed in schema.sql
+  // (which only runs against a fresh/empty database - see ensureSchema()
+  // below) and was never added here in the incremental-migration path that
+  // actually runs against an already-provisioned production database. Every
+  // run failed with "column 'expiry_reminder_sent' does not exist" until
+  // these two lines existed.
+  await pool.query(`ALTER TABLE company_documents ADD COLUMN IF NOT EXISTS expiry_reminder_sent BOOLEAN DEFAULT false`);
+  await pool.query(`ALTER TABLE company_certifications ADD COLUMN IF NOT EXISTS expiry_reminder_sent BOOLEAN DEFAULT false`);
+
   // "lead" gate (client's newest brief): phone + email captured after SIRET
   // recognition, before the full analysis breakdown - global per session,
   // same pattern as companyKnown. See POST /siret/lead + GET /siret/status.
@@ -297,27 +308,46 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // data can exceed 500 chars). Widening a VARCHAR is a metadata-only change
   // in Postgres - no table rewrite, no data loss - so this is safe/cheap to
   // re-run on every boot.
-  await pool.query(`ALTER TABLE opportunities ALTER COLUMN buyer_name TYPE VARCHAR(1000)`);
-  await pool.query(`ALTER TABLE opportunities ALTER COLUMN title TYPE VARCHAR(1000)`);
+  //
+  // BUG (found live on Render, 2026-09-03): opportunity_search_index's rule
+  // depends on both buyer_name and title, so Postgres refuses ALTER COLUMN
+  // TYPE on either while the view still exists ("cannot alter type of a
+  // column used by a view or rule") - this step was throwing on every boot,
+  // silently leaving both columns at their old width. That's why inserts
+  // were still failing with "value too long for type character varying(255)"
+  // on BOAMP titles/buyer names well after this migration first landed - it
+  // never actually ran. Determine widening need from the TABLE's own
+  // metadata (not the view's, since the view may already be dropped below)
+  // and drop the view *before* the ALTER whenever widening is still needed,
+  // so the DROP MATERIALIZED VIEW below has nothing left to recreate this
+  // check against for buyer_name specifically - it's still needed for the
+  // "does the view exist at all / is its own title column wide enough" case.
+  const columnsNeedWidening = await pool.query(
+    `SELECT
+       COALESCE((SELECT character_maximum_length FROM information_schema.columns
+         WHERE table_name = 'opportunities' AND column_name = 'buyer_name'), 0) < 1000 AS buyer_name_narrow,
+       COALESCE((SELECT character_maximum_length FROM information_schema.columns
+         WHERE table_name = 'opportunities' AND column_name = 'title'), 0) < 1000 AS title_narrow`
+  );
+  const needsWidening =
+    columnsNeedWidening.rows[0]?.buyer_name_narrow || columnsNeedWidening.rows[0]?.title_narrow;
+
+  if (needsWidening) {
+    await pool.query(`DROP MATERIALIZED VIEW IF EXISTS opportunity_search_index`);
+    await pool.query(`ALTER TABLE opportunities ALTER COLUMN buyer_name TYPE VARCHAR(1000)`);
+    await pool.query(`ALTER TABLE opportunities ALTER COLUMN title TYPE VARCHAR(1000)`);
+  }
 
   // opportunity_search_index is a MATERIALIZED VIEW, so a plain ALTER can't
   // add a column to it (or widen a column already in it) the way it can for
   // a table - the view has to be dropped and recreated. Only do that when
   // actually needed (checked via information_schema) so a normal boot
-  // doesn't pay for a full view rebuild every time.
-  const viewNeedsRebuild = await pool.query(
-    `SELECT
-       NOT EXISTS (
-         SELECT FROM information_schema.columns
-         WHERE table_name = 'opportunity_search_index' AND column_name = 'buyer_name'
-       ) AS missing_buyer_name,
-       COALESCE((
-         SELECT character_maximum_length FROM information_schema.columns
-         WHERE table_name = 'opportunity_search_index' AND column_name = 'title'
-       ), 0) < 1000 AS title_too_narrow`
-  );
-  if (viewNeedsRebuild.rows[0]?.missing_buyer_name || viewNeedsRebuild.rows[0]?.title_too_narrow) {
-    await pool.query(`DROP MATERIALIZED VIEW IF EXISTS opportunity_search_index`);
+  // doesn't pay for a full view rebuild every time. If `needsWidening` was
+  // true above, the view was already dropped, so `to_regclass` below is
+  // what actually triggers the recreate in that case too - no separate
+  // "was it dropped" flag needed.
+  const viewExists = await pool.query(`SELECT to_regclass('opportunity_search_index') AS v`);
+  if (!viewExists.rows[0]?.v) {
     await pool.query(`
       CREATE MATERIALIZED VIEW opportunity_search_index AS
       SELECT 
