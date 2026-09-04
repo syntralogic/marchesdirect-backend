@@ -333,6 +333,23 @@ async function computeBuyerHistoryCount(buyerName: string | null, opportunityId:
   return result.rows[0]?.count ?? 0;
 }
 
+// Client's "Documents analysés" stat (dix images, écran "Détails du
+// dossier"): a real count of DCE attachments this platform actually
+// downloaded and parsed for this opportunity - see
+// documentIngestionService.ts. Counts only rows that reached 'parsed'
+// (real extracted text), never candidates that were only found as a link
+// (status 'external_platform_only'/'pending'/'failed') - those weren't
+// actually analyzed. Returns null (not 0) while ingestion hasn't run yet
+// at all, so the UI can tell "not analyzed yet" apart from "zero found".
+async function computeDocumentsAnalyzedCount(opportunityId: string, dceDocumentsStatus: string | null): Promise<number | null> {
+  if (!dceDocumentsStatus || dceDocumentsStatus === 'pending') return null;
+  const result = await db.query(
+    `SELECT COUNT(*)::int as count FROM tender_documents WHERE opportunity_id = $1 AND status = 'parsed'`,
+    [opportunityId]
+  );
+  return result.rows[0]?.count ?? 0;
+}
+
 // GET /api/opportunities/:id - detail page
 router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
   try {
@@ -369,6 +386,7 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     // count itself is never identity-revealing, so it goes out regardless
     // of unlock state (spec explicitly calls this out as an exception).
     opportunity.buyer_history_count = await computeBuyerHistoryCount(opportunity.buyer_name, opportunity.id);
+    opportunity.documents_analyzed_count = await computeDocumentsAnalyzedCount(opportunity.id, opportunity.dce_documents_status);
 
     if (!unlocked) {
       for (const field of IDENTITY_REDACTED_FIELDS) delete opportunity[field];
