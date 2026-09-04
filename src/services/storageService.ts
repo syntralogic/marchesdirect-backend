@@ -21,6 +21,22 @@ const S3_BUCKET = process.env.AWS_S3_BUCKET;
 const S3_REGION = process.env.AWS_REGION || 'eu-west-3';
 const LOCAL_UPLOAD_DIR = process.env.LOCAL_UPLOAD_DIR || path.join(process.cwd(), 'uploads');
 
+// The frontend (Vercel) and this API (Render) are on different domains.
+// resolveFileUrl/resolveAvatarUrl's local-disk branch used to hand back the
+// bare relative path (e.g. "/uploads/avatars/<id>/avatar.jpg") as-is. The
+// browser then resolved that against the *frontend's* origin
+// (marches-direct.vercel.app/uploads/...), which doesn't exist there - a
+// guaranteed 404, not a flaky one, on every local-disk upload (avatars,
+// company documents alike), independent of the ephemeral-disk problem below.
+// RENDER_EXTERNAL_URL is set automatically by Render on every service;
+// BACKEND_PUBLIC_URL is a manual override for any other host.
+const PUBLIC_BACKEND_URL = (process.env.BACKEND_PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
+
+function toAbsoluteLocalUrl(relativePath: string): string {
+  if (!PUBLIC_BACKEND_URL) return relativePath; // best effort - see boot warning below
+  return `${PUBLIC_BACKEND_URL}${relativePath}`;
+}
+
 const s3 = S3_BUCKET
   ? new AWS.S3({
       region: S3_REGION,
@@ -38,6 +54,13 @@ if (!s3) {
       'files won\u2019t survive a redeploy and won\u2019t be under the client\u2019s own account. ' +
       'Set AWS_S3_BUCKET + AWS credentials before going live.'
   );
+  if (!PUBLIC_BACKEND_URL) {
+    logger.warn(
+      '[storageService] Neither RENDER_EXTERNAL_URL nor BACKEND_PUBLIC_URL is set - ' +
+        'local-disk file/avatar URLs will be returned as relative paths, which will ' +
+        '404 on the frontend\u2019s own domain. Set BACKEND_PUBLIC_URL if this host is not on Render.'
+    );
+  }
   if (!fs.existsSync(LOCAL_UPLOAD_DIR)) {
     fs.mkdirSync(LOCAL_UPLOAD_DIR, { recursive: true });
   }
@@ -203,7 +226,7 @@ export async function resolveFileUrl(storedRef: string): Promise<string> {
       Expires: 300, // 5 minutes
     });
   }
-  return storedRef;
+  return toAbsoluteLocalUrl(storedRef);
 }
 
 /**
@@ -216,5 +239,5 @@ export function resolveAvatarUrl(storedRef: string): string {
   if (s3 && S3_BUCKET && !storedRef.startsWith('/uploads/')) {
     return `https://${S3_BUCKET}.s3.${S3_REGION}.amazonaws.com/${storedRef}`;
   }
-  return storedRef;
+  return toAbsoluteLocalUrl(storedRef);
 }
