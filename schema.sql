@@ -385,16 +385,24 @@ CREATE TABLE company_certifications (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Safe to re-run: covers anyone who already loaded schema.sql once before this
--- column was added to the CREATE TABLE above (which only applies on first create).
-ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS buyer_name VARCHAR(500);
-
 -- Safe to re-run: widens buyer_name/title on a DB that already exists from
 -- before this pass (fresh CREATE TABLE above already uses VARCHAR(1000)).
 -- Client reported long BOAMP buyer names / titles getting cut off - widening
 -- a VARCHAR is metadata-only in Postgres, no rewrite/no data loss.
+-- NOTE: title is referenced by the search_vector STORED generated column
+-- above, and Postgres refuses ALTER COLUMN TYPE on any column a generated
+-- column depends on - even a no-op resize on a fresh DB that's already
+-- VARCHAR(1000) - so migrate.js hard-crashed on every fresh install until
+-- this was wrapped: drop the generated column, do the resize, recreate it
+-- identically to the CREATE TABLE definition above.
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS buyer_name VARCHAR(500);
+ALTER TABLE opportunities DROP COLUMN IF EXISTS search_vector;
 ALTER TABLE opportunities ALTER COLUMN buyer_name TYPE VARCHAR(1000);
 ALTER TABLE opportunities ALTER COLUMN title TYPE VARCHAR(1000);
+ALTER TABLE opportunities ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (
+  to_tsvector('french', COALESCE(title, '') || ' ' || COALESCE(description, ''))
+) STORED;
+CREATE INDEX IF NOT EXISTS opportunities_search ON opportunities USING GIN(search_vector);
 
 -- Safe to re-run: covers anyone who already loaded schema.sql once before this
 -- column was added to the CREATE TABLE above (which only applies on first create).
