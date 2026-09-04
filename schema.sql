@@ -548,6 +548,13 @@ CREATE TABLE bid_responses (
   
   engagement_act_text TEXT,                 -- Pre-filled form
   is_engagement_act_signed BOOLEAN DEFAULT false,
+
+  -- DC1/DC2/DUME (client's dix images, écran 10): same "real template fill
+  -- from company profile" pattern as engagement_act_text above, each
+  -- generated independently on demand.
+  dc1_text TEXT,
+  dc2_text TEXT,
+  dume_text TEXT,
   
   pricing_schedule_json JSONB,              -- Unit price breakdown
   pricing_schedule_source VARCHAR(50),       -- 'profile_catalog' (pre-filled from company_pricing_items,
@@ -571,6 +578,21 @@ CREATE TABLE bid_responses (
 CREATE INDEX bid_responses_tender ON bid_responses(tender_id);
 CREATE INDEX bid_responses_company ON bid_responses(company_id);
 CREATE INDEX bid_responses_status ON bid_responses(status);
+
+-- Client's dix images (écrans 12-15, "chargé d'affaires"): a rendez-vous
+-- tied to a specific bid/candidature, distinct from the generic
+-- pre-identification sales callback on the opportunity page.
+CREATE TABLE bid_appointments (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  bid_id UUID NOT NULL REFERENCES bid_responses(id) ON DELETE CASCADE,
+  company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  mode VARCHAR(20) NOT NULL,
+  slot_label VARCHAR(100),
+  status VARCHAR(20) NOT NULL DEFAULT 'requested',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX bid_appointments_bid ON bid_appointments(bid_id);
 
 -- ============================================================================
 -- 9. ALERTS & NOTIFICATIONS (Milestone 8)

@@ -558,6 +558,35 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // rather than relying on someone running `psql ... UPDATE data_sources`
   // by hand. Harmless no-op once it's already true.
   await pool.query(`UPDATE data_sources SET active = true WHERE code = 'boamp'`);
+
+  // Client's dix images (écran 10, "Documents de candidature"): DC1/DC2/DUME
+  // each get their own "Générer" button and status, same as the existing
+  // engagement_act_text pattern - a real template fill from the company's
+  // own profile data, not an AI-authored document. Text stays NULL until
+  // actually generated once (see POST /tenders/bid/:bidId/generate-forms).
+  await pool.query(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS dc1_text TEXT`);
+  await pool.query(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS dc2_text TEXT`);
+  await pool.query(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS dume_text TEXT`);
+
+  // Client's dix images (écrans 12-15, "chargé d'affaires"): a rendez-vous
+  // tied to a specific bid, distinct from the generic pre-identification
+  // sales callback on the opportunity page (opportunities.access_requests).
+  // Mirrors that table's mode/slot shape so the two stay easy to reason
+  // about together, but scoped to bid_id since this is a post-payment,
+  // per-candidature appointment, not a per-opportunity lead.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS bid_appointments (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      bid_id UUID NOT NULL REFERENCES bid_responses(id) ON DELETE CASCADE,
+      company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+      mode VARCHAR(20) NOT NULL, -- 'slot' or 'callback'
+      slot_label VARCHAR(100),
+      status VARCHAR(20) NOT NULL DEFAULT 'requested', -- 'requested', 'confirmed', 'done', 'cancelled'
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS bid_appointments_bid ON bid_appointments(bid_id)`);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old

@@ -368,6 +368,100 @@ router.post('/bid/:bidId/generate', requireActiveSubscription, async (req: AuthR
   }
 });
 
+// POST /api/tenders/bid/:bidId/generate-forms - client's dix images (écran
+// 10, "Documents de candidature"): DC1/DC2/DUME each get their own
+// "Générer" button. Same honest template-fill pattern as
+// engagement_act_text - real company/user data only, "non renseigné" for
+// anything missing, never invented. Not gated by requireActiveSubscription's
+// sibling check beyond the router-level auth - forms reuse whatever data
+// already exists on the account, no new AI call.
+router.post('/bid/:bidId/generate-forms', requireActiveSubscription, async (req: AuthRequest, res: Response) => {
+  try {
+    const bidResult = await db.query(
+      `SELECT br.*, t.opportunity_id, o.title as opportunity_title, o.buyer_name
+       FROM bid_responses br
+       JOIN tenders t ON br.tender_id = t.id
+       JOIN opportunities o ON t.opportunity_id = o.id
+       WHERE br.id = $1 AND br.company_id = $2`,
+      [req.params.bidId, req.user!.companyId]
+    );
+    if (bidResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Bid response not found' });
+    }
+    const bid = bidResult.rows[0];
+
+    const companyResult = await db.query('SELECT * FROM companies WHERE id = $1', [req.user!.companyId]);
+    const company = companyResult.rows[0];
+    const signatoryName = (req.user!.firstName || req.user!.lastName)
+      ? `${req.user!.firstName || ''} ${req.user!.lastName || ''}`.trim()
+      : 'non renseigne';
+    const na = (v: any) => (v === null || v === undefined || v === '' ? 'non renseigne' : v);
+
+    const dc1Text = `DC1 - LETTRE DE CANDIDATURE\n\nObjet du marche: ${bid.opportunity_title}\nAcheteur: ${na(bid.buyer_name)}\n\nRaison sociale: ${na(company.name)}\nForme juridique: ${na(company.legal_form)}\nSIRET: ${na(company.siret)}\nAdresse: ${na(company.address_street)}, ${na(company.address_postal_code)} ${na(company.address_city)}\n\nLe candidat agit: [ ] en son nom et pour son propre compte  [ ] en tant que mandataire d'un groupement (a preciser)\n\nSignataire: ${signatoryName}\n\nCe document est un brouillon pre-rempli a partir des informations de votre profil. Verifiez chaque champ et completez les cases a cocher avant depot.`;
+
+    const dc2Text = `DC2 - DECLARATION DU CANDIDAT\n\nObjet du marche: ${bid.opportunity_title}\n\nIdentification de l'entreprise:\nRaison sociale: ${na(company.name)}\nSIRET: ${na(company.siret)}\nForme juridique: ${na(company.legal_form)}\nAnnee de creation: ${na(company.founding_year)}\nEffectif: ${na(company.employee_count)}\nSecteur d'activite: ${na(company.industry_sector)}\nChiffre d'affaires annuel: ${na(company.annual_revenue)}\n\nDeclaration sur l'honneur: le candidat certifie ne pas etre dans un cas d'exclusion prevu par le code de la commande publique (a confirmer par vos soins avant signature).\n\nCe document est un brouillon pre-rempli a partir des informations de votre profil. Verifiez chaque champ avant depot.`;
+
+    const dumeText = `DUME - DOCUMENT UNIQUE DE MARCHE EUROPEEN (brouillon)\n\nObjet du marche: ${bid.opportunity_title}\nAcheteur: ${na(bid.buyer_name)}\n\nPARTIE II - INFORMATIONS CONCERNANT L'OPERATEUR ECONOMIQUE\nRaison sociale: ${na(company.name)}\nSIRET: ${na(company.siret)}\nForme juridique: ${na(company.legal_form)}\nAdresse: ${na(company.address_street)}, ${na(company.address_postal_code)} ${na(company.address_city)}\nEmail: ${na(company.email)}\nTelephone: ${na(company.phone)}\n\nPARTIE III - MOTIFS D'EXCLUSION\nA completer et confirmer par le candidat.\n\nPARTIE IV - CRITERES DE SELECTION\nA completer selon les criteres publies dans le DCE (voir l'onglet Analyse de ce dossier).\n\nCe document est un brouillon pre-rempli a partir des informations de votre profil. Il doit etre complete et verifie avant depot - notamment les parties III et IV qui ne peuvent pas etre pre-remplies automatiquement.`;
+
+    await db.query(
+      `UPDATE bid_responses SET dc1_text = $1, dc2_text = $2, dume_text = $3, updated_at = NOW() WHERE id = $4`,
+      [dc1Text, dc2Text, dumeText, req.params.bidId]
+    );
+
+    const result = await db.query('SELECT * FROM bid_responses WHERE id = $1', [req.params.bidId]);
+    res.json({ bid: result.rows[0] });
+  } catch (err: any) {
+    logger.error('DC1/DC2/DUME generation error:', err);
+    res.status(500).json({ error: 'Failed to generate candidature forms' });
+  }
+});
+
+// Bid rendez-vous (client's dix images, écrans 12-15, "chargé d'affaires"):
+// distinct from the generic pre-identification sales callback on the
+// opportunity page - this one is scoped to a specific bid/candidature and
+// is what unlocks the "Rendez-vous confirmé" state gating the final
+// mémoire technique.
+const CALLBACK_SLOTS = ["Aujourd'hui · 17h30", 'Demain · 08h30', 'Demain · 12h00', 'Demain · 16h00'];
+
+router.get('/bid/:bidId/appointments', async (req: AuthRequest, res: Response) => {
+  try {
+    const bidCheck = await db.query('SELECT id FROM bid_responses WHERE id = $1 AND company_id = $2', [req.params.bidId, req.user!.companyId]);
+    if (bidCheck.rows.length === 0) return res.status(404).json({ error: 'Bid response not found' });
+    const result = await db.query(
+      `SELECT * FROM bid_appointments WHERE bid_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [req.params.bidId]
+    );
+    res.json({ appointment: result.rows[0] || null, availableSlots: CALLBACK_SLOTS });
+  } catch (err: any) {
+    logger.error('Bid appointment fetch error:', err);
+    res.status(500).json({ error: 'Failed to load appointment' });
+  }
+});
+
+router.post('/bid/:bidId/appointments', async (req: AuthRequest, res: Response) => {
+  try {
+    const { mode, slotLabel } = req.body;
+    if (mode !== 'slot' && mode !== 'callback') {
+      return res.status(400).json({ error: "mode doit etre 'slot' ou 'callback'" });
+    }
+    if (mode === 'slot' && !CALLBACK_SLOTS.includes(slotLabel)) {
+      return res.status(400).json({ error: 'Creneau invalide' });
+    }
+    const bidCheck = await db.query('SELECT id FROM bid_responses WHERE id = $1 AND company_id = $2', [req.params.bidId, req.user!.companyId]);
+    if (bidCheck.rows.length === 0) return res.status(404).json({ error: 'Bid response not found' });
+
+    const result = await db.query(
+      `INSERT INTO bid_appointments (bid_id, company_id, mode, slot_label, status)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [req.params.bidId, req.user!.companyId, mode, mode === 'slot' ? slotLabel : null, mode === 'slot' ? 'confirmed' : 'requested']
+    );
+    res.json({ appointment: result.rows[0] });
+  } catch (err: any) {
+    logger.error('Bid appointment creation error:', err);
+    res.status(500).json({ error: "Echec de la demande de rendez-vous" });
+  }
+});
+
 // GET /api/tenders/bid/:bidId/package - generate the real downloadable bid package
 // (technical memo, engagement act, pricing schedule, DC1/DC2/DUME summary) as a ZIP.
 // This is the actual acceptance proof for Milestone 9 - text fields alone don't count.

@@ -430,6 +430,10 @@ export type ExtractedOpportunityFacts = {
   // every opportunity (public included) since that block is free-tier in
   // the reference screenshots, not gated behind a subscription.
   selection_criteria: ExtractedCriteriaList;
+  // Real count of distinct requirements found in actually-parsed DCE
+  // documents (see documentIngestionService.ts) - available:false whenever
+  // no documents have been parsed yet, never estimated from the notice text.
+  requirements_detected: { value: number; available: boolean };
 };
 
 export const extractOpportunityFacts = async (
@@ -442,6 +446,22 @@ export const extractOpportunityFacts = async (
   }
 
   const opp = oppResult.rows[0];
+
+  // Real parsed DCE attachments for this opportunity (RC/CCAP/CCTP - see
+  // documentIngestionService.ts), if any were found. The BOAMP notice alone
+  // almost never itemizes discrete requirements ("exigences"); those live in
+  // these documents. When there's nothing parsed yet, requirements_detected
+  // below stays unavailable rather than guessing from the thin notice text.
+  const docsResult = await db.query(
+    `SELECT document_label, extracted_text FROM tender_documents
+     WHERE opportunity_id = $1 AND status = 'parsed' AND extracted_text IS NOT NULL AND extracted_text != ''
+     ORDER BY created_at ASC LIMIT 6`,
+    [opportunityId]
+  );
+  const parsedDocumentsText = docsResult.rows
+    .map((d: any) => `--- ${d.document_label || 'Document'} ---\n${String(d.extracted_text).slice(0, 6000)}`)
+    .join('\n\n')
+    .slice(0, 30000);
 
   const systemPrompt = `You extract structured facts from a single French public procurement notice.
 
@@ -462,6 +482,16 @@ source actually names; if a weight isn't given for a named criterion, set weight
 not_specified to true for that entry. If the source states no criteria at all, return
 {"value": [], "available": false}. Never invent a weighting breakdown that isn't in the source.
 
+${parsedDocumentsText ? `Also count requirements_detected: the real DCE documents below (RC/CCAP/CCTP) are
+provided in full. Count the distinct concrete requirements they actually state - eligibility conditions,
+mandatory certifications/qualifications, technical specifications, administrative pieces to submit,
+deadlines, insurance/guarantee clauses, etc. Count each distinct requirement once. This must be a real
+count of things literally stated in the documents below, never an estimate or a round number picked to
+look complete. Return {"requirements_detected": {"value": <integer count>, "available": true}}.` : `No
+DCE documents have been parsed for this opportunity yet, so you cannot count real requirements from source
+documents. Return {"requirements_detected": {"value": 0, "available": false}} - do not estimate a count
+from the notice text alone.`}
+
 Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
 {
   "buyer_name": {"value": "...", "available": true},
@@ -477,7 +507,8 @@ Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
   "submission_method": {"value": "not available", "available": false},
   "allotment": {"value": "not available", "available": false},
   "technical_visit": {"value": "not available", "available": false},
-  "selection_criteria": {"value": [{"label": "Prix", "weight_percent": 40, "not_specified": false}], "available": true}
+  "selection_criteria": {"value": [{"label": "Prix", "weight_percent": 40, "not_specified": false}], "available": true},
+  "requirements_detected": {"value": 0, "available": false}
 }`;
 
   const userMessage = `SOURCE RECORD (raw, as ingested from the connector):
@@ -486,9 +517,10 @@ Description: ${opp.description || ''}
 Deadline field: ${opp.deadline || ''}
 Estimated value field: ${opp.estimated_value || ''}
 Location: ${opp.location_city || ''}, ${opp.location_region || ''}
-Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 2000) : '{}'}`;
+Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 2000) : '{}'}
+${parsedDocumentsText ? `\nREAL PARSED DCE DOCUMENTS (use these for requirements_detected):\n${parsedDocumentsText}` : ''}`;
 
-  const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 1300);
+  const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 1800);
 
   // Clean and parse response
   const cleanedResponse = cleanJsonResponse(response);
