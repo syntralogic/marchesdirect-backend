@@ -141,8 +141,26 @@ export const ensureSchema = async (): Promise<void> => {
 // early-return path above. Add new lines here (never edit old ones) when
 // schema.sql gains a field that already-provisioned databases won't pick up
 // automatically.
+// BUG (found 2026-09-05): applyIncrementalMigrations() below used to run its
+// ~50 statements as bare sequential `await pool.query(...)` calls with only
+// ONE try/catch around the whole function (see ensureSchema() above). If any
+// single statement threw - a stray syntax issue, a constraint hit on some
+// production DB's particular leftover state, anything - every statement
+// after it silently never ran, with no per-statement error, no crash: just
+// "Incremental migration step failed" and whichever later fixes (including,
+// this time, the DECP/TED `active = true` UPDATE near the bottom) quietly
+// never took effect. step() isolates each statement so one failure can't
+// swallow the rest - this is the fix, not a workaround around it.
+const step = async (sql: string): Promise<void> => {
+  try {
+    await pool.query(sql);
+  } catch (err) {
+    logger.error(`⚠️ Migration step failed (continuing with the rest): ${sql.trim().slice(0, 120).replace(/\s+/g, ' ')}`, err);
+  }
+};
+
 const applyIncrementalMigrations = async (): Promise<void> => {
-  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
 
   // BUG (found live on Render, 2026-09-03): documentExpiry.ts's daily sweep
   // reads/writes expiry_reminder_sent on both company_documents and
@@ -152,15 +170,15 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // actually runs against an already-provisioned production database. Every
   // run failed with "column 'expiry_reminder_sent' does not exist" until
   // these two lines existed.
-  await pool.query(`ALTER TABLE company_documents ADD COLUMN IF NOT EXISTS expiry_reminder_sent BOOLEAN DEFAULT false`);
-  await pool.query(`ALTER TABLE company_certifications ADD COLUMN IF NOT EXISTS expiry_reminder_sent BOOLEAN DEFAULT false`);
+  await step(`ALTER TABLE company_documents ADD COLUMN IF NOT EXISTS expiry_reminder_sent BOOLEAN DEFAULT false`);
+  await step(`ALTER TABLE company_certifications ADD COLUMN IF NOT EXISTS expiry_reminder_sent BOOLEAN DEFAULT false`);
 
   // "lead" gate (client's newest brief): phone + email captured after SIRET
   // recognition, before the full analysis breakdown - global per session,
   // same pattern as companyKnown. See POST /siret/lead + GET /siret/status.
-  await pool.query(`ALTER TABLE siret_lookups ADD COLUMN IF NOT EXISTS phone VARCHAR(20)`);
-  await pool.query(`ALTER TABLE siret_lookups ADD COLUMN IF NOT EXISTS email VARCHAR(255)`);
-  await pool.query(`ALTER TABLE siret_lookups ADD COLUMN IF NOT EXISTS lead_captured_at TIMESTAMP`);
+  await step(`ALTER TABLE siret_lookups ADD COLUMN IF NOT EXISTS phone VARCHAR(20)`);
+  await step(`ALTER TABLE siret_lookups ADD COLUMN IF NOT EXISTS email VARCHAR(255)`);
+  await step(`ALTER TABLE siret_lookups ADD COLUMN IF NOT EXISTS lead_captured_at TIMESTAMP`);
 
   // Stable identifier for the 3 pricing tiers (decouverte/pro/entreprise) so
   // the frontend Tarifs page and the checkout endpoint can agree on which
@@ -175,24 +193,24 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // rows in one UPDATE and hit the UNIQUE constraint - crashed boot on
   // 2026-08-25. If a bucket has more than one candidate now, this picks
   // the cheapest and leaves the rest uncoded rather than failing.
-  await pool.query(`ALTER TABLE subscription_plans ADD COLUMN IF NOT EXISTS plan_code VARCHAR(50) UNIQUE`);
-  await pool.query(
+  await step(`ALTER TABLE subscription_plans ADD COLUMN IF NOT EXISTS plan_code VARCHAR(50) UNIQUE`);
+  await step(
     `UPDATE subscription_plans SET plan_code = 'decouverte'
      WHERE id = (SELECT id FROM subscription_plans WHERE plan_code IS NULL AND price = 0 ORDER BY id ASC LIMIT 1)
        AND NOT EXISTS (SELECT 1 FROM subscription_plans WHERE plan_code = 'decouverte')`
   );
-  await pool.query(
+  await step(
     `UPDATE subscription_plans SET plan_code = 'pro'
      WHERE id = (SELECT id FROM subscription_plans WHERE plan_code IS NULL AND price > 0 AND price < 500 ORDER BY price ASC, id ASC LIMIT 1)
        AND NOT EXISTS (SELECT 1 FROM subscription_plans WHERE plan_code = 'pro')`
   );
-  await pool.query(
+  await step(
     `UPDATE subscription_plans SET plan_code = 'entreprise'
      WHERE id = (SELECT id FROM subscription_plans WHERE plan_code IS NULL AND price >= 500 ORDER BY price ASC, id ASC LIMIT 1)
        AND NOT EXISTS (SELECT 1 FROM subscription_plans WHERE plan_code = 'entreprise')`
   );
 
-  await pool.query(`
+  await step(`
     CREATE TABLE IF NOT EXISTS favorites (
       id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
       company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -201,15 +219,15 @@ const applyIncrementalMigrations = async (): Promise<void> => {
       UNIQUE(company_id, opportunity_id)
     )
   `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS favorites_company ON favorites(company_id)`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS favorites_opportunity ON favorites(opportunity_id)`);
+  await step(`CREATE INDEX IF NOT EXISTS favorites_company ON favorites(company_id)`);
+  await step(`CREATE INDEX IF NOT EXISTS favorites_opportunity ON favorites(opportunity_id)`);
 
   // Backfill trial_ends_at for companies that signed up before this column
   // was actually populated at registration time (see authService.ts) -
   // without this they're stuck showing a "trial" with no end date forever.
   // Approximate their trial window as 14 days from when they actually
   // registered (created_at), matching the real signup logic.
-  await pool.query(
+  await step(
     `UPDATE companies SET trial_ends_at = created_at + INTERVAL '14 days'
      WHERE subscription_status = 'trial' AND trial_ends_at IS NULL`
   );
@@ -222,7 +240,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // already-provisioned database, it stays empty forever since ensureSchema
   // skips re-running schema.sql once `opportunities` exists. This runs on
   // every boot and is a no-op once at least one brand exists.
-  await pool.query(`
+  await step(`
     INSERT INTO brands (code, name, domain)
     SELECT * FROM (VALUES
       ('brand_1', 'BOAMP Pro', 'boamp-pro.fr'),
@@ -233,10 +251,10 @@ const applyIncrementalMigrations = async (): Promise<void> => {
 
   // DCE document ingestion (attachment download/parsing) - see schema.sql's
   // tender_documents comment for why this is keyed on opportunity_id.
-  await pool.query(
+  await step(
     `ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS dce_documents_status VARCHAR(50) DEFAULT 'pending'`
   );
-  await pool.query(`
+  await step(`
     CREATE TABLE IF NOT EXISTS tender_documents (
       id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
       opportunity_id UUID NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
@@ -254,20 +272,20 @@ const applyIncrementalMigrations = async (): Promise<void> => {
       UNIQUE(opportunity_id, source_url)
     )
   `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS tender_documents_opportunity ON tender_documents(opportunity_id)`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS tender_documents_status ON tender_documents(status)`);
+  await step(`CREATE INDEX IF NOT EXISTS tender_documents_opportunity ON tender_documents(opportunity_id)`);
+  await step(`CREATE INDEX IF NOT EXISTS tender_documents_status ON tender_documents(status)`);
   // Existing rows predate this feature entirely (no ingestion has ever run for
   // them) - mark them 'pending' explicitly rather than leaving old rows NULL,
   // so the ingestion job's WHERE clause (see jobs/documentIngestion.ts) picks
   // them up on its next pass instead of silently skipping every pre-existing
   // opportunity forever.
-  await pool.query(
+  await step(
     `UPDATE opportunities SET dce_documents_status = 'pending' WHERE dce_documents_status IS NULL`
   );
-  await pool.query(`ALTER TABLE tenders ADD COLUMN IF NOT EXISTS source_completeness VARCHAR(50)`);
+  await step(`ALTER TABLE tenders ADD COLUMN IF NOT EXISTS source_completeness VARCHAR(50)`);
 
   // Reusable company pricing catalog (Milestone 9.2) - see schema.sql comment.
-  await pool.query(`
+  await step(`
     CREATE TABLE IF NOT EXISTS company_pricing_items (
       id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
       company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -280,29 +298,29 @@ const applyIncrementalMigrations = async (): Promise<void> => {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS company_pricing_items_company ON company_pricing_items(company_id)`);
-  await pool.query(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS pricing_schedule_source VARCHAR(50)`);
+  await step(`CREATE INDEX IF NOT EXISTS company_pricing_items_company ON company_pricing_items(company_id)`);
+  await step(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS pricing_schedule_source VARCHAR(50)`);
 
   // Notification preferences (Profile > Notifications tab) - previously
   // UI-only local state with nowhere to persist to, so every toggle reset on
   // reload. Defaults match what the frontend already showed.
-  await pool.query(`
+  await step(`
     ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_preferences JSONB
     DEFAULT '{"emailAlerts": true, "newOpps": true, "deadlineAlerts": true, "weeklyDigest": false, "mobileNotifs": true}'::jsonb
   `);
-  await pool.query(`
+  await step(`
     UPDATE users SET notification_preferences =
       '{"emailAlerts": true, "newOpps": true, "deadlineAlerts": true, "weeklyDigest": false, "mobileNotifs": true}'::jsonb
     WHERE notification_preferences IS NULL
   `);
-  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(500)`);
+  await step(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(500)`);
 
   // Buyer/requesting-company name (BOAMP's `nomacheteur` etc.) - previously
   // not stored at all, so the opportunity detail page and the sous-traitance
   // "mise en relation" flow had no real organization name to show and fell
   // back to placeholder/mock data. See dataCollectionService.ts for where
   // this gets populated on ingest.
-  await pool.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS buyer_name VARCHAR(500)`);
+  await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS buyer_name VARCHAR(500)`);
 
   // Client reported long BOAMP buyer names / titles getting cut off (source
   // data can exceed 500 chars). Widening a VARCHAR is a metadata-only change
@@ -334,108 +352,118 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // by a mid-migration exception. The `view_missing` check also means this
   // block self-heals the *current* broken production state (view already
   // gone) even once buyer_name/title report as already wide enough.
-  const state = await pool.query(
-    `SELECT
-       COALESCE((SELECT character_maximum_length FROM information_schema.columns
-         WHERE table_name = 'opportunities' AND column_name = 'buyer_name'), 0) < 1000 AS buyer_name_narrow,
-       COALESCE((SELECT character_maximum_length FROM information_schema.columns
-         WHERE table_name = 'opportunities' AND column_name = 'title'), 0) < 1000 AS title_narrow,
-       (to_regclass('opportunity_search_index') IS NULL) AS view_missing`
-  );
-  const { buyer_name_narrow, title_narrow, view_missing } = state.rows[0] || {};
+  try {
+    const state = await pool.query(
+      `SELECT
+         COALESCE((SELECT character_maximum_length FROM information_schema.columns
+           WHERE table_name = 'opportunities' AND column_name = 'buyer_name'), 0) < 1000 AS buyer_name_narrow,
+         COALESCE((SELECT character_maximum_length FROM information_schema.columns
+           WHERE table_name = 'opportunities' AND column_name = 'title'), 0) < 1000 AS title_narrow,
+         (to_regclass('opportunity_search_index') IS NULL) AS view_missing`
+    );
+    const { buyer_name_narrow, title_narrow, view_missing } = state.rows[0] || {};
 
-  if (buyer_name_narrow || title_narrow || view_missing) {
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
+    if (buyer_name_narrow || title_narrow || view_missing) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
 
-      await client.query(`DROP MATERIALIZED VIEW IF EXISTS opportunity_search_index`);
+        await client.query(`DROP MATERIALIZED VIEW IF EXISTS opportunity_search_index`);
 
-      if (title_narrow) {
-        // search_vector (GENERATED ALWAYS AS ... STORED) must be dropped
-        // before title can be widened, then recreated identically after.
-        await client.query(`DROP INDEX IF EXISTS opportunities_search`);
-        await client.query(`ALTER TABLE opportunities DROP COLUMN IF EXISTS search_vector`);
-      }
+        if (title_narrow) {
+          // search_vector (GENERATED ALWAYS AS ... STORED) must be dropped
+          // before title can be widened, then recreated identically after.
+          await client.query(`DROP INDEX IF EXISTS opportunities_search`);
+          await client.query(`ALTER TABLE opportunities DROP COLUMN IF EXISTS search_vector`);
+        }
 
-      if (buyer_name_narrow) {
-        await client.query(`ALTER TABLE opportunities ALTER COLUMN buyer_name TYPE VARCHAR(1000)`);
-      }
+        if (buyer_name_narrow) {
+          await client.query(`ALTER TABLE opportunities ALTER COLUMN buyer_name TYPE VARCHAR(1000)`);
+        }
 
-      if (title_narrow) {
-        await client.query(`ALTER TABLE opportunities ALTER COLUMN title TYPE VARCHAR(1000)`);
+        if (title_narrow) {
+          await client.query(`ALTER TABLE opportunities ALTER COLUMN title TYPE VARCHAR(1000)`);
+          await client.query(`
+            ALTER TABLE opportunities ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (
+              to_tsvector('french', COALESCE(title, '') || ' ' || COALESCE(description, ''))
+            ) STORED
+          `);
+          await client.query(`CREATE INDEX opportunities_search ON opportunities USING GIN(search_vector)`);
+        }
+
+        // opportunity_search_index is a MATERIALIZED VIEW, so it always has to
+        // be dropped+recreated (never ALTERed) for a column change on the
+        // underlying table to show up in it. Recreated here, inside the same
+        // transaction as the drop above, so it's never left missing.
         await client.query(`
-          ALTER TABLE opportunities ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (
-            to_tsvector('french', COALESCE(title, '') || ' ' || COALESCE(description, ''))
-          ) STORED
+          CREATE MATERIALIZED VIEW opportunity_search_index AS
+          SELECT 
+            o.id,
+            o.title,
+            o.description,
+            o.deadline,
+            o.publication_date,
+            o.estimated_value,
+            o.currency,
+            o.location_city,
+            o.location_region,
+            o.location_department,
+            o.estimated_start_date,
+            o.estimated_end_date,
+            o.ai_classification_status,
+            o.ai_summary,
+            o.ai_matched_trades,
+            o.status,
+            o.trade_id,
+            o.buyer_name,
+            ot.code as opportunity_type,
+            t.name as trade_name,
+            c.code as brand_code,
+            ds.code as source_code,
+            (
+              to_tsvector('french', COALESCE(o.title, '')) ||
+              to_tsvector('french', COALESCE(o.description, ''))
+            ) as search_vector
+          FROM opportunities o
+          LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+          LEFT JOIN trades t ON o.trade_id = t.id
+          LEFT JOIN data_sources ds ON o.source_id = ds.id
+          LEFT JOIN brands c ON ot.brand_id = c.id
+          WHERE o.deleted_at IS NULL AND o.status NOT IN ('cancelled', 'expired', 'merged')
         `);
-        await client.query(`CREATE INDEX opportunities_search ON opportunities USING GIN(search_vector)`);
+        await client.query(`CREATE INDEX opportunity_search_index_search ON opportunity_search_index USING GIN(search_vector)`);
+        await client.query(`CREATE INDEX opportunity_search_index_deadline ON opportunity_search_index(deadline)`);
+        await client.query(`CREATE UNIQUE INDEX opportunity_search_index_id ON opportunity_search_index(id)`);
+
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
+      } finally {
+        client.release();
       }
-
-      // opportunity_search_index is a MATERIALIZED VIEW, so it always has to
-      // be dropped+recreated (never ALTERed) for a column change on the
-      // underlying table to show up in it. Recreated here, inside the same
-      // transaction as the drop above, so it's never left missing.
-      await client.query(`
-        CREATE MATERIALIZED VIEW opportunity_search_index AS
-        SELECT 
-          o.id,
-          o.title,
-          o.description,
-          o.deadline,
-          o.publication_date,
-          o.estimated_value,
-          o.currency,
-          o.location_city,
-          o.location_region,
-          o.location_department,
-          o.estimated_start_date,
-          o.estimated_end_date,
-          o.ai_classification_status,
-          o.ai_summary,
-          o.ai_matched_trades,
-          o.status,
-          o.trade_id,
-          o.buyer_name,
-          ot.code as opportunity_type,
-          t.name as trade_name,
-          c.code as brand_code,
-          ds.code as source_code,
-          (
-            to_tsvector('french', COALESCE(o.title, '')) ||
-            to_tsvector('french', COALESCE(o.description, ''))
-          ) as search_vector
-        FROM opportunities o
-        LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
-        LEFT JOIN trades t ON o.trade_id = t.id
-        LEFT JOIN data_sources ds ON o.source_id = ds.id
-        LEFT JOIN brands c ON ot.brand_id = c.id
-        WHERE o.deleted_at IS NULL AND o.status NOT IN ('cancelled', 'expired', 'merged')
-      `);
-      await client.query(`CREATE INDEX opportunity_search_index_search ON opportunity_search_index USING GIN(search_vector)`);
-      await client.query(`CREATE INDEX opportunity_search_index_deadline ON opportunity_search_index(deadline)`);
-      await client.query(`CREATE UNIQUE INDEX opportunity_search_index_id ON opportunity_search_index(id)`);
-
-      await client.query('COMMIT');
-    } catch (err) {
-      await client.query('ROLLBACK').catch(() => {});
-      throw err;
-    } finally {
-      client.release();
     }
+  } catch (err) {
+    // Same step() reasoning as everywhere else in this function: this
+    // transaction used to `throw` straight out of applyIncrementalMigrations()
+    // on failure, which - since nothing here was wrapped per-statement before
+    // this fix - silently skipped every remaining statement after it,
+    // including the data_sources activation UPDATE much further down. Log
+    // and move on instead; the view/column-width fix just retries next boot.
+    logger.error('⚠️ Migration step failed (continuing with the rest): opportunity_search_index rebuild', err);
   }
 
   // Opportunity detail page graduated access (level1 teaser -> level2 after
   // lead capture -> level3 after a chargé d'affaires manually validates) +
   // self-published subcontracting needs ("Je cherche un sous-traitant").
   // See schema.sql's "12b" comment block for the full access-level model.
-  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS opportunity_id UUID REFERENCES opportunities(id) ON DELETE SET NULL`);
-  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_level VARCHAR(20)`);
-  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_at TIMESTAMP`);
-  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_by UUID REFERENCES users(id)`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS crm_leads_opportunity ON crm_leads(opportunity_id)`);
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS opportunity_id UUID REFERENCES opportunities(id) ON DELETE SET NULL`);
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_level VARCHAR(20)`);
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_at TIMESTAMP`);
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_by UUID REFERENCES users(id)`);
+  await step(`CREATE INDEX IF NOT EXISTS crm_leads_opportunity ON crm_leads(opportunity_id)`);
 
-  await pool.query(`
+  await step(`
     CREATE TABLE IF NOT EXISTS subcontract_needs (
       id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
       company_id UUID REFERENCES companies(id) ON DELETE SET NULL,
@@ -461,9 +489,9 @@ const applyIncrementalMigrations = async (): Promise<void> => {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS subcontract_needs_company ON subcontract_needs(company_id)`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS subcontract_needs_status ON subcontract_needs(status)`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS subcontract_needs_expires ON subcontract_needs(expires_at)`);
+  await step(`CREATE INDEX IF NOT EXISTS subcontract_needs_company ON subcontract_needs(company_id)`);
+  await step(`CREATE INDEX IF NOT EXISTS subcontract_needs_status ON subcontract_needs(status)`);
+  await step(`CREATE INDEX IF NOT EXISTS subcontract_needs_expires ON subcontract_needs(expires_at)`);
 
   // Anonymous visitor journey tracking: lets a "chargé d'affaires" calling a
   // lead back see what that person actually searched for and looked at
@@ -471,7 +499,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // ask "what were you looking for again?" from scratch. session_id is a
   // client-generated id persisted in localStorage - matched to a lead once
   // that visitor submits any contact form.
-  await pool.query(`
+  await step(`
     CREATE TABLE IF NOT EXISTS visitor_events (
       id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
       session_id VARCHAR(100) NOT NULL,
@@ -482,10 +510,10 @@ const applyIncrementalMigrations = async (): Promise<void> => {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS visitor_events_session ON visitor_events(session_id)`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS visitor_events_created ON visitor_events(created_at)`);
-  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS session_id VARCHAR(100)`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS crm_leads_session ON crm_leads(session_id)`);
+  await step(`CREATE INDEX IF NOT EXISTS visitor_events_session ON visitor_events(session_id)`);
+  await step(`CREATE INDEX IF NOT EXISTS visitor_events_created ON visitor_events(created_at)`);
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS session_id VARCHAR(100)`);
+  await step(`CREATE INDEX IF NOT EXISTS crm_leads_session ON crm_leads(session_id)`);
 
   // Prototype V17 rule: on a private tender / sous-traitance fiche, only the
   // buyer's identity is ever locked (everything else - amount, tasks,
@@ -494,8 +522,8 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // "call me back, no particular time" and never on merely leaving an
   // email. appointment_mode distinguishes the two; appointment_slot_at is
   // only set for the 'slot' case.
-  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS appointment_mode VARCHAR(20)`);
-  await pool.query(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS appointment_slot_at TIMESTAMP`);
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS appointment_mode VARCHAR(20)`);
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS appointment_slot_at TIMESTAMP`);
 
   // Prototype V17 rule: `companyKnown` is a single global flag per browser
   // session, not per-opportunity - once a visitor identifies their company
@@ -503,7 +531,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // re-entering it, and the compatibility score never displays anywhere
   // until this exists. Session-scoped (not user-scoped) because this
   // happens before an account exists.
-  await pool.query(`
+  await step(`
     CREATE TABLE IF NOT EXISTS siret_lookups (
       id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
       session_id VARCHAR(100) NOT NULL UNIQUE,
@@ -514,7 +542,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS siret_lookups_session ON siret_lookups(session_id)`);
+  await step(`CREATE INDEX IF NOT EXISTS siret_lookups_session ON siret_lookups(session_id)`);
 
   // Client's explicit priority (WhatsApp): integrate the public tender
   // databases as real content before finalizing UX, because testing against
@@ -553,16 +581,16 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // Same no-shell-on-Render reasoning: force these back to active in code
   // rather than relying on someone running `psql ... UPDATE data_sources`
   // by hand. Harmless no-op once already true.
-  await pool.query(`UPDATE data_sources SET active = true WHERE code IN ('boamp', 'decp', 'ted')`);
+  await step(`UPDATE data_sources SET active = true WHERE code IN ('boamp', 'decp', 'ted')`);
 
   // Client's dix images (écran 10, "Documents de candidature"): DC1/DC2/DUME
   // each get their own "Générer" button and status, same as the existing
   // engagement_act_text pattern - a real template fill from the company's
   // own profile data, not an AI-authored document. Text stays NULL until
   // actually generated once (see POST /tenders/bid/:bidId/generate-forms).
-  await pool.query(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS dc1_text TEXT`);
-  await pool.query(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS dc2_text TEXT`);
-  await pool.query(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS dume_text TEXT`);
+  await step(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS dc1_text TEXT`);
+  await step(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS dc2_text TEXT`);
+  await step(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS dume_text TEXT`);
 
   // Client's dix images (écrans 12-15, "chargé d'affaires"): a rendez-vous
   // tied to a specific bid, distinct from the generic pre-identification
@@ -570,7 +598,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // Mirrors that table's mode/slot shape so the two stay easy to reason
   // about together, but scoped to bid_id since this is a post-payment,
   // per-candidature appointment, not a per-opportunity lead.
-  await pool.query(`
+  await step(`
     CREATE TABLE IF NOT EXISTS bid_appointments (
       id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
       bid_id UUID NOT NULL REFERENCES bid_responses(id) ON DELETE CASCADE,
@@ -582,7 +610,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS bid_appointments_bid ON bid_appointments(bid_id)`);
+  await step(`CREATE INDEX IF NOT EXISTS bid_appointments_bid ON bid_appointments(bid_id)`);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old
