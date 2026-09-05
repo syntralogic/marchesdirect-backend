@@ -597,25 +597,23 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // heap limit" - not just a failed connector_logs row, the whole app went
   // down and Render had to restart it. Root cause: parquetReadObjects
   // materializes the entire 234MB file (every row, every requested column)
-  // into memory at once, which doesn't fit Render's instance. Fixed below
-  // by reading the file in row-range batches instead (see
-  // collectDecpData's rewritten loop), but leaving decp inactive until that
-  // fix is verified with the manual /api/admin/data-sources/decp/run
-  // trigger - a bad guess here doesn't just fail one job, it takes the
-  // whole site down for everyone.
+  // into memory at once, which doesn't fit Render's instance. Fixed by
+  // reading the file in row-range batches instead (see
+  // collectDecpData's rewritten loop) - re-activating now per the client's
+  // explicit ask (needs the volume past BOAMP's ~5-6k to get toward
+  // 100k+). Watch the first connector_logs row after this deploy; if the
+  // batched read still OOMs on Render's actual memory limit, the fix is to
+  // shrink BATCH_ROWS in dataCollectionService.ts, not to re-disable this.
   await step(`
     INSERT INTO data_sources (code, name, feed_type, frequency_hours, active)
-    VALUES ('decp', 'DECP Consolidées (data.economie.gouv.fr) - per-buyer files consolidated by decp-processing/decp.info, live since Jan 2024', 'api', 24, false)
+    VALUES ('decp', 'DECP Consolidées (data.economie.gouv.fr) - per-buyer files consolidated by decp-processing/decp.info, live since Jan 2024', 'api', 24, true)
     ON CONFLICT (code) DO NOTHING
   `);
-  // One-time: the earlier (now-reverted) migration already flipped decp to
-  // active=true on this already-provisioned production DB, so the INSERT's
-  // ON CONFLICT DO NOTHING above doesn't touch it. Explicit UPDATE the one
-  // time to actually undo that, matching removeDemoSeedData()'s pattern
-  // above for "code has to fix what an earlier migration already did to a
-  // live database, not just what a fresh one would get".
-  await step(`UPDATE data_sources SET active = false WHERE code = 'decp'`);
-  await step(`UPDATE data_sources SET active = true WHERE code IN ('boamp', 'ted')`);
+  // Explicit UPDATE (not just the INSERT above) for the same reason as
+  // removeDemoSeedData()'s pattern: this already-provisioned production DB
+  // has the row sitting at active=false from the earlier caution above, and
+  // ON CONFLICT DO NOTHING never touches an existing row's columns.
+  await step(`UPDATE data_sources SET active = true WHERE code IN ('boamp', 'ted', 'decp')`);
 
   // Client's dix images (écran 10, "Documents de candidature"): DC1/DC2/DUME
   // each get their own "Générer" button and status, same as the existing
