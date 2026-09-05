@@ -749,10 +749,18 @@ export const collectTedData = async (sourceId: number) => {
         );
 
         const deadlineRaw = firstText(item['deadline-date-lot']) || firstText(item.deadline);
+        // Confirmed live (Render logs): an unparseable deadlineRaw makes
+        // `new Date(deadlineRaw)` an Invalid Date - still truthy, still
+        // gets passed straight to pg, which stringifies it as
+        // "0NaN-NaN-NaNT..." and 22007s on every single insert. Validate
+        // before use instead of trusting new Date(); null otherwise, same
+        // as an actually-missing deadline.
+        const parsedDeadline = deadlineRaw ? new Date(deadlineRaw) : null;
+        const deadline = parsedDeadline && !isNaN(parsedDeadline.getTime()) ? parsedDeadline : null;
         const opportunity = {
           title: firstText(item['notice-title']) || firstText(item.title) || `TED ${tedId}`,
           description: firstText(item['description-proc']) || firstText(item.description) || '',
-          deadline: deadlineRaw ? new Date(deadlineRaw) : null,
+          deadline,
           source_reference: tedId,
           opportunity_type: 'public_procurement',
           location_region: firstText(item['buyer-country']) || 'EU',
