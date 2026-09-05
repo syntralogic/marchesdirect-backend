@@ -16,7 +16,15 @@ const pool = connectionString
   ? new Pool({
       connectionString,
       ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
-      max: 20,
+      // Confirmed live (Render logs, 2026-09-05): "(EMAXCONNSESSION) max
+      // clients reached in session mode - max clients are limited to
+      // pool_size: 15". Supabase's Session pooler (the one this connection
+      // string points at, port 5432) hard-caps total concurrent connections
+      // at 15 - this app's own max:20 alone could exceed that, before even
+      // counting any other client (Supabase's own SQL editor, a second
+      // psql/pgAdmin session, etc.) sharing the same 15-connection budget.
+      // Left real headroom rather than cutting it exactly to 15.
+      max: 8,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
     })
@@ -27,7 +35,7 @@ const pool = connectionString
       port: parseInt(process.env.DB_PORT || '5432'),
       database: process.env.DB_NAME,
       ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
-      max: 20,
+      max: 8,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
     });
