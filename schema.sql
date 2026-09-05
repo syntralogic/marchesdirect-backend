@@ -1226,7 +1226,7 @@ INSERT INTO data_sources (code, name, feed_type, frequency_hours, active) VALUES
 -- earlier OOM-crash history and the batched-read fix that made this safe
 -- to turn back on).
 ('decp', 'DECP Consolidées (data.economie.gouv.fr) - per-buyer files consolidated by decp-processing/decp.info, live since Jan 2024', 'api', 24, true),
-('batiweb', 'Batiweb - actualités/marchés (accès libre)', 'scraper', 24, false)
+('batiweb', 'Batiweb - actualités/marchés (accès libre)', 'scraper', 24, true)
 ON CONFLICT (code) DO NOTHING;
 
 -- Chatbot must work for anonymous visitors too (FAQ knowledge-base brief,

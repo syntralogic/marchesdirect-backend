@@ -615,6 +615,15 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // ON CONFLICT DO NOTHING never touches an existing row's columns.
   await step(`UPDATE data_sources SET active = true WHERE code IN ('boamp', 'ted', 'decp')`);
 
+  // Batiweb's free actualités RSS feed (collectBatiwebData) - small volume
+  // (keyword-filtered news items, not a bulk dataset like BOAMP/DECP), but
+  // it's the one concretely-scrapable free *private*-tender-adjacent source
+  // found so far, and BOAMP/DECP/TED are public-sector only. Zero OOM risk
+  // (a normal RSS parse, nothing like DECP's 234MB file) so there's no
+  // reason to leave this one waiting for a manual verification pass the
+  // way DECP was.
+  await step(`UPDATE data_sources SET active = true WHERE code = 'batiweb'`);
+
   // Client's dix images (écran 10, "Documents de candidature"): DC1/DC2/DUME
   // each get their own "Générer" button and status, same as the existing
   // engagement_act_text pattern - a real template fill from the company's
