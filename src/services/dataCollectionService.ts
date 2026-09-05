@@ -442,6 +442,9 @@ export const collectDecpData = async (sourceId: number) => {
     let updated = 0;
     let errors = 0;
 
+    const publicProcurementType = await db.query(`SELECT id FROM opportunity_types WHERE code = 'public_procurement'`);
+    const opportunityTypeId = publicProcurementType.rows[0]?.id || null;
+
     for (let rowStart = 0; rowStart < numRows && acceptedCount < DECP_MAX_RECORDS_PER_RUN; rowStart += BATCH_ROWS) {
       const rowEnd = Math.min(rowStart + BATCH_ROWS, numRows);
       let batchRows: any[] = [];
@@ -459,28 +462,15 @@ export const collectDecpData = async (sourceId: number) => {
         return (pubDate && pubDate >= since) || (notifDate && notifDate >= since);
       });
 
-      for (const record of recentBatch) {
-        if (acceptedCount >= DECP_MAX_RECORDS_PER_RUN) break;
-        acceptedCount++;
-        const notice = normalizeDecpRecord(record);
-        try {
-          const existing = await db.query(
-            'SELECT id FROM opportunities WHERE source_id = $1 AND source_reference = $2',
-            [sourceId, notice.source_reference]
-          );
+      const toUpsert = recentBatch
+        .slice(0, Math.max(0, DECP_MAX_RECORDS_PER_RUN - acceptedCount))
+        .map(record => normalizeDecpRecord(record));
+      acceptedCount += toUpsert.length;
 
-          if (existing.rows.length > 0) {
-            await updateOpportunity(existing.rows[0].id, notice);
-            updated++;
-          } else {
-            await insertOpportunity(sourceId, notice);
-            inserted++;
-          }
-        } catch (err) {
-          logger.error(`[DECP] Error processing notice ${notice.source_reference}:`, err);
-          errors++;
-        }
-      }
+      const result = await bulkUpsertOpportunities(sourceId, opportunityTypeId, toUpsert);
+      inserted += result.inserted;
+      updated += result.updated;
+      errors += result.errors;
 
       logger.info(`[DECP] Batch rows ${rowStart}-${rowEnd}/${numRows}: ${recentBatch.length} matched the date filter, ${acceptedCount} accepted so far`);
     }
@@ -866,6 +856,75 @@ const updateOpportunity = async (opportunityId: string, data: any) => {
     ]
   );
 };
+
+// Bulk upsert for high-volume connectors (currently just DECP, which can
+// process up to DECP_MAX_RECORDS_PER_RUN=50,000 records in one run). Live
+// Render logs (2026-09-05) showed individual DB round trips - the
+// SELECT-then-insert-or-update pattern insertOpportunity/updateOpportunity
+// use - taking 1-2.2s *each* even with the (source_id, source_reference)
+// unique index already in place (schema.sql line 107/176), which is
+// consistent with per-round-trip network/connection latency rather than a
+// missing-index problem. At that rate, 50,000 records means two to three
+// round trips each = 20+ hours for a single run, while the actual 3.26M-row
+// Parquet file downloads and parses in under 30 seconds - the bottleneck
+// was never the file, only the write loop. This replaces N SELECTs + N
+// INSERT-or-UPDATEs with one INSERT ... ON CONFLICT DO UPDATE per chunk,
+// using the same unique constraint Postgres already enforces, and reads
+// back which rows were genuinely new via the classic `xmax = 0` trick so
+// inserted/updated counts stay accurate for connector_logs.
+const BULK_UPSERT_CHUNK = 500;
+async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: string | null, records: any[]): Promise<{ inserted: number; updated: number; errors: number }> {
+  let inserted = 0, updated = 0, errors = 0;
+  for (let i = 0; i < records.length; i += BULK_UPSERT_CHUNK) {
+    const chunk = records.slice(i, i + BULK_UPSERT_CHUNK);
+    const values: any[] = [];
+    const rowsSql: string[] = [];
+    chunk.forEach((data, idx) => {
+      const base = idx * 13;
+      rowsSql.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13})`);
+      values.push(
+        sourceId,
+        data.source_reference,
+        data.title,
+        data.description,
+        data.publication_date || new Date(),
+        data.deadline,
+        data.estimated_value,
+        data.location_city,
+        data.location_region || null,
+        data.buyer_name || null,
+        opportunityTypeId,
+        JSON.stringify(data.raw || data),
+        'not_analyzed',
+      );
+    });
+
+    try {
+      const result = await db.query(
+        `INSERT INTO opportunities
+          (source_id, source_reference, title, description, publication_date, deadline,
+           estimated_value, location_city, location_region, buyer_name, opportunity_type_id,
+           raw_data, ai_classification_status)
+         VALUES ${rowsSql.join(', ')}
+         ON CONFLICT (source_id, source_reference) DO UPDATE SET
+           description = EXCLUDED.description,
+           deadline = EXCLUDED.deadline,
+           estimated_value = EXCLUDED.estimated_value,
+           raw_data = EXCLUDED.raw_data,
+           updated_at = NOW()
+         RETURNING (xmax = 0) AS was_insert`,
+        values
+      );
+      for (const row of result.rows) {
+        if (row.was_insert) inserted++; else updated++;
+      }
+    } catch (err) {
+      logger.error(`[bulkUpsertOpportunities] Chunk starting at record ${i} failed:`, err);
+      errors += chunk.length;
+    }
+  }
+  return { inserted, updated, errors };
+}
 
 // ============================================================================
 // SCHEDULE COLLECTION JOBS
