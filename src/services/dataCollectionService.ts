@@ -372,6 +372,18 @@ export const collectDecpData = async (sourceId: number) => {
     // asyncBufferFromFile (node.js-only) and parquetReadObjects (index.js)
     // are both available from the root import - no subpath needed at all.
     const { asyncBufferFromFile, parquetReadObjects, parquetMetadataAsync } = await import('hyparquet');
+    // Confirmed live (connector_logs, source_id 10, 2026-09-05, run after the
+    // 'url' column fix below): parquetReadObjects threw on the first ZSTD-
+    // compressed column page - hyparquet is a pure-JS reader and only
+    // implements decompression for a couple of codecs itself, ZSTD isn't
+    // one of them (see its own Compressors type - it expects the caller to
+    // supply one per codec). fzstd is a pure-JS, dependency-free ZSTD
+    // decoder (no native bindings, same Render-safety reasoning as
+    // hyparquet itself). Its decompress(input, outBuf) takes a
+    // pre-allocated output buffer of the exact known size, which is
+    // exactly what hyparquet's Compressors callback signature provides.
+    const fzstd = await import('fzstd');
+    const compressors = { ZSTD: (input: Uint8Array, outputLength: number) => fzstd.decompress(input, new Uint8Array(outputLength)) };
     const file = await asyncBufferFromFile(tmpPath);
 
     // Confirmed live (connector_logs, source_id 10): the requested 'url'
@@ -392,7 +404,7 @@ export const collectDecpData = async (sourceId: number) => {
       logger.warn(`[DECP] Columns not found in Parquet schema, skipping: ${missing.join(', ')} (available: ${[...availableColumns].join(', ')})`);
     }
 
-    const rows = await parquetReadObjects({ file, columns }) as any[];
+    const rows = await parquetReadObjects({ file, columns, compressors }) as any[];
     logger.info(`[DECP] Parsed ${rows.length} total rows from Parquet file`);
 
     // Widened from an earlier 180-day window: client now wants "1 lakh plus"
