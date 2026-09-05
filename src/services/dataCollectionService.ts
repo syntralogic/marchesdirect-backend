@@ -31,6 +31,10 @@ const MAX_RECORDS_PER_RUN = 3000;
 // still means it takes several days to work through a large backlog, which
 // is fine for a one-off catch-up.
 const DECP_MAX_RECORDS_PER_RUN = 50000;
+// TED Search API's own pagination-mode cap is 250/page (15k total via
+// pagination mode without switching to iteration/scroll mode) - see
+// docs.ted.europa.eu/reuse/search-api.html. Well under that ceiling.
+const TED_MAX_RECORDS_PER_RUN = 250;
 
 async function fetchAllPages(endpoint: string, baseParams: Record<string, unknown>, label: string): Promise<any[]> {
   const all: any[] = [];
@@ -353,13 +357,21 @@ export const collectDecpData = async (sourceId: number) => {
     tmpPath = await downloadDecpParquet(fileUrl);
     logger.info(`[DECP] Downloaded to ${tmpPath}, parsing...`);
 
-    // @ts-expect-error - tsconfig's moduleResolution:"node" doesn't resolve
-    // package.json `exports` subpaths for type-checking even though this
-    // resolves fine at runtime (verified: node_modules/hyparquet/types/node.d.ts
-    // exists). Not fixing via tsconfig since this DECP rewrite is paused
-    // (client's ask - see data_sources.active=false note above) and a
-    // moduleResolution change could affect unrelated imports project-wide.
-    const { asyncBufferFromFile, parquetReadObjects } = await import('hyparquet/node');
+    // Confirmed live (connector_logs, source_id 10, 2026-09-05): importing
+    // 'hyparquet/node' throws ERR_PACKAGE_PATH_NOT_EXPORTED at runtime -
+    // hyparquet's package.json only exports "." and "./src/*.js", no "./node"
+    // subpath (checked node_modules/hyparquet/package.json directly). The
+    // types/node.d.ts file existing on disk is what made the earlier
+    // @ts-expect-error comment believe this "resolves fine at runtime" -
+    // a types file existing says nothing about whether the exports map
+    // actually exposes that subpath, and it didn't. The fix is simpler than
+    // a subpath import anyway: plain 'hyparquet' already resolves to
+    // src/node.js under Node's "default" condition (see the package's own
+    // conditional exports - browser gets src/index.js, everything else gets
+    // src/node.js), and src/node.js does `export * from './index.js'`, so
+    // asyncBufferFromFile (node.js-only) and parquetReadObjects (index.js)
+    // are both available from the root import - no subpath needed at all.
+    const { asyncBufferFromFile, parquetReadObjects } = await import('hyparquet');
     const file = await asyncBufferFromFile(tmpPath);
     const rows = await parquetReadObjects({
       file,
@@ -614,37 +626,89 @@ export const collectBatiwebData = async (sourceId: number) => {
 // TED CONNECTOR (EU Tenders)
 // ============================================================================
 
+// Confirmed live on production (connector_logs, source_id 3, repeated 404s
+// and "Unable to parse XML" going back to 2026-08-30): the old
+// TedRss.do?search=&templateId=0 endpoint is dead - TED's site was
+// redesigned (the "new TED", eForms-based) and legacy RSS URLs under that
+// path no longer exist. Verified via web search: TED now publishes RSS only
+// per-category (ted.europa.eu/en/simap/rss-feed/-/rss/search/<category>,
+// e.g. "core" for construction), no single "all notices" feed, which isn't
+// useable for the "broad public-tenders feed" role this connector is meant
+// to fill. TED's real, documented, no-auth-required replacement is the
+// Search API (POST https://api.ted.europa.eu/v3/notices/search, an "expert
+// query" string against ~350 named fields - see
+// docs.ted.europa.eu/ODS/latest/reuse/field-list.html for the full list).
+// Rewritten against that instead of RSS.
+//
+// Caveat carried over honestly, same as DECP above: api.ted.europa.eu isn't
+// reachable from this sandbox either, so this is built from the official
+// docs/field-list (verified field names: publication-date/PD,
+// notice-title/TI, buyer-name/AU, deadline/DD, classification-cpv/PC,
+// description-proc) and cross-checked third-party integrations' example
+// requests, not a live test. Response field access below is deliberately
+// defensive (several fallback paths per field) for exactly that reason -
+// watch the first 'ted' row in connector_logs after deploy.
 export const collectTedData = async (sourceId: number) => {
   const startedAt = new Date();
 
   try {
-    logger.info(`[TED] Starting collection`);
+    logger.info(`[TED] Starting collection (Search API)`);
 
-    const xmlFeed = 'https://ted.europa.eu/TedRss.do?search=&templateId=0';
+    // eForms multilingual/nested fields commonly come back as either a
+    // plain string, an array, or a {langCode: value} object depending on
+    // the field and notice type - normalize whatever shape shows up.
+    const firstText = (v: any): string => {
+      if (v == null) return '';
+      if (typeof v === 'string') return v;
+      if (Array.isArray(v)) return firstText(v[0]);
+      if (typeof v === 'object') return firstText(v.eng ?? v.fra ?? Object.values(v)[0]);
+      return String(v);
+    };
 
-    const feed = await parser.parseURL(xmlFeed);
-    logger.info(`[TED] Fetched ${feed.items?.length || 0} tenders`);
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000); // 30 days
+    const sinceStr = since.toISOString().slice(0, 10).replace(/-/g, '');
+
+    const response = await axios.post(
+      'https://api.ted.europa.eu/v3/notices/search',
+      {
+        query: `publication-date >= ${sinceStr}`,
+        fields: [
+          'publication-number', 'notice-title', 'buyer-name', 'buyer-country',
+          'deadline-date-lot', 'publication-date', 'description-proc', 'classification-cpv',
+        ],
+        page: 1,
+        limit: TED_MAX_RECORDS_PER_RUN,
+        scope: 'ALL',
+      },
+      { timeout: 60000, headers: { 'Content-Type': 'application/json' } }
+    );
+
+    const results: any[] = response.data?.notices || response.data?.results || response.data?.items || [];
+    logger.info(`[TED] Fetched ${results.length} notices`);
 
     let inserted = 0;
     let updated = 0;
     let errors = 0;
 
-    for (const item of feed.items || []) {
+    for (const item of results) {
       try {
-        const tedId = item.guid || item.link;
+        const tedId = firstText(item['publication-number']) || firstText(item.publicationNumber) || firstText(item.id);
+        if (!tedId) { errors++; continue; }
 
         const existing = await db.query(
           'SELECT id FROM opportunities WHERE source_id = $1 AND source_reference = $2',
           [sourceId, tedId]
         );
 
+        const deadlineRaw = firstText(item['deadline-date-lot']) || firstText(item.deadline);
         const opportunity = {
-          title: item.title || '',
-          description: item.content || item.summary || '',
-          deadline: item.isoDate ? new Date(item.isoDate) : null,
+          title: firstText(item['notice-title']) || firstText(item.title) || `TED ${tedId}`,
+          description: firstText(item['description-proc']) || firstText(item.description) || '',
+          deadline: deadlineRaw ? new Date(deadlineRaw) : null,
           source_reference: tedId,
           opportunity_type: 'public_procurement',
-          location_region: 'EU',
+          location_region: firstText(item['buyer-country']) || 'EU',
+          buyer_name: firstText(item['buyer-name']) || firstText(item.buyerName) || null,
         };
 
         if (existing.rows.length > 0) {
@@ -667,7 +731,7 @@ export const collectTedData = async (sourceId: number) => {
       `INSERT INTO connector_logs 
         (source_id, status, records_fetched, records_processed, records_failed, started_at, completed_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [sourceId, 'success', feed.items?.length || 0, inserted + updated, errors, startedAt, new Date()]
+      [sourceId, 'success', results.length, inserted + updated, errors, startedAt, new Date()]
     );
 
     await db.query(
@@ -690,6 +754,7 @@ export const collectTedData = async (sourceId: number) => {
 
     throw err;
   }
+
 };
 
 // ============================================================================
