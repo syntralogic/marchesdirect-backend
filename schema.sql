@@ -1225,7 +1225,7 @@ INSERT INTO data_sources (code, name, feed_type, frequency_hours, active) VALUES
 -- (decp-2022-marches-valides) is frozen/deprecated since Nov 2023 - see the
 -- detailed note in database.ts's applyIncrementalMigrations. Re-activate
 -- once collectDecpData() targets the live consolidated file instead.
-('decp', 'DECP Consolidées (data.economie.gouv.fr) - per-buyer files consolidated by decp-processing/decp.info, live since Jan 2024', 'api', 24, true),
+('decp', 'DECP Consolidées (data.economie.gouv.fr) - per-buyer files consolidated by decp-processing/decp.info, live since Jan 2024', 'api', 24, false),
 ('batiweb', 'Batiweb - actualités/marchés (accès libre)', 'scraper', 24, false)
 ON CONFLICT (code) DO NOTHING;
 

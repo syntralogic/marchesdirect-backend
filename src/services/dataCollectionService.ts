@@ -371,7 +371,7 @@ export const collectDecpData = async (sourceId: number) => {
     // src/node.js), and src/node.js does `export * from './index.js'`, so
     // asyncBufferFromFile (node.js-only) and parquetReadObjects (index.js)
     // are both available from the root import - no subpath needed at all.
-    const { asyncBufferFromFile, parquetReadObjects, parquetMetadataAsync } = await import('hyparquet');
+    const { asyncBufferFromFile, parquetRead, parquetMetadataAsync } = await import('hyparquet');
     // Confirmed live (connector_logs, source_id 10, 2026-09-05, run after the
     // 'url' column fix below): parquetReadObjects threw on the first ZSTD-
     // compressed column page - hyparquet is a pure-JS reader and only
@@ -404,8 +404,24 @@ export const collectDecpData = async (sourceId: number) => {
       logger.warn(`[DECP] Columns not found in Parquet schema, skipping: ${missing.join(', ')} (available: ${[...availableColumns].join(', ')})`);
     }
 
-    const rows = await parquetReadObjects({ file, columns, compressors }) as any[];
-    logger.info(`[DECP] Parsed ${rows.length} total rows from Parquet file`);
+    // Confirmed live, 2026-09-05: parquetReadObjects({file, columns}) - no
+    // row range - decodes and holds every row of the *entire* file in
+    // memory at once (all requested columns, fully decompressed). For this
+    // 234MB file that's enough to OOM-crash the whole Render process, not
+    // just fail this one job ("FATAL ERROR: Ineffective mark-compacts near
+    // heap limit"), which then restarts, re-runs collection on boot, and
+    // crashes again - the same failure repeating every few minutes in
+    // connector_logs was this loop, not four separate bugs. Fixed by
+    // reading in bounded row-range batches via parquetRead's rowStart/
+    // rowEnd + onComplete (see its own read.js: onComplete fires
+    // synchronously before the awaited call resolves, so this loop is safe
+    // despite the callback shape) - only one batch's worth of decompressed
+    // rows is ever alive at a time, and each batch is inserted into
+    // Postgres and dropped before the next is read, so peak memory no
+    // longer scales with file size.
+    const numRows = Number(metadata.num_rows);
+    const BATCH_ROWS = 20000;
+    logger.info(`[DECP] Parquet file has ${numRows} total rows, processing in batches of ${BATCH_ROWS}`);
 
     // Widened from an earlier 180-day window: client now wants "1 lakh plus"
     // (100,000+) total opportunities, and DECP is the intended lever for
@@ -419,39 +435,57 @@ export const collectDecpData = async (sourceId: number) => {
     // so the same marché isn't inserted multiple times for each
     // modification.
     const since = new Date(Date.now() - 3 * 365 * 24 * 60 * 60 * 1000);
-    const recent = rows.filter(r => {
-      if (r.donneesActuelles === false) return false;
-      const pubDate = r.datePublicationDonnees ? new Date(r.datePublicationDonnees) : null;
-      const notifDate = r.dateNotification ? new Date(r.dateNotification) : null;
-      return (pubDate && pubDate >= since) || (notifDate && notifDate >= since);
-    }).slice(0, DECP_MAX_RECORDS_PER_RUN);
-    logger.info(`[DECP] ${recent.length} rows within the last 180 days after filtering`);
 
-    const notices = recent.map(normalizeDecpRecord);
-
+    let totalParsed = 0;
+    let acceptedCount = 0;
     let inserted = 0;
     let updated = 0;
     let errors = 0;
 
-    for (const notice of notices) {
-      try {
-        const existing = await db.query(
-          'SELECT id FROM opportunities WHERE source_id = $1 AND source_reference = $2',
-          [sourceId, notice.source_reference]
-        );
+    for (let rowStart = 0; rowStart < numRows && acceptedCount < DECP_MAX_RECORDS_PER_RUN; rowStart += BATCH_ROWS) {
+      const rowEnd = Math.min(rowStart + BATCH_ROWS, numRows);
+      let batchRows: any[] = [];
+      await parquetRead({
+        file, metadata, columns, compressors, rowStart, rowEnd,
+        rowFormat: 'object',
+        onComplete: (rows: any[]) => { batchRows = rows; },
+      });
+      totalParsed += batchRows.length;
 
-        if (existing.rows.length > 0) {
-          await updateOpportunity(existing.rows[0].id, notice);
-          updated++;
-        } else {
-          await insertOpportunity(sourceId, notice);
-          inserted++;
+      const recentBatch = batchRows.filter(r => {
+        if (r.donneesActuelles === false) return false;
+        const pubDate = r.datePublicationDonnees ? new Date(r.datePublicationDonnees) : null;
+        const notifDate = r.dateNotification ? new Date(r.dateNotification) : null;
+        return (pubDate && pubDate >= since) || (notifDate && notifDate >= since);
+      });
+
+      for (const record of recentBatch) {
+        if (acceptedCount >= DECP_MAX_RECORDS_PER_RUN) break;
+        acceptedCount++;
+        const notice = normalizeDecpRecord(record);
+        try {
+          const existing = await db.query(
+            'SELECT id FROM opportunities WHERE source_id = $1 AND source_reference = $2',
+            [sourceId, notice.source_reference]
+          );
+
+          if (existing.rows.length > 0) {
+            await updateOpportunity(existing.rows[0].id, notice);
+            updated++;
+          } else {
+            await insertOpportunity(sourceId, notice);
+            inserted++;
+          }
+        } catch (err) {
+          logger.error(`[DECP] Error processing notice ${notice.source_reference}:`, err);
+          errors++;
         }
-      } catch (err) {
-        logger.error(`[DECP] Error processing notice ${notice.source_reference}:`, err);
-        errors++;
       }
+
+      logger.info(`[DECP] Batch rows ${rowStart}-${rowEnd}/${numRows}: ${recentBatch.length} matched the date filter, ${acceptedCount} accepted so far`);
     }
+
+    logger.info(`[DECP] Parsed ${totalParsed} rows total, ${acceptedCount} within the last 3 years (accepted, capped at ${DECP_MAX_RECORDS_PER_RUN} per run)`);
 
     // This is the exact case the client called out for training the
     // dedup engine on: the same marché appearing on both BOAMP and the
@@ -466,7 +500,7 @@ export const collectDecpData = async (sourceId: number) => {
       `INSERT INTO connector_logs 
         (source_id, status, records_fetched, records_processed, records_failed, started_at, completed_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [sourceId, 'success', notices.length, inserted + updated, errors, startedAt, new Date()]
+      [sourceId, 'success', acceptedCount, inserted + updated, errors, startedAt, new Date()]
     );
 
     await db.query(
