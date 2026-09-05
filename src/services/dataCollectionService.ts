@@ -20,6 +20,17 @@ import { v4 as uuid } from 'uuid';
 // working through the backlog day over day.
 const PAGE_SIZE = 100;
 const MAX_RECORDS_PER_RUN = 3000;
+// DECP's source is a single pre-downloaded Parquet file already fully
+// parsed into memory before this cap is applied (see collectDecpData) - so
+// raising it doesn't add extra download/parse cost, only how many of the
+// already-parsed rows get inserted per run. Client's ask (WhatsApp, "1 lakh
+// plus" opportunities): BOAMP alone realistically tops out in the low
+// thousands at a time, so DECP - which aggregates BOAMP + every profil
+// acheteur + PLACE - is the actual lever for that volume. Set well above
+// MAX_RECORDS_PER_RUN; 24h between runs (data_sources.frequency_hours)
+// still means it takes several days to work through a large backlog, which
+// is fine for a one-off catch-up.
+const DECP_MAX_RECORDS_PER_RUN = 50000;
 
 async function fetchAllPages(endpoint: string, baseParams: Record<string, unknown>, label: string): Promise<any[]> {
   const all: any[] = [];
@@ -360,19 +371,24 @@ export const collectDecpData = async (sourceId: number) => {
     }) as any[];
     logger.info(`[DECP] Parsed ${rows.length} total rows from Parquet file`);
 
-    // Same 180-day backfill window as BOAMP's original intent (client's
-    // "several thousand, even tens of thousands" ask), but DECP is
-    // post-award data with no submission deadline, so there's no BOAMP-style
-    // "expired filter conflict" to worry about here - a wide recency window
-    // is safe. donneesActuelles filters out superseded amendment rows so
-    // the same marché isn't inserted multiple times for each modification.
-    const since = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000);
+    // Widened from an earlier 180-day window: client now wants "1 lakh plus"
+    // (100,000+) total opportunities, and DECP is the intended lever for
+    // that (see DECP_MAX_RECORDS_PER_RUN above) - a 6-month window would
+    // starve the very first runs of most of the backlog. DECP's per-buyer
+    // consolidation only goes back to Jan 2024 (see file header note), so 3
+    // years comfortably covers the entire dataset without needing an
+    // unbounded/undated filter. DECP is post-award data with no submission
+    // deadline, so unlike BOAMP there's no "expired listing" downside to a
+    // wide window. donneesActuelles filters out superseded amendment rows
+    // so the same marché isn't inserted multiple times for each
+    // modification.
+    const since = new Date(Date.now() - 3 * 365 * 24 * 60 * 60 * 1000);
     const recent = rows.filter(r => {
       if (r.donneesActuelles === false) return false;
       const pubDate = r.datePublicationDonnees ? new Date(r.datePublicationDonnees) : null;
       const notifDate = r.dateNotification ? new Date(r.dateNotification) : null;
       return (pubDate && pubDate >= since) || (notifDate && notifDate >= since);
-    }).slice(0, MAX_RECORDS_PER_RUN);
+    }).slice(0, DECP_MAX_RECORDS_PER_RUN);
     logger.info(`[DECP] ${recent.length} rows within the last 180 days after filtering`);
 
     const notices = recent.map(normalizeDecpRecord);

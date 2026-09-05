@@ -516,32 +516,28 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS siret_lookups_session ON siret_lookups(session_id)`);
 
-  // Client's explicit priority (WhatsApp): integrate the two public tender
-  // databases (BOAMP + DECP) as real content before finalizing UX, because
-  // testing against ~50 rows doesn't reflect real usage. BOAMP is already
-  // active by default in schema.sql's seed, but 'decp' was only ever seeded
-  // with active=false (schema.sql line ~1181) - meaning even though
-  // collectDecpData() is fully implemented and wired into the scheduler's
-  // dispatch switch, it could never actually run. Flipping both here
-  // (idempotent - safe to run on every boot) rather than only in schema.sql
+  // Client's explicit priority (WhatsApp): integrate the public tender
+  // databases as real content before finalizing UX, because testing against
+  // ~50 rows doesn't reflect real usage - and later (WhatsApp, "1 lakh
+  // plus"), that the total needs to reach 100,000+ opportunities. BOAMP
+  // alone realistically tops out in the low thousands at a time; DECP
+  // (aggregates BOAMP + every profil acheteur + PLACE, consolidated as a
+  // single file) is the intended lever for six-figure volume - see
+  // dataCollectionService.ts's DECP connector header for the full sourcing
+  // rationale and DECP_MAX_RECORDS_PER_RUN for why its cap is much higher
+  // than BOAMP's. TED (EU-wide, free RSS feed, no API key needed) adds a
+  // smaller but free additional stream. Forcing all three `active` here
+  // (idempotent - safe to run on every boot) rather than only in schema.sql,
   // since that file doesn't re-run against an already-provisioned database.
-  // DECP reactivation from the earlier commit is being reverted here: further
-  // research (web search, since this sandbox can't reach data.economie.gouv.fr
-  // directly) found that decp-2022-marches-valides is a frozen/deprecated
-  // dataset - "[DEPRECIE]... ne sera plus maintenu à compter du 16 novembre
-  // 2023". Since Jan 2024, DECP publication moved to per-buyer files on
-  // data.gouv.fr, consolidated into a single ~234MB Parquet/CSV file updated
-  // daily (decp.info / github.com/ColinMaudry/decp-processing) - there's no
-  // small, query-able records API for it anymore, so collectDecpData() as
-  // currently written can only ever return near-nothing from a filter like
-  // "published in the last N days" against data that stopped growing in
-  // 2023. Rather than leave it silently running and producing ~0 useful
-  // rows, deactivating again until a real fix (streaming-download +
-  // parse the live consolidated file, likely as a one-off backfill script
-  // rather than this connector's incremental-run shape) is built.
-  // BOAMP alone is unaffected and does the real work for "several thousand
-  // public-market listings" now that its deadline-filter bug (see the
-  // dataCollectionService.ts commit right before this one) is fixed.
+  //
+  // Caveat carried over honestly: this sandbox cannot reach data.gouv.fr to
+  // live-test DECP's 234MB Parquet download/parse against Render's actual
+  // memory/time limits before this deploys - watch the first `decp` row in
+  // connector_logs after this ships. PLACE stays inactive: its connector
+  // needs a real PLACE_API_KEY from the client (a government platform
+  // credential, not something that can be fabricated here).
+  // BOAMP's deadline-filter bug (see the dataCollectionService.ts commit
+  // right before this one) is already fixed.
 
   // Reverted (Sep 2026): the two lines that used to be here auto-disabled
   // boamp and auto-seeded ~75 demo opportunities on every single boot. That
@@ -554,10 +550,10 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // production databases.
   await removeDemoSeedData();
 
-  // Same no-shell-on-Render reasoning: force boamp back to active in code
+  // Same no-shell-on-Render reasoning: force these back to active in code
   // rather than relying on someone running `psql ... UPDATE data_sources`
-  // by hand. Harmless no-op once it's already true.
-  await pool.query(`UPDATE data_sources SET active = true WHERE code = 'boamp'`);
+  // by hand. Harmless no-op once already true.
+  await pool.query(`UPDATE data_sources SET active = true WHERE code IN ('boamp', 'decp', 'ted')`);
 
   // Client's dix images (écran 10, "Documents de candidature"): DC1/DC2/DUME
   // each get their own "Générer" button and status, same as the existing

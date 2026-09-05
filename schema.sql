@@ -1159,7 +1159,7 @@ INSERT INTO subscription_plans (plan_code, name, price, billing_period, features
 INSERT INTO data_sources (code, name, feed_type, frequency_hours, active) VALUES
 ('boamp', 'BOAMP Official Feed', 'api', 6, true),
 ('place', 'PLACE Government Platform', 'api', 6, false),
-('ted', 'TED EU Tenders', 'api', 12, false);
+('ted', 'TED EU Tenders', 'api', 12, true);
 
 -- BTP/construction CPV codes (real EU Common Procurement Vocabulary, division 45xxxxxx)
 -- and the trades that map to them. Without this, classification and matching have
@@ -1225,7 +1225,7 @@ INSERT INTO data_sources (code, name, feed_type, frequency_hours, active) VALUES
 -- (decp-2022-marches-valides) is frozen/deprecated since Nov 2023 - see the
 -- detailed note in database.ts's applyIncrementalMigrations. Re-activate
 -- once collectDecpData() targets the live consolidated file instead.
-('decp', 'DECP Consolidées (data.economie.gouv.fr) - DEPRECATED SOURCE, see note', 'api', 24, false),
+('decp', 'DECP Consolidées (data.economie.gouv.fr) - per-buyer files consolidated by decp-processing/decp.info, live since Jan 2024', 'api', 24, true),
 ('batiweb', 'Batiweb - actualités/marchés (accès libre)', 'scraper', 24, false)
 ON CONFLICT (code) DO NOTHING;
 
