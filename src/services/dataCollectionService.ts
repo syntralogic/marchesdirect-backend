@@ -371,16 +371,28 @@ export const collectDecpData = async (sourceId: number) => {
     // src/node.js), and src/node.js does `export * from './index.js'`, so
     // asyncBufferFromFile (node.js-only) and parquetReadObjects (index.js)
     // are both available from the root import - no subpath needed at all.
-    const { asyncBufferFromFile, parquetReadObjects } = await import('hyparquet');
+    const { asyncBufferFromFile, parquetReadObjects, parquetMetadataAsync } = await import('hyparquet');
     const file = await asyncBufferFromFile(tmpPath);
-    const rows = await parquetReadObjects({
-      file,
-      columns: [
-        'uid', 'id', 'acheteur_id', 'objet', 'montant', 'dureeMois',
-        'dateNotification', 'datePublicationDonnees', 'codeCPV', 'nature',
-        'procedure', 'formePrix', 'url', 'donneesActuelles',
-      ],
-    }) as any[];
+
+    // Confirmed live (connector_logs, source_id 10): the requested 'url'
+    // column doesn't exist in the real file - one guessed column name out
+    // of fourteen was wrong. Rather than repeat this fix-one-guess-at-a-time
+    // cycle, read the file's actual schema first and only request columns
+    // that are actually present, logging which guessed names didn't pan out.
+    const metadata = await parquetMetadataAsync(file);
+    const availableColumns = new Set((metadata.schema || []).map((e: any) => e.name));
+    const wantedColumns = [
+      'uid', 'id', 'acheteur_id', 'objet', 'montant', 'dureeMois',
+      'dateNotification', 'datePublicationDonnees', 'codeCPV', 'nature',
+      'procedure', 'formePrix', 'donneesActuelles',
+    ];
+    const columns = wantedColumns.filter(c => availableColumns.has(c));
+    const missing = wantedColumns.filter(c => !availableColumns.has(c));
+    if (missing.length > 0) {
+      logger.warn(`[DECP] Columns not found in Parquet schema, skipping: ${missing.join(', ')} (available: ${[...availableColumns].join(', ')})`);
+    }
+
+    const rows = await parquetReadObjects({ file, columns }) as any[];
     logger.info(`[DECP] Parsed ${rows.length} total rows from Parquet file`);
 
     // Widened from an earlier 180-day window: client now wants "1 lakh plus"
