@@ -1228,3 +1228,18 @@ INSERT INTO data_sources (code, name, feed_type, frequency_hours, active) VALUES
 ('decp', 'DECP Consolidées (data.economie.gouv.fr) - DEPRECATED SOURCE, see note', 'api', 24, false),
 ('batiweb', 'Batiweb - actualités/marchés (accès libre)', 'scraper', 24, false)
 ON CONFLICT (code) DO NOTHING;
+
+-- Chatbot must work for anonymous visitors too (FAQ knowledge-base brief,
+-- "Marchés publics : accès libre... y compris pour un visiteur anonyme" -
+-- the chatbot is the primary way an anonymous visitor searches public
+-- markets). company_id was NOT NULL, which made every /api/chatbot/*
+-- route require a logged-in company - widened to nullable + a session_id
+-- fallback (same getSessionId() pattern already used by siret.ts/
+-- opportunities.ts for anonymous SIRET lookups and lead capture), and a
+-- lead_captured_at marker so the chatbot can tell whether it still needs to
+-- collect company/métier/phone/email/consent before creating a CRM
+-- prospect, per the FAQ's "contrat de données minimal".
+ALTER TABLE chatbot_conversations ALTER COLUMN company_id DROP NOT NULL;
+ALTER TABLE chatbot_conversations ADD COLUMN IF NOT EXISTS session_id VARCHAR(100);
+ALTER TABLE chatbot_conversations ADD COLUMN IF NOT EXISTS lead_captured_at TIMESTAMP;
+CREATE INDEX IF NOT EXISTS chatbot_conversations_session ON chatbot_conversations(session_id) WHERE session_id IS NOT NULL;

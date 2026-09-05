@@ -141,13 +141,39 @@ export const checkCompanyAccess = async (
 };
 
 // Optional authentication (for public routes that can be enhanced if logged in)
-export const optionalAuth = (req: AuthRequest, res: Response, next: NextFunction) => {
+export const optionalAuth = async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     const token = req.headers.authorization?.split(' ')[1];
-    
+
     if (token) {
       const decoded = jwt.verify(token, JWT_SECRET) as any;
-      req.user = decoded;
+      // Previously just did `req.user = decoded`, which is only the JWT
+      // payload ({userId, email}) - any route reading req.user.companyId
+      // (or firstName/role/etc.) under optionalAuth got undefined for a
+      // logged-in user, silently falling through to anonymous-visitor
+      // behavior. Mirrors authenticate()'s DB enrichment, just without
+      // rejecting the request on failure - a bad/expired token or deleted
+      // user simply falls back to anonymous, same as no token at all.
+      const result = await db.query(
+        'SELECT u.*, c.id as company_id FROM users u LEFT JOIN companies c ON u.company_id = c.id WHERE u.id = $1 AND u.deleted_at IS NULL',
+        [decoded.userId]
+      );
+      if (result.rows.length > 0) {
+        const user = result.rows[0];
+        req.user = {
+          id: user.id,
+          email: user.email,
+          companyId: user.company_id,
+          role: user.role,
+          firstName: user.first_name,
+          lastName: user.last_name,
+          mfaEnabled: !!user.mfa_enabled,
+          notificationPreferences: user.notification_preferences || DEFAULT_NOTIFICATION_PREFERENCES,
+          avatarUrl: user.avatar_url ? resolveAvatarUrl(user.avatar_url) : null,
+        };
+        const companyResult = await db.query('SELECT * FROM companies WHERE id = $1 AND deleted_at IS NULL', [user.company_id]);
+        if (companyResult.rows.length > 0) req.company = companyResult.rows[0];
+      }
     }
   } catch (err) {
     // Silent fail for optional auth
