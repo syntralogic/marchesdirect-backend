@@ -591,11 +591,30 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // activates it either way, for both this and any other already-provisioned
   // database missing the same row. 'ted' already existed here (confirmed
   // active=true), so the plain UPDATE for it was fine - kept as-is below.
+  // REVERTED (confirmed live, 2026-09-05 10:35): the force-active line below
+  // caused collectDecpData to run on every boot, and it OOM-crashed the
+  // entire Render process - "FATAL ERROR: Ineffective mark-compacts near
+  // heap limit" - not just a failed connector_logs row, the whole app went
+  // down and Render had to restart it. Root cause: parquetReadObjects
+  // materializes the entire 234MB file (every row, every requested column)
+  // into memory at once, which doesn't fit Render's instance. Fixed below
+  // by reading the file in row-range batches instead (see
+  // collectDecpData's rewritten loop), but leaving decp inactive until that
+  // fix is verified with the manual /api/admin/data-sources/decp/run
+  // trigger - a bad guess here doesn't just fail one job, it takes the
+  // whole site down for everyone.
   await step(`
     INSERT INTO data_sources (code, name, feed_type, frequency_hours, active)
-    VALUES ('decp', 'DECP Consolidées (data.economie.gouv.fr) - per-buyer files consolidated by decp-processing/decp.info, live since Jan 2024', 'api', 24, true)
-    ON CONFLICT (code) DO UPDATE SET active = true
+    VALUES ('decp', 'DECP Consolidées (data.economie.gouv.fr) - per-buyer files consolidated by decp-processing/decp.info, live since Jan 2024', 'api', 24, false)
+    ON CONFLICT (code) DO NOTHING
   `);
+  // One-time: the earlier (now-reverted) migration already flipped decp to
+  // active=true on this already-provisioned production DB, so the INSERT's
+  // ON CONFLICT DO NOTHING above doesn't touch it. Explicit UPDATE the one
+  // time to actually undo that, matching removeDemoSeedData()'s pattern
+  // above for "code has to fix what an earlier migration already did to a
+  // live database, not just what a fresh one would get".
+  await step(`UPDATE data_sources SET active = false WHERE code = 'decp'`);
   await step(`UPDATE data_sources SET active = true WHERE code IN ('boamp', 'ted')`);
 
   // Client's dix images (écran 10, "Documents de candidature"): DC1/DC2/DUME
