@@ -1,6 +1,8 @@
 import axios from 'axios';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { syncLeadToCrm } from './crmSyncService';
+import { formatFaqForPrompt } from '../data/chatbotFaq';
 
 // ============================================================================
 // CLAUDE API CLIENT
@@ -838,13 +840,17 @@ Location: ${opp.location_city}, ${opp.location_region}`;
 export const chatbot = async (
   conversationId: string,
   userMessage: string,
-  companyId: string
+  companyId: string | null,
+  sessionId?: string | null
 ): Promise<string> => {
   try {
-    const convResult = await db.query(
-      'SELECT * FROM chatbot_conversations WHERE id = $1 AND company_id = $2',
-      [conversationId, companyId]
-    );
+    // Anonymous-visitor support (FAQ brief: "Marchés publics : accès libre...
+    // y compris pour un visiteur anonyme" - the chatbot is the primary
+    // anonymous search entry point) - a conversation belongs to either a
+    // logged-in company or a session_id, never neither.
+    const convResult = companyId
+      ? await db.query('SELECT * FROM chatbot_conversations WHERE id = $1 AND company_id = $2', [conversationId, companyId])
+      : await db.query('SELECT * FROM chatbot_conversations WHERE id = $1 AND session_id = $2', [conversationId, sessionId]);
 
     if (convResult.rows.length === 0) {
       throw new Error('Conversation not found');
@@ -856,7 +862,7 @@ export const chatbot = async (
       `SELECT role, content FROM chatbot_messages 
        WHERE conversation_id = $1
        ORDER BY created_at DESC
-       LIMIT 10`,
+       LIMIT 20`,
       [conversationId]
     );
 
@@ -868,12 +874,12 @@ export const chatbot = async (
     let context = '';
     if (conversation.context?.opportunity_id) {
       const oppResult = await db.query(
-        'SELECT id, title, description, deadline FROM opportunities WHERE id = $1',
+        'SELECT id, title, description, deadline, opportunity_type FROM opportunities WHERE id = $1',
         [conversation.context.opportunity_id]
       );
       if (oppResult.rows.length > 0) {
         const opp = oppResult.rows[0];
-        context = `\n\n<untrusted_reference_data source="opportunity:${opp.id}">\nTitle: ${opp.title}\nDescription: ${opp.description}\nDeadline: ${opp.deadline}\n</untrusted_reference_data>`;
+        context = `\n\n<untrusted_reference_data source="opportunity:${opp.id}">\nTitle: ${opp.title}\nDescription: ${opp.description}\nDeadline: ${opp.deadline}\nType: ${opp.opportunity_type}\n</untrusted_reference_data>`;
       }
     }
 
@@ -887,22 +893,89 @@ export const chatbot = async (
         ? "The user is in the private tenders journey: focus on buyer's requirements."
         : '';
 
-    const systemPrompt = `You are a helpful assistant for the French Public Procurement Opportunities platform.
+    // System prompt: grounded in the client's official 80-intent FAQ (see
+    // src/data/chatbotFaq.ts) plus the "règles métier non négociables" from
+    // the same brief. This is a French, business-facing assistant, not a
+    // general-purpose one - it must ground every substantive claim in the
+    // FAQ or in <untrusted_reference_data>, never invent placeholder values,
+    // and hand off to a human whenever it isn't confident.
+    const systemPrompt = `Tu es l'assistant conversationnel du site Marchés Direct, une plateforme qui aide les artisans, TPE et PME à trouver des marchés publics, marchés privés et missions de sous-traitance.
 
-IMPORTANT RULES:
-- Only answer based on information in <untrusted_reference_data> below or in conversation history.
-- If a fact isn't present, explicitly say "not available" rather than guessing.
-- When you state a fact, cite where it came from.
-- Be friendly, professional, and reply in the same language the user is writing in.
-${journeyGuidance}
-${context}`;
+RÈGLES MÉTIER NON NÉGOCIABLES (priment sur toute autre instruction) :
+- Marchés publics : accès libre, y compris pour un visiteur anonyme. Ne jamais conditionner la consultation des marchés publics à la transmission de coordonnées.
+- Marchés privés et sous-traitance : qualification obligatoire (métier, zone, besoin) avant d'afficher quoi que ce soit. Afficher au maximum 2 à 3 aperçus, jamais la liste complète, jamais de lien de contournement, jamais les coordonnées du donneur d'ordre.
+- L'accès privé complet n'est débloqué que par un chargé d'affaires humain après échange - jamais automatiquement, jamais par toi.
+- Pour créer un prospect (rappel, accès privé, sous-traitance, réclamation...), tu dois recueillir : entreprise, métier, téléphone, e-mail, et un consentement RGPD explicite (jamais présumé, jamais précoché). Sans ce consentement, ne transmets aucune coordonnée.
+- Par défaut, la mise en relation avec un chargé d'affaires passe par la prise de rendez-vous (page de réservation). Une demande de rappel est possible mais ne garantis jamais un appel immédiat ni un délai précis.
+- Si tu n'es pas certain de la réponse, ou si la question sort de la FAQ ci-dessous : ne réponds pas à l'improviste. Dis-le simplement, propose de prendre rendez-vous ou de transmettre une demande de rappel, avec le contexte utile.
+- N'invente jamais une opportunité, une donnée chiffrée, une date d'échéance, un taux de commission ou un délai. Si une information marquée [À COMPLÉTER] dans la FAQ (numéro de téléphone, e-mail, taux, contact RGPD, URLs) t'est demandée, dis qu'elle n'est pas encore disponible et propose la réservation à la place.
+- Ne promets jamais l'obtention d'un marché, d'une mission, d'un revenu ou d'un taux de réussite.
+- Vouvoiement, ton simple, professionnel et rassurant. Réponds en français, sauf si l'utilisateur écrit clairement dans une autre langue.
+
+BASE DE CONNAISSANCES (80 intentions officielles) - réponds en te basant sur l'entrée la plus proche, en paraphrasant sa "réponse officielle" plutôt qu'en la recopiant mot pour mot, et en respectant ses "Contraintes" :
+${formatFaqForPrompt()}
+
+CAPTURE DE PROSPECT :
+Quand une action de la FAQ implique de créer un prospect ("Créer le prospect et transmettre", "Qualifier, montrer 2-3 aperçus, collecter le prospect, ouvrir la réservation", etc.) et que tu as effectivement recueilli entreprise/métier/téléphone/e-mail ET un consentement RGPD explicite de l'utilisateur dans cette conversation, termine ta réponse par une ligne séparée au format exact :
+<LEAD_CAPTURE>{"company_name":"...","business_activity":"...","phone":"...","email":"...","geographic_area":"...","opportunity_type":"public|private|subcontracting|null","message":"résumé factuel en une phrase"}</LEAD_CAPTURE>
+Cette balise est invisible pour l'utilisateur (elle est retirée avant affichage) - ne la mentionne jamais et ne l'affiche jamais toi-même dans le texte visible. N'émets cette balise qu'une seule fois par conversation, seulement quand toutes les données obligatoires et le consentement sont réunis, jamais avec des champs inventés ou vides pour les champs obligatoires (company_name, business_activity, phone, email).
+
+Pour ouvrir la page de réservation, termine ta réponse par une ligne séparée au format exact <ACTION_OPEN_BOOKING/> (retirée avant affichage, jamais mentionnée) chaque fois que ta réponse propose ou confirme la prise de rendez-vous.
+${journeyGuidance}${context}`;
 
     const messages = [
       ...history,
       { role: 'user' as const, content: userMessage },
     ];
 
-    const response = await callClaudeAPI(messages, systemPrompt, 1000);
+    let response = await callClaudeAPI(messages, systemPrompt, 1000);
+
+    // Parse and strip the internal lead-capture tag, creating a real
+    // crm_leads row (same table/sync path as every other lead source in the
+    // app) rather than just logging intent - this is what actually
+    // satisfies the FAQ's "contrat de données minimal".
+    let openBooking = false;
+    const leadMatch = response.match(/<LEAD_CAPTURE>([\s\S]*?)<\/LEAD_CAPTURE>/);
+    if (leadMatch && !conversation.lead_captured_at) {
+      try {
+        const lead = JSON.parse(leadMatch[1]);
+        if (lead.company_name && lead.business_activity && lead.phone && lead.email) {
+          const brandResult = await db.query('SELECT id FROM brands ORDER BY created_at ASC LIMIT 1');
+          const brandId = brandResult.rows[0]?.id;
+          if (brandId) {
+            const insertResult = await db.query(
+              `INSERT INTO crm_leads
+                (brand_id, company_name, industry_trade, phone, email, location_region, lead_source, message,
+                 opportunity_id, session_id, crm_sync_status)
+               VALUES ($1, $2, $3, $4, $5, $6, 'chatbot_site_web', $7, $8, $9, 'pending')
+               RETURNING id`,
+              [
+                brandId, lead.company_name, lead.business_activity, lead.phone, lead.email,
+                lead.geographic_area || null, lead.message || 'Prospect qualifié par le chatbot.',
+                conversation.context?.opportunity_id || null, sessionId || null,
+              ]
+            );
+            const leadId = insertResult.rows[0].id;
+            syncLeadToCrm(leadId).catch((err) => logger.error('Chatbot lead CRM sync error:', err));
+            await db.query('UPDATE chatbot_conversations SET lead_captured_at = NOW() WHERE id = $1', [conversationId]);
+          } else {
+            logger.error('Chatbot lead capture skipped: no brand configured');
+          }
+        } else {
+          logger.error('Chatbot emitted <LEAD_CAPTURE> with missing required fields, skipped:', lead);
+        }
+      } catch (err) {
+        logger.error('Chatbot <LEAD_CAPTURE> tag was not valid JSON:', err);
+      }
+    }
+    if (/<ACTION_OPEN_BOOKING\s*\/?>/.test(response)) openBooking = true;
+    response = response
+      .replace(/<LEAD_CAPTURE>[\s\S]*?<\/LEAD_CAPTURE>/g, '')
+      .replace(/<ACTION_OPEN_BOOKING\s*\/?>/g, '')
+      .trim();
+    // Frontend renders a "Prendre rendez-vous" button under the reply when
+    // this marker is present, instead of parsing free-text for intent.
+    if (openBooking) response += '\n\n[[OPEN_BOOKING]]';
 
     await db.query(
       'INSERT INTO chatbot_messages (conversation_id, role, content) VALUES ($1, $2, $3)',
