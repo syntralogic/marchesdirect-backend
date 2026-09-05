@@ -873,7 +873,11 @@ const updateOpportunity = async (opportunityId: string, data: any) => {
 // back which rows were genuinely new via the classic `xmax = 0` trick so
 // inserted/updated counts stay accurate for connector_logs.
 const BULK_UPSERT_CHUNK = 500;
-async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: string | null, records: any[]): Promise<{ inserted: number; updated: number; errors: number }> {
+async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: string | null, rawRecords: any[]): Promise<{ inserted: number; updated: number; errors: number }> {
+  const byReference = new Map<string, any>();
+  for (const record of rawRecords) byReference.set(record.source_reference, record); // last occurrence wins
+  const records = [...byReference.values()];
+
   let inserted = 0, updated = 0, errors = 0;
   for (let i = 0; i < records.length; i += BULK_UPSERT_CHUNK) {
     const chunk = records.slice(i, i + BULK_UPSERT_CHUNK);
