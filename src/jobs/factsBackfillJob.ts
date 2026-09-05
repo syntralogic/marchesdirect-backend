@@ -92,21 +92,20 @@ export const startFactsBackfillJob = () => {
   // doesn't compete with the search-index-refresh boot call above for the
   // DB connection pool at the exact same instant.
   setTimeout(() => {
-    trackJob('factsBackfill:boot', runFactsBackfillBatch).catch(err => logger.error('[Job] Boot-time facts backfill failed (non-fatal):', err));
+    trackJob('factsBackfill:boot', () => runFactsBackfillBatch(15)).catch(err => logger.error('[Job] Boot-time facts backfill failed (non-fatal):', err));
   }, 10_000);
 
-  // Was once/day at batch 25 - far too slow against connectors that can
-  // insert up to 3000 records per source per run (see aiProcessing.ts's
-  // BATCH_SIZE comment for the same math). At 25/day the backlog never
-  // clears, so most opportunity fiches permanently show no "Détails du
-  // dossier" (contract object, procedure type, value, qualifications) even
-  // though ai_summary/classification keep up fine at their own 50/15min
-  // cadence. Aligned to the same */15 * * * * cadence and batch size as
-  // aiProcessing.ts so facts extraction can't lag classification/summary
-  // by orders of magnitude.
-  cron.schedule('*/15 * * * *', () => {
-    trackJob('factsBackfill:cron', runFactsBackfillBatch).catch(err => logger.error('[Job] Scheduled facts backfill failed (non-fatal):', err));
+  // Throttled down from 50/15min (~4,800/day) to 15/30min (~720/day) on the
+  // client's explicit ask to cut Claude API spend - this was the actual
+  // cause of a cost spike that looked disproportionate to the ~2,000 new
+  // opportunities added that day: this job doesn't only process new
+  // records, its query also re-catches *older* ones missing fields added
+  // later (contract_duration, selection_criteria), so the real call volume
+  // was much higher than "2,000 new listings" implied. Backlog clears
+  // slower at this rate - accepted tradeoff for the lower cost.
+  cron.schedule('*/30 * * * *', () => {
+    trackJob('factsBackfill:cron', () => runFactsBackfillBatch(15)).catch(err => logger.error('[Job] Scheduled facts backfill failed (non-fatal):', err));
   });
 
-  logger.info('✅ Facts backfill job scheduled (batch of 50 on boot, then every 15 minutes)');
+  logger.info('✅ Facts backfill job scheduled (batch of 15 on boot, then every 30 minutes)');
 };
