@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { trackJob } from '../utils/jobTracker';
 
 // ============================================================================
 // SEO PAGE GENERATION AT SCALE (Milestone 11)
@@ -255,8 +256,10 @@ const runSEOGeneration = async () => {
 export const startSEOGeneration = () => {
   // Run once daily at 04:00 (after data collection has settled)
   cron.schedule('0 4 * * *', () => {
-    logger.info('[Job] Running daily SEO page generation...');
-    runSEOGeneration();
+    trackJob('seoGeneration:cron', async () => {
+      logger.info('[Job] Running daily SEO page generation...');
+      await runSEOGeneration();
+    });
   });
 
   // Free-tier-host reasoning: page generation is create-or-update against
@@ -266,7 +269,7 @@ export const startSEOGeneration = () => {
   // stale until a 4am cron tick that might never come on a host that spins
   // down between requests.
   logger.info('[Job] Running an immediate SEO page generation pass on boot...');
-  runSEOGeneration();
+  trackJob('seoGeneration:boot', runSEOGeneration);
 
   logger.info('✅ SEO generation job scheduled (daily at 04:00)');
 };

@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { matchOpportunitiesToCompany } from '../services/aiService';
+import { trackJob } from '../utils/jobTracker';
 
 // ============================================================================
 // PROACTIVE ALERTS: new matching opportunities + bid deadline reminders
@@ -114,13 +115,13 @@ export const startOpportunityAlerts = () => {
   // :30/:45 cadence isn't critical here since this only reads results, it
   // doesn't compete for the same write lock.
   cron.schedule('*/30 * * * *', () => {
-    alertNewMatches();
+    trackJob('opportunityAlerts:newMatches', alertNewMatches);
   });
 
   // Deadline reminders once daily is enough - a 3-day warning window doesn't
   // need finer granularity than that.
   cron.schedule('0 8 * * *', () => {
-    alertUpcomingDeadlines();
+    trackJob('opportunityAlerts:deadlines', alertUpcomingDeadlines);
   });
 
   // Free-tier-host reasoning again: both sweeps are dedup'd against existing
@@ -129,7 +130,7 @@ export const startOpportunityAlerts = () => {
   // pass immediately so companies aren't waiting on a cron tick that might
   // not happen for a while on a host that spins down between requests.
   logger.info('[Job] Running an immediate opportunity alert sweep on boot...');
-  runAlertSweepsOnce().catch((err) => logger.error('[Job] Boot-time alert sweep failed (non-fatal):', err));
+  trackJob('opportunityAlerts:boot', runAlertSweepsOnce).catch((err) => logger.error('[Job] Boot-time alert sweep failed (non-fatal):', err));
 
   logger.info('✅ Opportunity alert jobs scheduled (new matches every 30min, deadline reminders daily at 08:00)');
 };

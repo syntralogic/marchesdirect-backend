@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { trackJob } from '../utils/jobTracker';
 
 // ============================================================================
 // SEARCH INDEX REFRESH (supports Milestone 5 search + Milestone 12 performance
@@ -33,7 +34,7 @@ export const startSearchIndexRefresh = () => {
   // Every 15 minutes - frequent enough that new/updated opportunities show up
   // in search reasonably quickly, without refreshing on every single write.
   cron.schedule('*/15 * * * *', () => {
-    refreshSearchIndex();
+    trackJob('searchIndexRefresh:cron', refreshSearchIndex);
   });
 
   // Critical on a free-tier host that spins down on idle: GET /api/opportunities
@@ -42,7 +43,7 @@ export const startSearchIndexRefresh = () => {
   // the DB but never actually appear in search/browse. REFRESH CONCURRENTLY is
   // safe to run redundantly, so fire one immediately on boot too.
   logger.info('[Job] Running an immediate search index refresh on boot...');
-  refreshSearchIndex().catch((err) => logger.error('[Job] Boot-time search index refresh failed (non-fatal):', err));
+  trackJob('searchIndexRefresh:boot', refreshSearchIndex).catch((err) => logger.error('[Job] Boot-time search index refresh failed (non-fatal):', err));
 
   logger.info('✅ Search index refresh scheduled (every 15 minutes)');
 };
