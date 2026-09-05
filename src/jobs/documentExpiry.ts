@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { trackJob } from '../utils/jobTracker';
 
 // ============================================================================
 // DOCUMENT EXPIRY CHECK (Milestone 9 support)
@@ -125,8 +126,10 @@ const checkExpiringDocuments = async () => {
 export const startExpiryCheck = () => {
   // Run once daily at 03:00
   cron.schedule('0 3 * * *', () => {
-    logger.info('[Job] Running daily document expiry check...');
-    checkExpiringDocuments();
+    trackJob('documentExpiry:cron', async () => {
+      logger.info('[Job] Running daily document expiry check...');
+      await checkExpiringDocuments();
+    });
   });
 
   // Free-tier-host reasoning: the expiry-marking update and reminder sweep
@@ -136,7 +139,7 @@ export const startExpiryCheck = () => {
   // don't sit unflagged until a 3am cron tick that might never come on a
   // host that spins down between requests.
   logger.info('[Job] Running an immediate document expiry check on boot...');
-  checkExpiringDocuments();
+  trackJob('documentExpiry:boot', checkExpiringDocuments);
 
   logger.info('✅ Document expiry job scheduled (daily at 03:00)');
 };

@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { classifyOpportunity, generateOpportunitySummary } from '../services/aiService';
+import { trackJob } from '../utils/jobTracker';
 
 // ============================================================================
 // BATCH AI PROCESSING (MILESTONE 6-7)
@@ -109,8 +110,10 @@ export const startAIProcessing = () => {
   // connector run don't sit unclassified for long, without hammering the Claude API
   // continuously.
   cron.schedule('*/15 * * * *', async () => {
-    await processUnclassifiedOpportunities();
-    await processMissingSummaries();
+    await trackJob('aiProcessing:cron', async () => {
+      await processUnclassifiedOpportunities();
+      await processMissingSummaries();
+    });
   });
 
   // Same reasoning as dataCollection.ts's boot-time run: on a free-tier host
@@ -123,10 +126,11 @@ export const startAIProcessing = () => {
   // boot, in the background, so every deploy/restart guarantees at least one
   // real attempt at clearing the backlog, same as the data collection job.
   logger.info('[Job] Running an immediate AI processing pass on boot (see comment above for why)...');
-  processUnclassifiedOpportunities()
-    .then(() => processMissingSummaries())
-    .then(() => logger.info('[Job] Boot-time AI processing pass complete'))
-    .catch((err) => logger.error('[Job] Boot-time AI processing pass failed (non-fatal, next cron tick or restart will retry):', err));
+  trackJob('aiProcessing:boot', () =>
+    processUnclassifiedOpportunities()
+      .then(() => processMissingSummaries())
+      .then(() => logger.info('[Job] Boot-time AI processing pass complete'))
+  ).catch((err) => logger.error('[Job] Boot-time AI processing pass failed (non-fatal, next cron tick or restart will retry):', err));
 
   logger.info('✅ AI processing scheduler started (runs every 15 minutes)');
 };

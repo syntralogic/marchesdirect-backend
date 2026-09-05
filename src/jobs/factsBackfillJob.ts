@@ -22,6 +22,7 @@
 import { db } from '../config/database';
 import { extractOpportunityFacts } from '../services/aiService';
 import { logger } from '../utils/logger';
+import { trackJob } from '../utils/jobTracker';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -91,7 +92,7 @@ export const startFactsBackfillJob = () => {
   // doesn't compete with the search-index-refresh boot call above for the
   // DB connection pool at the exact same instant.
   setTimeout(() => {
-    runFactsBackfillBatch().catch(err => logger.error('[Job] Boot-time facts backfill failed (non-fatal):', err));
+    trackJob('factsBackfill:boot', runFactsBackfillBatch).catch(err => logger.error('[Job] Boot-time facts backfill failed (non-fatal):', err));
   }, 10_000);
 
   // Was once/day at batch 25 - far too slow against connectors that can
@@ -104,7 +105,7 @@ export const startFactsBackfillJob = () => {
   // aiProcessing.ts so facts extraction can't lag classification/summary
   // by orders of magnitude.
   cron.schedule('*/15 * * * *', () => {
-    runFactsBackfillBatch().catch(err => logger.error('[Job] Scheduled facts backfill failed (non-fatal):', err));
+    trackJob('factsBackfill:cron', runFactsBackfillBatch).catch(err => logger.error('[Job] Scheduled facts backfill failed (non-fatal):', err));
   });
 
   logger.info('✅ Facts backfill job scheduled (batch of 50 on boot, then every 15 minutes)');

@@ -9,6 +9,7 @@ import path from 'path';
 import { db, ensureSchema } from './config/database';
 import { logger } from './utils/logger';
 import { errorHandler } from './middleware/errorHandler';
+import { drainActiveJobs } from './utils/jobTracker';
 import { authenticate, optionalAuth } from './middleware/auth';
 
 // Load environment variables
@@ -220,6 +221,16 @@ const startServer = async () => {
       server.close(async (err) => {
         if (err) logger.error('Error while closing HTTP server:', err);
         try {
+          // Background cron jobs (SEO generation, search index refresh, CRM
+          // retry, etc.) run on their own timers, entirely outside the HTTP
+          // request lifecycle server.close() just waited on above - one of
+          // them being mid-query at this exact moment is what caused
+          // "Cannot use a pool after calling end on the pool" on every
+          // redeploy (confirmed live, 2026-09-05). Give any in-flight job a
+          // chance to finish first; budgeted well inside the 10s forceExit
+          // timer above so a stuck job still can't hang the shutdown
+          // forever.
+          await drainActiveJobs(7_000);
           await db.end();
         } catch (dbErr) {
           logger.error('Error while closing DB pool:', dbErr);

@@ -3,6 +3,7 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { scheduleDataCollection } from '../services/dataCollectionService';
 import { deduplicateOpportunities } from '../services/deduplicationService';
+import { trackJob } from '../utils/jobTracker';
 
 // ============================================================================
 // AUTOMATED DATA COLLECTION (Milestone 2 & 3)
@@ -25,17 +26,19 @@ export const startScheduledJobs = () => {
   // Run collection every 2 hours; each source internally respects its own
   // frequency_hours / next_run so this just checks "is anything due".
   cron.schedule('0 */2 * * *', async () => {
-    logger.info('[Job] Running scheduled data collection (all active sources)...');
-    try {
-      await scheduleDataCollection();
+    await trackJob('dataCollection:cron', async () => {
+      logger.info('[Job] Running scheduled data collection (all active sources)...');
+      try {
+        await scheduleDataCollection();
 
-      // Extra dedup sweep across all active sources after each collection run,
-      // so a listing seen on two sources in the same run gets merged immediately.
-      const merged = await deduplicateOpportunities();
-      logger.info(`[Job] Post-collection dedup sweep merged ${merged} pairs`);
-    } catch (err) {
-      logger.error('[Job] Data collection run failed:', err);
-    }
+        // Extra dedup sweep across all active sources after each collection run,
+        // so a listing seen on two sources in the same run gets merged immediately.
+        const merged = await deduplicateOpportunities();
+        logger.info(`[Job] Post-collection dedup sweep merged ${merged} pairs`);
+      } catch (err) {
+        logger.error('[Job] Data collection run failed:', err);
+      }
+    });
   });
 
   // The cron above only fires at fixed clock marks (00:00, 02:00, 04:00...),
@@ -50,10 +53,12 @@ export const startScheduledJobs = () => {
   // so every deploy/restart guarantees at least one real attempt,
   // regardless of the cron schedule or host sleep behavior.
   logger.info('[Job] Running an immediate data collection pass on boot (see comment above for why)...');
-  scheduleDataCollection(true)
-    .then(() => deduplicateOpportunities())
-    .then((merged) => logger.info(`[Job] Boot-time data collection pass complete, ${merged} duplicate pairs merged`))
-    .catch((err) => logger.error('[Job] Boot-time data collection pass failed (non-fatal, next cron tick or restart will retry):', err));
+  trackJob('dataCollection:boot', () =>
+    scheduleDataCollection(true)
+      .then(() => deduplicateOpportunities())
+      .then((merged) => logger.info(`[Job] Boot-time data collection pass complete, ${merged} duplicate pairs merged`))
+      .catch((err) => logger.error('[Job] Boot-time data collection pass failed (non-fatal, next cron tick or restart will retry):', err))
+  );
 
   logger.info('✅ Data collection job scheduled (every 2h). AI classification runs separately - see jobs/aiProcessing.ts.');
 };

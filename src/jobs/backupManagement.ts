@@ -5,6 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { trackJob } from '../utils/jobTracker';
 
 const execAsync = promisify(exec);
 
@@ -159,14 +160,18 @@ export const testRestore = async () => {
 export const startBackupSchedule = () => {
   // Full backup daily at 02:00
   cron.schedule('0 2 * * *', () => {
-    logger.info('[Job] Running scheduled daily backup...');
-    runBackup('full');
+    trackJob('backup:daily', async () => {
+      logger.info('[Job] Running scheduled daily backup...');
+      await runBackup('full');
+    });
   });
 
   // Restore test weekly (Sunday 05:00) to keep proving backups are restorable
   cron.schedule('0 5 * * 0', () => {
-    logger.info('[Job] Running weekly backup restore test...');
-    testRestore();
+    trackJob('backup:restoreTest', async () => {
+      logger.info('[Job] Running weekly backup restore test...');
+      await testRestore();
+    });
   });
 
   logger.info('✅ Backup jobs scheduled (daily backup, weekly restore test)');

@@ -1,5 +1,6 @@
 import cron from 'node-cron';
 import { logger } from '../utils/logger';
+import { trackJob } from '../utils/jobTracker';
 import { runPendingDocumentIngestion } from '../services/documentIngestionService';
 
 // ============================================================================
@@ -30,7 +31,7 @@ export const startDocumentIngestion = () => {
   // documents fetched within roughly the same collection cycle, without
   // hammering buyer platforms.
   cron.schedule('*/15 * * * *', () => {
-    runBatch();
+    trackJob('documentIngestion:cron', runBatch);
   });
 
   // Same free-tier-host reasoning as dataCollection.ts/aiProcessing.ts: a
@@ -39,7 +40,7 @@ export const startDocumentIngestion = () => {
   // indefinitely. Run one batch immediately on boot so every deploy/restart
   // guarantees at least one real attempt.
   logger.info('[Job] Running an immediate DCE document ingestion pass on boot...');
-  runBatch().catch((err) => logger.error('[Job] Boot-time document ingestion pass failed (non-fatal):', err));
+  trackJob('documentIngestion:boot', runBatch).catch((err) => logger.error('[Job] Boot-time document ingestion pass failed (non-fatal):', err));
 
   logger.info('✅ DCE document ingestion job scheduled (every 15 min)');
 };
