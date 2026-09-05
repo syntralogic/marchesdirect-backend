@@ -581,7 +581,22 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // Same no-shell-on-Render reasoning: force these back to active in code
   // rather than relying on someone running `psql ... UPDATE data_sources`
   // by hand. Harmless no-op once already true.
-  await step(`UPDATE data_sources SET active = true WHERE code IN ('boamp', 'decp', 'ted')`);
+  // Confirmed live on production (Supabase SQL editor, 2026-09-05): the
+  // 'decp' row didn't exist in data_sources at all - only boamp/ted/place
+  // did. schema.sql's INSERT for 'decp' only ever runs on a brand-new empty
+  // database (see ensureSchema()'s fresh-load branch); an already-provisioned
+  // DB like this one never got it, so the plain UPDATE below was a no-op for
+  // decp every single boot - nothing to update. INSERT ... ON CONFLICT
+  // creates the row if missing (matching schema.sql's seed values) and
+  // activates it either way, for both this and any other already-provisioned
+  // database missing the same row. 'ted' already existed here (confirmed
+  // active=true), so the plain UPDATE for it was fine - kept as-is below.
+  await step(`
+    INSERT INTO data_sources (code, name, feed_type, frequency_hours, active)
+    VALUES ('decp', 'DECP Consolidées (data.economie.gouv.fr) - per-buyer files consolidated by decp-processing/decp.info, live since Jan 2024', 'api', 24, true)
+    ON CONFLICT (code) DO UPDATE SET active = true
+  `);
+  await step(`UPDATE data_sources SET active = true WHERE code IN ('boamp', 'ted')`);
 
   // Client's dix images (écran 10, "Documents de candidature"): DC1/DC2/DUME
   // each get their own "Générer" button and status, same as the existing
