@@ -121,11 +121,32 @@ router.get('/data-sources', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// In-memory guard against a second manual trigger landing while a
+// background run from the fire-and-forget branch below is still going -
+// there's nothing stopping someone from tapping "Run now" twice while the
+// first click is still processing in the background.
+const backgroundRunsInFlight = new Set<string>();
+
 // POST /api/admin/data-sources/:code/run - manually trigger one connector run on demand.
 // This is what makes Milestone 2/3's proof ("3 automatic runs observed", "second import
 // with zero duplicates") demonstrable on a short call instead of waiting on the 6-hour
 // cron schedule - trigger it, then trigger it again, and read connector_logs /
 // deduplication/report before and after.
+//
+// BUG (found from the admin screen's "spinning forever, nothing happens" report):
+// this used to await the connector call before responding for every source alike.
+// BOAMP/TED/PLACE/Batiweb are small feeds - seconds, fine. DECP downloads a 234MB
+// file and decompresses/parses it in batches - realistically minutes on a
+// free-tier Render instance. Render's own proxy kills any HTTP request that
+// hasn't responded within ~100s regardless of what the handler is doing, so the
+// button's spinner would sit there until the browser's connection got cut, while
+// the actual collectDecpData() call kept running (or eventually crashed)
+// server-side with nothing surfaced to whoever clicked it. Long-running sources
+// now run in the background and the endpoint responds immediately; the existing
+// admin screen (last run / next run / connector_logs) is how the result gets
+// checked afterwards, same as waiting on the scheduled cron would be.
+const LONG_RUNNING_SOURCES = new Set(['decp']);
+
 router.post('/data-sources/:code/run', async (req: AuthRequest, res: Response) => {
   try {
     const sourceResult = await db.query('SELECT * FROM data_sources WHERE code = $1', [req.params.code]);
@@ -136,27 +157,40 @@ router.post('/data-sources/:code/run', async (req: AuthRequest, res: Response) =
 
     const source = sourceResult.rows[0];
 
-    let result;
-    switch (source.code) {
-      case 'boamp':
-        result = await collectBoampData(source.id);
-        break;
-      case 'decp':
-        result = await collectDecpData(source.id);
-        break;
-      case 'place':
-        result = await collectPlaceData(source.id);
-        break;
-      case 'ted':
-        result = await collectTedData(source.id);
-        break;
-      case 'batiweb':
-        result = await collectBatiwebData(source.id);
-        break;
-      default:
-        return res.status(400).json({ error: `No connector implemented for source code: ${source.code}` });
+    const runConnector = () => {
+      switch (source.code) {
+        case 'boamp': return collectBoampData(source.id);
+        case 'decp': return collectDecpData(source.id);
+        case 'place': return collectPlaceData(source.id);
+        case 'ted': return collectTedData(source.id);
+        case 'batiweb': return collectBatiwebData(source.id);
+        default: return null;
+      }
+    };
+
+    if (!['boamp', 'decp', 'place', 'ted', 'batiweb'].includes(source.code)) {
+      return res.status(400).json({ error: `No connector implemented for source code: ${source.code}` });
     }
 
+    if (LONG_RUNNING_SOURCES.has(source.code)) {
+      if (backgroundRunsInFlight.has(source.code)) {
+        return res.status(409).json({ error: `${source.code} is already running in the background - check connector_logs / last run once it finishes instead of triggering again.` });
+      }
+      backgroundRunsInFlight.add(source.code);
+      // Deliberately not awaited - see the long comment above. Errors are
+      // already recorded to connector_logs by the connector itself.
+      Promise.resolve(runConnector())
+        .catch(err => logger.error(`Background connector run failed (${source.code}):`, err))
+        .finally(() => backgroundRunsInFlight.delete(source.code));
+
+      return res.status(202).json({
+        source: source.code,
+        status: 'started',
+        message: 'Running in the background - this source can take several minutes. Refresh this page shortly to see last run / connector_logs.',
+      });
+    }
+
+    const result = await runConnector();
     res.json({ source: source.code, result });
   } catch (err: any) {
     logger.error(`Manual connector run error (${req.params.code}):`, err);
