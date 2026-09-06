@@ -312,7 +312,17 @@ export const runPendingDocumentIngestion = async (batchSize = 15): Promise<numbe
   const pending = await db.query(
     `SELECT id FROM opportunities
      WHERE dce_documents_status = 'pending' OR dce_documents_status IS NULL
-     ORDER BY created_at DESC
+     -- Was ORDER BY created_at DESC - same starvation bug already fixed in
+     -- jobs/factsBackfillJob.ts: under sustained ingestion this always
+     -- prioritized the newest arrivals, so older opportunities could sit at
+     -- 'pending' indefinitely, never getting their DCE documents fetched.
+     -- Unlike facts extraction there's no on-demand fallback for a
+     -- specifically-viewed opportunity here (see routes/opportunities.ts),
+     -- so this ordering was the only thing standing between a record and
+     -- permanently missing the facts (Qualifications requises, Modalité de
+     -- dépôt, Critères de notation) that live in the RC/CCAP rather than
+     -- the thin BOAMP notice text. Oldest-first lets the backlog drain.
+     ORDER BY created_at ASC
      LIMIT $1`,
     [batchSize]
   );
