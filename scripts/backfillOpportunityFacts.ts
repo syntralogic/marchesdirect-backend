@@ -104,7 +104,12 @@ async function main() {
         -- team_size_estimate/key_risks/contract_duration - catch up here.
         OR ai_extracted_facts->'selection_criteria' IS NULL
       )
-    ORDER BY created_at DESC
+    -- Oldest-first, kept in sync with jobs/factsBackfillJob.ts: on-demand
+    -- extraction (routes/opportunities.ts) already handles anything a
+    -- visitor actually opens, so this only needs to fairly drain whatever
+    -- nobody has viewed yet - newest-first would starve the older backlog
+    -- indefinitely under sustained ingestion.
+    ORDER BY created_at ASC
     ${limit ? `LIMIT ${limit}` : ''}
   `;
 
