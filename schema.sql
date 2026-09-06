@@ -1186,21 +1186,21 @@ ON CONFLICT (code) DO NOTHING;
 
 INSERT INTO trades (name, slug, description, cpv_code_id) VALUES
 ('Gros oeuvre', 'gros-oeuvre', 'Structural work, foundations, load-bearing walls', (SELECT id FROM cpv_codes WHERE code = '45223000')),
-('Demolition', 'demolition', 'Demolition, site clearance and preparation', (SELECT id FROM cpv_codes WHERE code = '45111000')),
-('Maconnerie', 'maconnerie', 'Masonry and bricklaying', (SELECT id FROM cpv_codes WHERE code = '45262500')),
+('Démolition', 'demolition', 'Demolition, site clearance and preparation', (SELECT id FROM cpv_codes WHERE code = '45111000')),
+('Maçonnerie', 'maconnerie', 'Masonry and bricklaying', (SELECT id FROM cpv_codes WHERE code = '45262500')),
 ('Charpente', 'charpente', 'Roof framing and structural carpentry', (SELECT id FROM cpv_codes WHERE code = '45261000')),
 ('Couverture', 'couverture', 'Roofing and roof waterproofing', (SELECT id FROM cpv_codes WHERE code = '45261000')),
-('Electricite', 'electricite', 'Electrical installation work', (SELECT id FROM cpv_codes WHERE code = '45310000')),
+('Électricité', 'electricite', 'Electrical installation work', (SELECT id FROM cpv_codes WHERE code = '45310000')),
 ('Plomberie', 'plomberie', 'Plumbing and sanitary installation', (SELECT id FROM cpv_codes WHERE code = '45330000')),
 ('CVC', 'cvc', 'Heating, ventilation and air conditioning', (SELECT id FROM cpv_codes WHERE code = '45331000')),
 ('Isolation', 'isolation', 'Thermal and acoustic insulation', (SELECT id FROM cpv_codes WHERE code = '45320000')),
-('Platrerie', 'platrerie', 'Plastering and drywall', (SELECT id FROM cpv_codes WHERE code = '45410000')),
+('Plâtrerie', 'platrerie', 'Plastering and drywall', (SELECT id FROM cpv_codes WHERE code = '45410000')),
 ('Menuiserie', 'menuiserie', 'Joinery, windows and doors', (SELECT id FROM cpv_codes WHERE code = '45420000')),
 ('Carrelage', 'carrelage', 'Floor and wall tiling', (SELECT id FROM cpv_codes WHERE code = '45430000')),
 ('Peinture', 'peinture', 'Painting and surface finishing', (SELECT id FROM cpv_codes WHERE code = '45440000')),
 ('Vitrerie', 'vitrerie', 'Glazing work', (SELECT id FROM cpv_codes WHERE code = '45440000')),
-('Voirie et reseaux (VRD)', 'vrd', 'Road works and utility networks', (SELECT id FROM cpv_codes WHERE code = '45233000')),
-('Batiment general', 'batiment-general', 'General building construction', (SELECT id FROM cpv_codes WHERE code = '45210000'))
+('Voirie et réseaux (VRD)', 'vrd', 'Road works and utility networks', (SELECT id FROM cpv_codes WHERE code = '45233000')),
+('Bâtiment général', 'batiment-general', 'General building construction', (SELECT id FROM cpv_codes WHERE code = '45210000'))
 ON CONFLICT (name) DO NOTHING;
 
 -- Buyer-history stat on the opportunity detail page (spec: aggregated,

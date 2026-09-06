@@ -698,6 +698,24 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     )
   `);
   await step(`CREATE INDEX IF NOT EXISTS siret_ip_throttle_ip ON siret_ip_throttle(ip_address)`);
+
+  // Client's ask #5: trade names must carry their proper French accents
+  // (Électricité, Maçonnerie, etc.) - schema.sql's original seed had none
+  // at all, and that's what's actually live on production since this table
+  // was seeded long before this fix. Renaming here (not just in the seed)
+  // is what actually reaches the running database; opportunities reference
+  // trades by id, so renaming leaves every existing link intact.
+  const TRADE_ACCENT_FIXES: [string, string][] = [
+    ['Demolition', 'Démolition'],
+    ['Maconnerie', 'Maçonnerie'],
+    ['Electricite', 'Électricité'],
+    ['Platrerie', 'Plâtrerie'],
+    ['Voirie et reseaux (VRD)', 'Voirie et réseaux (VRD)'],
+    ['Batiment general', 'Bâtiment général'],
+  ];
+  for (const [oldName, newName] of TRADE_ACCENT_FIXES) {
+    await step(`UPDATE trades SET name = '${newName}' WHERE name = '${oldName}'`);
+  }
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old
