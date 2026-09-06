@@ -310,16 +310,49 @@ router.get('/status', async (req: AuthRequest, res: Response) => {
       'SELECT siret, company_data, phone, email, lead_captured_at FROM siret_lookups WHERE session_id = $1',
       [sessionId]
     );
-    if (result.rows.length === 0) return res.json({ companyKnown: false, leadCaptured: false });
-    const row = result.rows[0];
-    res.json({
-      companyKnown: true,
-      siret: row.siret,
-      company: row.company_data,
-      leadCaptured: !!row.lead_captured_at,
-      phone: row.phone || null,
-      email: row.email || null,
-    });
+    if (result.rows.length > 0) {
+      const row = result.rows[0];
+      return res.json({
+        companyKnown: true,
+        siret: row.siret,
+        company: row.company_data,
+        leadCaptured: !!row.lead_captured_at,
+        phone: row.phone || null,
+        email: row.email || null,
+      });
+    }
+
+    // Logged-in users skip the SIRET gate entirely (OpportunityDetailPage
+    // treats isAuthenticated as "company known"), but until now this was
+    // the ONLY place that ever populated `company` - and it only ever
+    // checked the anonymous siret_lookups row. A real account's own SIRET
+    // was never looked up here, so `company` came back null and the whole
+    // enriched fiche (raison sociale, dirigeant, statut, effectif, CA, RGE,
+    // Présence détectée...) silently never rendered for anyone actually
+    // logged in - exactly the reported "AI/company data doesn't show up"
+    // bug. Auto-resolve their own company's SIRET the same way /confirm
+    // does for an anonymous visitor, reusing the same Pappers/INSEE cache -
+    // no re-typing needed, we already know their SIRET from their profile.
+    if (req.user?.companyId) {
+      const companyRow = await db.query('SELECT siret FROM companies WHERE id = $1', [req.user.companyId]);
+      const mySiret: string | undefined = companyRow.rows[0]?.siret;
+      if (mySiret && /^\d{14}$/.test(mySiret)) {
+        const pappersKey = process.env.PAPPERS_API_KEY;
+        const inseeKey = process.env.INSEE_API_KEY;
+        if (pappersKey || inseeKey) {
+          try {
+            const { company } = await resolveAndCacheCompany(mySiret, pappersKey, inseeKey, req.ip, sessionId, true);
+            if (company) {
+              return res.json({ companyKnown: true, siret: mySiret, company, leadCaptured: true, phone: null, email: null });
+            }
+          } catch (err) {
+            logger.error('Auto SIRET resolution for authenticated user failed:', err);
+          }
+        }
+      }
+    }
+
+    res.json({ companyKnown: false, leadCaptured: false });
   } catch (err: any) {
     logger.error('SIRET status error:', err);
     res.status(500).json({ error: 'Failed to check status' });
