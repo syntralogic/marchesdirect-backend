@@ -103,15 +103,6 @@ async function main() {
         -- extracted before this - even ones that already have
         -- team_size_estimate/key_risks/contract_duration - catch up here.
         OR ai_extracted_facts->'selection_criteria' IS NULL
-        -- Bug fix: a record extracted before its DCE documents (RC/CCAP/
-        -- CCTP) were parsed has every key above already present as honest
-        -- "not available" values, so none of the checks above ever catch
-        -- it - yet Type de procédure / Qualifications requises / Modalité
-        -- de dépôt / Critères de notation almost always live only in those
-        -- documents. Give it one real re-extraction once documents are
-        -- actually fetched. Kept in sync with jobs/factsBackfillJob.ts and
-        -- routes/opportunities.ts's factsNeedExtraction.
-        OR (dce_documents_status = 'fetched' AND ai_facts_extracted_with_documents IS NOT TRUE)
       )
     -- Oldest-first, kept in sync with jobs/factsBackfillJob.ts: on-demand
     -- extraction (routes/opportunities.ts) already handles anything a

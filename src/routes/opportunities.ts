@@ -73,11 +73,7 @@ function redactExtractedFacts(facts: Record<string, any> | null | undefined) {
 // in the 15-minute batch job - the client's explicit ask ("jo bhi click
 // karoon uska data extract kare", not just whichever 50 the cron reaches
 // first).
-function factsNeedExtraction(
-  facts: Record<string, any> | null | undefined,
-  dceDocumentsStatus?: string | null,
-  factsExtractedWithDocuments?: boolean | null
-): boolean {
+function factsNeedExtraction(facts: Record<string, any> | null | undefined): boolean {
   if (!facts) return true;
   if (!facts.team_size_estimate) return true;
   if (!facts.key_risks) return true;
@@ -94,20 +90,6 @@ function factsNeedExtraction(
   // to reach it - which, given ingestion volume, could be a very long time.
   // Keep this in sync with factsBackfillJob.ts's SQL condition.
   if (!facts.selection_criteria) return true;
-  // Bug fix: the checks above only ask "does the key exist", which every
-  // one of these fields does the instant a first extraction runs - even
-  // when the honest answer was {"value":"not available","available":false}
-  // because no DCE document (RC/CCAP/CCTP) had been parsed yet. Type de
-  // procédure / Qualifications requises / Modalité de dépôt / Critères de
-  // notation almost always live only in those documents, not the thin
-  // BOAMP notice - so a fiche viewed even a moment before its documents
-  // finished parsing would otherwise show "not available" forever, since
-  // nothing above ever asked for a second attempt. Once documents have
-  // actually been fetched (dce_documents_status === 'fetched') but the facts
-  // on file were extracted before that happened, re-run once with the real
-  // document text now available. ai_facts_extracted_with_documents flips to
-  // true on that re-run, so this only ever fires once per opportunity.
-  if (dceDocumentsStatus === 'fetched' && !factsExtractedWithDocuments) return true;
   return false;
 }
 
@@ -119,13 +101,8 @@ function factsNeedExtraction(
 // before an opportunity has been processed once.
 const inFlightFactsExtractions = new Map<string, Promise<any>>();
 
-async function ensureFactsExtracted(
-  opportunityId: string,
-  currentFacts: Record<string, any> | null | undefined,
-  dceDocumentsStatus?: string | null,
-  factsExtractedWithDocuments?: boolean | null
-) {
-  if (!factsNeedExtraction(currentFacts, dceDocumentsStatus, factsExtractedWithDocuments)) return currentFacts;
+async function ensureFactsExtracted(opportunityId: string, currentFacts: Record<string, any> | null | undefined) {
+  if (!factsNeedExtraction(currentFacts)) return currentFacts;
   try {
     let pending = inFlightFactsExtractions.get(opportunityId);
     if (!pending) {
@@ -470,12 +447,7 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     // comes up in a future 15-minute run. Only fires when facts are
     // genuinely missing/malformed (see factsNeedExtraction) - already-good
     // records never re-call the LLM here.
-    opportunity.ai_extracted_facts = await ensureFactsExtracted(
-      opportunity.id,
-      opportunity.ai_extracted_facts,
-      opportunity.dce_documents_status,
-      opportunity.ai_facts_extracted_with_documents
-    );
+    opportunity.ai_extracted_facts = await ensureFactsExtracted(opportunity.id, opportunity.ai_extracted_facts);
     kickOffDocumentIngestionIfPending(opportunity.id, opportunity.dce_documents_status);
 
     const sessionId = (req.query.sessionId as string) || '';
