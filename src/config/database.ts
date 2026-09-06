@@ -660,6 +660,44 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     )
   `);
   await step(`CREATE INDEX IF NOT EXISTS bid_appointments_bid ON bid_appointments(bid_id)`);
+
+  // Client's Pappers-protection brief (WhatsApp, 5 Sep): cache each company
+  // fiche by SIREN so the same company never triggers a second paid Pappers
+  // call - whether it's the same visitor re-checking, or a different
+  // visitor whose company happens to match an opportunity they already
+  // looked at. Also the throttle table for "max 2 different companies per
+  // IP before account creation" and a call-log for "suivre précisément les
+  // appels payants et signaler toute consommation anormale". See siret.ts
+  // for how these are actually used.
+  await step(`
+    CREATE TABLE IF NOT EXISTS company_lookup_cache (
+      siren VARCHAR(9) PRIMARY KEY,
+      company_data JSONB NOT NULL,
+      source VARCHAR(20) NOT NULL,
+      fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await step(`
+    CREATE TABLE IF NOT EXISTS pappers_api_calls (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      siren VARCHAR(9),
+      endpoint VARCHAR(50) NOT NULL,
+      ip_address VARCHAR(45),
+      session_id VARCHAR(100),
+      called_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await step(`CREATE INDEX IF NOT EXISTS pappers_api_calls_called_at ON pappers_api_calls(called_at)`);
+  await step(`
+    CREATE TABLE IF NOT EXISTS siret_ip_throttle (
+      ip_address VARCHAR(45) NOT NULL,
+      siren VARCHAR(9) NOT NULL,
+      session_id VARCHAR(100),
+      first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(ip_address, siren)
+    )
+  `);
+  await step(`CREATE INDEX IF NOT EXISTS siret_ip_throttle_ip ON siret_ip_throttle(ip_address)`);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old
