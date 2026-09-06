@@ -244,6 +244,42 @@ const extractSourceUrl = (rawData: any): string | null => {
   return found || null;
 };
 
+// GET /api/opportunities/stats/counts - real, live opportunity counts per
+// journey (public_procurement/tender/subcontracting) plus a grand total,
+// for the homepage/dashboard counters. Client's report (WhatsApp): three
+// different numbers appeared across the homepage (~3,421, hardcoded),
+// dashboard (~2,940) and search (46,000+), with no way to tell what each
+// one represented. Uses opportunity_search_index with the exact same
+// "still open" definition the main search route uses (deadline not
+// passed; the view's own WHERE already drops cancelled/expired/merged),
+// so this can never disagree with what clicking through to a category
+// actually shows.
+router.get('/stats/counts', async (req: Request, res: Response) => {
+  try {
+    const result = await db.query(
+      `SELECT opportunity_type AS journey, COUNT(*)::int AS count
+       FROM opportunity_search_index
+       WHERE (deadline IS NULL OR deadline >= NOW())
+       GROUP BY opportunity_type`
+    );
+    const byJourney: Record<string, number> = {};
+    let total = 0;
+    for (const row of result.rows) {
+      byJourney[row.journey] = row.count;
+      total += row.count;
+    }
+    res.json({
+      total,
+      public_procurement: byJourney['public_procurement'] || 0,
+      tender: byJourney['tender'] || 0,
+      subcontracting: byJourney['subcontracting'] || 0,
+    });
+  } catch (err: any) {
+    logger.error('Opportunity counts error:', err);
+    res.status(500).json({ error: 'Failed to load opportunity counts' });
+  }
+});
+
 // GET /api/opportunities/stats/regions - opportunity count per French region,
 // for the interactive map on /zones. Groups on location_region as stored by
 // the connectors (BOAMP etc. give a region name directly on most notices).
