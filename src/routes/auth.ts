@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import {
   registerCompanyAndUser,
+  completeSignupFromSession,
   loginUser,
   refreshAccessToken,
   requestPasswordReset,
@@ -56,6 +57,42 @@ router.post(
         return res.status(500).json({ error: 'Une erreur est survenue. Veuillez réessayer.' });
       }
       res.status(400).json({ error: err.message || 'Registration failed' });
+    }
+  }
+);
+
+// POST /api/auth/complete-signup - client priority #10: "Créer mon accès"
+// step at the end of the opportunity funnel. Only a password is new here -
+// email/phone/company all come from this session's already-completed SIRET
+// identification + lead capture (see completeSignupFromSession). Returns
+// the same shape as /register (accessToken/refreshToken included) so the
+// frontend can log the visitor straight in and redirect to their dashboard
+// per the client's exact ask, with no separate login step.
+router.post(
+  '/complete-signup',
+  [
+    body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
+    body('password').isLength({ min: 8 }).withMessage('Le mot de passe doit contenir au moins 8 caractères.'),
+  ],
+  async (req: Request, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ error: errors.array()[0].msg });
+    }
+
+    try {
+      const brandId = await resolveBrandId(req);
+      const result = await completeSignupFromSession(req.body.sessionId, req.body.password, brandId);
+      res.status(201).json(result);
+    } catch (err: any) {
+      logger.error('Complete-signup route error:', err);
+      if (err.code === '23505') {
+        return res.status(409).json({ error: 'Un compte existe déjà avec cette adresse e-mail.' });
+      }
+      if (err.code) {
+        return res.status(500).json({ error: 'Une erreur est survenue. Veuillez réessayer.' });
+      }
+      res.status(400).json({ error: err.message || 'La création de votre accès a échoué.' });
     }
   }
 );
