@@ -716,6 +716,22 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   for (const [oldName, newName] of TRADE_ACCENT_FIXES) {
     await step(`UPDATE trades SET name = '${newName}' WHERE name = '${oldName}'`);
   }
+
+  // Passwordless login (client's 6 Sep brief). ADD COLUMN IF NOT EXISTS
+  // pattern for password_hash isn't needed - it was already nullable in the
+  // original CREATE TABLE users, so nothing to migrate there.
+  await step(`
+    CREATE TABLE IF NOT EXISTS magic_link_tokens (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      email VARCHAR(255) NOT NULL,
+      token_hash VARCHAR(255) NOT NULL,
+      purpose VARCHAR(20) DEFAULT 'login',
+      expires_at TIMESTAMP NOT NULL,
+      used_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await step(`CREATE INDEX IF NOT EXISTS magic_link_tokens_email ON magic_link_tokens(email)`);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old

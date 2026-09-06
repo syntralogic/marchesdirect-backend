@@ -7,6 +7,8 @@ import {
   refreshAccessToken,
   requestPasswordReset,
   resetPassword,
+  requestMagicLink,
+  verifyMagicLink,
   enableMFA,
   verifyMFASetup,
   verifyMFALogin,
@@ -62,17 +64,23 @@ router.post(
 );
 
 // POST /api/auth/complete-signup - client priority #10: "Créer mon accès"
-// step at the end of the opportunity funnel. Only a password is new here -
-// email/phone/company all come from this session's already-completed SIRET
-// identification + lead capture (see completeSignupFromSession). Returns
-// the same shape as /register (accessToken/refreshToken included) so the
-// frontend can log the visitor straight in and redirect to their dashboard
-// per the client's exact ask, with no separate login step.
+// step at the end of the opportunity funnel. email/phone/company all come
+// from this session's already-completed SIRET identification + lead
+// capture (see completeSignupFromSession). Returns the same shape as
+// /register (accessToken/refreshToken included) so the frontend can log
+// the visitor straight in and redirect to their dashboard per the client's
+// exact ask, with no separate login step.
+//
+// password is now optional (client's 6 Sep brief, "parcours définitif" v2:
+// "Aucun mot de passe n'est demandé" - the account is created invisibly the
+// moment email+phone are captured). Still accepted when the frontend does
+// send one, for backward compatibility with anything not yet updated to
+// the passwordless flow.
 router.post(
   '/complete-signup',
   [
     body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
-    body('password').isLength({ min: 8 }).withMessage('Le mot de passe doit contenir au moins 8 caractères.'),
+    body('password').optional({ values: 'falsy' }).isLength({ min: 8 }).withMessage('Le mot de passe doit contenir au moins 8 caractères.'),
   ],
   async (req: Request, res: Response) => {
     const errors = validationResult(req);
@@ -175,6 +183,36 @@ router.post('/password-reset/confirm', authenticate, async (req: AuthRequest, re
     res.json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Password reset failed' });
+  }
+});
+
+// POST /api/auth/magic-link - client's 6 Sep brief: "il saisit son adresse
+// e-mail → il reçoit un lien de connexion sécurisé". Always returns success
+// regardless of whether the email exists (same non-enumeration reasoning as
+// password-reset/request above).
+router.post('/magic-link', [body('email').isEmail()], async (req: Request, res: Response) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
+  try {
+    const result = await requestMagicLink(req.body.email, 'login');
+    res.json(result);
+  } catch (err: any) {
+    logger.error('Magic link request error:', err);
+    res.status(500).json({ error: "L'envoi du lien de connexion a échoué. Réessayez." });
+  }
+});
+
+// POST /api/auth/magic-link/verify - clicking the emailed link lands here
+// with ?token=...&email=... and exchanges it for a real session, same
+// accessToken/refreshToken shape as /login and /complete-signup.
+router.post('/magic-link/verify', [body('token').isString().notEmpty(), body('email').isEmail()], async (req: Request, res: Response) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
+  try {
+    const result = await verifyMagicLink(req.body.token, req.body.email);
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Ce lien de connexion est invalide ou a expiré.' });
   }
 });
 

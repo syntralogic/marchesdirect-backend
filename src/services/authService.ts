@@ -4,13 +4,19 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { generateTokens, verifyRefreshToken, generateMFASecret, verifyMFAToken } from '../middleware/auth';
 import { encryptSecret, decryptSecret, looksEncrypted } from '../utils/encryption';
+import { sendEmail } from './emailService';
 
 interface RegisterParams {
   companyName: string;
   firstName: string;
   lastName: string;
   email: string;
-  password: string;
+  // Client's newest brief (6 Sep, "parcours définitif" v2): "La création du
+  // compte doit être invisible... Aucun mot de passe n'est demandé." -
+  // password is now optional; a passwordless account gets password_hash =
+  // NULL (column already nullable, see schema.sql) and logs in via magic
+  // link instead (see requestMagicLink/verifyMagicLink below).
+  password?: string;
   phone?: string;
   industry?: string;
   region?: string;
@@ -39,7 +45,7 @@ interface RegisterParams {
 // informations déjà récupérées" complaint.
 export const completeSignupFromSession = async (
   sessionId: string,
-  password: string,
+  password: string | undefined,
   brandId?: string | null
 ) => {
   const lookup = await db.query(
@@ -71,7 +77,7 @@ export const completeSignupFromSession = async (
   const revenueNum = c.revenue != null ? Number(c.revenue) : NaN;
   const foundingYear = c.created ? new Date(c.created).getFullYear() : undefined;
 
-  return registerCompanyAndUser(
+  const result = await registerCompanyAndUser(
     {
       companyName: c.name || 'Mon entreprise',
       firstName,
@@ -91,6 +97,17 @@ export const completeSignupFromSession = async (
     },
     brandId
   );
+
+  // Client's newest brief: "En parallèle : Votre espace Marchés Direct est
+  // prêt — confirmez votre e-mail." Fire-and-forget - the visitor already
+  // has accessToken/refreshToken from registerCompanyAndUser above and goes
+  // straight into their dossier; this is a courtesy confirmation link for
+  // their records/future magic-link logins, never a gate on access.
+  requestMagicLink(row.email, 'welcome').catch(err =>
+    logger.error(`Failed to send welcome/confirmation email to ${row.email}:`, err)
+  );
+
+  return result;
 };
 
 // ============================================================================
@@ -179,9 +196,11 @@ export const registerCompanyAndUser = async (data: RegisterParams, brandId?: str
       ]
     );
 
-    // Hash password
-    const salt = await bcrypt.genSalt(parseInt(process.env.PASSWORD_SALT_ROUNDS || '10'));
-    const passwordHash = await bcrypt.hash(data.password, salt);
+    // Hash password (only if one was actually given - passwordless accounts
+    // leave password_hash NULL and authenticate via magic link instead).
+    const passwordHash = data.password
+      ? await bcrypt.hash(data.password, await bcrypt.genSalt(parseInt(process.env.PASSWORD_SALT_ROUNDS || '10')))
+      : null;
 
     // Create user
     const userId = uuid();
@@ -526,4 +545,90 @@ export const resetPassword = async (userId: string, newPassword: string) => {
     logger.error('Password reset error:', err);
     throw err;
   }
+};
+
+// ============================================================================
+// PASSWORDLESS LOGIN (client's 6 Sep brief, "parcours définitif" v2)
+// ============================================================================
+//
+// "Lorsqu'il souhaite revenir plus tard sur son compte : il saisit son
+// adresse e-mail → il reçoit un lien de connexion sécurisé → il clique
+// dessus → il accède directement à son espace." Same shape as
+// requestPasswordReset above (uuid token, only its hash stored, short
+// expiry) but its own table (magic_link_tokens) rather than overloading
+// user_sessions, since a magic link isn't a session/refresh token - it's a
+// one-time credential that gets exchanged FOR a session.
+
+export const requestMagicLink = async (email: string, purpose: 'login' | 'welcome' = 'login') => {
+  const normalizedEmail = email.toLowerCase().trim();
+
+  // For 'login', don't reveal whether the email exists - same reasoning as
+  // requestPasswordReset. For 'welcome' this is always a real, just-created
+  // account (called right after registerCompanyAndUser), so no such check
+  // is needed there, but the same non-existent-user guard is harmless.
+  const userResult = await db.query('SELECT id, first_name FROM users WHERE LOWER(email) = LOWER($1)', [normalizedEmail]);
+  if (userResult.rows.length === 0) {
+    logger.info(`Magic link requested for non-existent email: ${normalizedEmail}`);
+    return { success: true };
+  }
+
+  const token = uuid();
+  const tokenHash = await bcrypt.hash(token, 5);
+
+  await db.query(
+    `INSERT INTO magic_link_tokens (email, token_hash, purpose, expires_at)
+     VALUES ($1, $2, $3, NOW() + INTERVAL '1 hour')`,
+    [normalizedEmail, tokenHash, purpose]
+  );
+
+  const appUrl = process.env.APP_URL || 'https://direct.vercel.app';
+  const link = `${appUrl}/connexion/lien?token=${encodeURIComponent(token)}&email=${encodeURIComponent(normalizedEmail)}`;
+  const firstName = userResult.rows[0].first_name || '';
+
+  const { subject, html } = purpose === 'welcome'
+    ? {
+        subject: 'Votre espace Marchés Direct est prêt',
+        html: `<p>Bonjour ${firstName},</p><p>Votre espace Marchés Direct est prêt. Confirmez votre adresse e-mail et retrouvez votre espace à tout moment avec ce lien :</p><p><a href="${link}">${link}</a></p><p>Ce lien est valable 1 heure.</p>`,
+      }
+    : {
+        subject: 'Votre lien de connexion Marchés Direct',
+        html: `<p>Bonjour ${firstName},</p><p>Cliquez sur ce lien pour accéder à votre espace Marchés Direct :</p><p><a href="${link}">${link}</a></p><p>Ce lien est valable 1 heure. Si vous n'avez pas demandé cette connexion, ignorez cet e-mail.</p>`,
+      };
+
+  await sendEmail({ to: normalizedEmail, subject, html });
+
+  return { success: true };
+};
+
+export const verifyMagicLink = async (token: string, email: string) => {
+  const normalizedEmail = email.toLowerCase().trim();
+
+  const candidates = await db.query(
+    `SELECT id, token_hash FROM magic_link_tokens
+     WHERE email = $1 AND used_at IS NULL AND expires_at > NOW()
+     ORDER BY created_at DESC LIMIT 5`,
+    [normalizedEmail]
+  );
+
+  // token_hash comparisons are bcrypt (not indexable), so check the
+  // handful of this email's recent unused/unexpired tokens rather than a
+  // single row lookup - matches requestPasswordReset's own token model.
+  let matchedId: string | null = null;
+  for (const row of candidates.rows) {
+    if (await bcrypt.compare(token, row.token_hash)) { matchedId = row.id; break; }
+  }
+  if (!matchedId) {
+    throw new Error('Ce lien de connexion est invalide ou a expiré.');
+  }
+
+  await db.query('UPDATE magic_link_tokens SET used_at = NOW() WHERE id = $1', [matchedId]);
+
+  const userResult = await db.query('SELECT id, email FROM users WHERE LOWER(email) = LOWER($1)', [normalizedEmail]);
+  if (userResult.rows.length === 0) {
+    throw new Error('Aucun compte associé à cette adresse e-mail.');
+  }
+
+  const user = userResult.rows[0];
+  const { accessToken, refreshToken } = generateTokens(user.id, user.email);
+  return { accessToken, refreshToken, userId: user.id, email: user.email };
 };

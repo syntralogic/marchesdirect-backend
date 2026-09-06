@@ -317,6 +317,21 @@ CREATE TABLE user_sessions (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Passwordless login (client's 6 Sep brief, "parcours définitif" v2): email
+-- a single-use, expiring link instead of a password. token_hash only (never
+-- the raw token) so a DB read alone can't be used to log in as someone -
+-- same reasoning as user_sessions.refresh_token_hash above.
+CREATE TABLE magic_link_tokens (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  email VARCHAR(255) NOT NULL,
+  token_hash VARCHAR(255) NOT NULL,
+  purpose VARCHAR(20) DEFAULT 'login', -- 'login' (returning visit) | 'welcome' (post-signup confirmation, not a gate)
+  expires_at TIMESTAMP NOT NULL,
+  used_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX magic_link_tokens_email ON magic_link_tokens(email);
+
 -- Login attempt tracking (for rate limiting & security)
 CREATE TABLE login_attempts (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
