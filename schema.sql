@@ -1243,3 +1243,31 @@ ALTER TABLE chatbot_conversations ALTER COLUMN company_id DROP NOT NULL;
 ALTER TABLE chatbot_conversations ADD COLUMN IF NOT EXISTS session_id VARCHAR(100);
 ALTER TABLE chatbot_conversations ADD COLUMN IF NOT EXISTS lead_captured_at TIMESTAMP;
 CREATE INDEX IF NOT EXISTS chatbot_conversations_session ON chatbot_conversations(session_id) WHERE session_id IS NOT NULL;
+
+-- Pappers protection (client's brief, 5 Sep): cache each company fiche by
+-- SIREN so the same company never triggers a second paid Pappers call, a
+-- per-IP throttle capping distinct companies looked up before an account
+-- exists, and a call-log for cost/anomaly monitoring. See siret.ts.
+CREATE TABLE IF NOT EXISTS company_lookup_cache (
+  siren VARCHAR(9) PRIMARY KEY,
+  company_data JSONB NOT NULL,
+  source VARCHAR(20) NOT NULL,
+  fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS pappers_api_calls (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  siren VARCHAR(9),
+  endpoint VARCHAR(50) NOT NULL,
+  ip_address VARCHAR(45),
+  session_id VARCHAR(100),
+  called_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS pappers_api_calls_called_at ON pappers_api_calls(called_at);
+CREATE TABLE IF NOT EXISTS siret_ip_throttle (
+  ip_address VARCHAR(45) NOT NULL,
+  siren VARCHAR(9) NOT NULL,
+  session_id VARCHAR(100),
+  first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(ip_address, siren)
+);
+CREATE INDEX IF NOT EXISTS siret_ip_throttle_ip ON siret_ip_throttle(ip_address);

@@ -1,9 +1,10 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import axios from 'axios';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { syncLeadToCrm } from '../services/crmSyncService';
+import { AuthRequest } from '../middleware/auth';
 
 const router = Router();
 
@@ -153,18 +154,108 @@ async function lookupViaInsee(siret: string, apiKey: string): Promise<CompanyDat
   };
 }
 
-// Resolves a free-text company name to a SIRET via Pappers' search endpoint
-// (client's ask: let the user type "SIRET ou entreprise" - either works).
-// Returns the first/best match's headquarters SIRET, or null if nothing
-// matched - callers should surface that as a normal "not found", not an
-// error, same as an unrecognized SIRET number.
-async function resolveCompanyNameToSiret(name: string, apiKey: string): Promise<string | null> {
+export interface CompanyCandidate {
+  siret: string;
+  name: string | null;
+  address: string | null;
+  city: string | null;
+  postal: string | null;
+  ape: string | null;
+}
+
+// Client's updated brief (5 Sep, "parcours définitif"): a name search must
+// show a results LIST for the visitor to pick from and confirm - not
+// silently auto-resolve to Pappers' first/best guess as before. Pappers'
+// /v2/recherche already returns enough for a picker (name/address/APE) per
+// candidate without needing a separate paid per-SIRET call for each one -
+// only the confirmed choice triggers the full (cached) lookup below.
+async function searchCompaniesByName(name: string, apiKey: string): Promise<CompanyCandidate[]> {
   const { data } = await axios.get('https://api.pappers.fr/v2/recherche', {
-    params: { api_token: apiKey, q: name, par_page: 1 },
+    params: { api_token: apiKey, q: name, par_page: 5 },
     timeout: 8000,
   });
-  const first = (data.resultats || [])[0];
-  return first?.siege?.siret || first?.siret || null;
+  return (data.resultats || []).map((r: any) => ({
+    siret: r.siege?.siret || r.siret || null,
+    name: r.nom_entreprise || r.denomination || null,
+    address: r.siege?.adresse_ligne_1 || null,
+    city: r.siege?.ville || null,
+    postal: r.siege?.code_postal || null,
+    ape: r.code_naf || null,
+  })).filter((c: CompanyCandidate) => !!c.siret);
+}
+
+// Client's Pappers-protection brief (WhatsApp, 5 Sep) - four rules, all
+// enforced here:
+//  1. "enregistrer chaque fiche entreprise ... à partir du SIREN" +
+//     "ne jamais effectuer un nouvel appel payant si la fiche existe déjà" +
+//     "ne consommer aucun crédit Pappers supplémentaire lorsque la même
+//     entreprise analyse plusieurs opportunités" - company_lookup_cache,
+//     keyed by SIREN (the first 9 digits of any SIRET at that company,
+//     shared across all its établissements), checked before ever calling
+//     Pappers/INSEE again for the same company.
+//  2. "limiter à deux entreprises différentes par adresse IP avant la
+//     création du compte" - siret_ip_throttle. Only applies pre-account
+//     (req.user is null); a real logged-in company has no cap.
+//  3. "ajouter une protection complémentaire par navigateur/appareil" -
+//     honest limitation: there's no real device-fingerprinting anywhere in
+//     this codebase (would need a frontend fingerprint library, e.g.
+//     FingerprintJS, wired through as its own field). sessionId is recorded
+//     alongside each throttle row as the closest available signal today,
+//     but it is NOT a substitute for a real device id and can't be trusted
+//     to survive a cleared cookie/localStorage the way a real fingerprint
+//     would. Flagged rather than presented as solved.
+//  4. "suivre précisément les appels payants et signaler toute consommation
+//     anormale" - pappers_api_calls logs every real (non-cached) paid call.
+//     No alerting/notification is wired up (would need email/Slack
+//     integration, a separate decision) - this is the audit trail an admin
+//     could query, not an automatic alert.
+const THROTTLE_MAX_COMPANIES_PER_IP = 2;
+
+class SiretThrottleError extends Error {}
+
+async function getCompanyWithProtection(
+  siret: string,
+  ip: string | undefined,
+  sessionId: string,
+  isAuthenticated: boolean,
+  fetchFn: () => Promise<CompanyData | null>
+): Promise<CompanyData | null> {
+  const siren = siret.slice(0, 9);
+
+  const cached = await db.query('SELECT company_data, source FROM company_lookup_cache WHERE siren = $1', [siren]);
+  if (cached.rows.length > 0) {
+    return { ...cached.rows[0].company_data, source: cached.rows[0].source };
+  }
+
+  if (!isAuthenticated && ip) {
+    const existing = await db.query('SELECT siren FROM siret_ip_throttle WHERE ip_address = $1', [ip]);
+    const knownSirens = new Set(existing.rows.map(r => r.siren));
+    if (!knownSirens.has(siren) && knownSirens.size >= THROTTLE_MAX_COMPANIES_PER_IP) {
+      throw new SiretThrottleError();
+    }
+  }
+
+  const company = await fetchFn();
+  if (!company) return null;
+
+  await db.query(
+    `INSERT INTO company_lookup_cache (siren, company_data, source)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (siren) DO UPDATE SET company_data = $2, source = $3, fetched_at = NOW()`,
+    [siren, JSON.stringify(company), company.source]
+  );
+  await db.query(
+    `INSERT INTO pappers_api_calls (siren, endpoint, ip_address, session_id) VALUES ($1, $2, $3, $4)`,
+    [siren, company.source === 'pappers' ? 'entreprise' : company.source, ip || null, sessionId]
+  );
+  if (ip) {
+    await db.query(
+      `INSERT INTO siret_ip_throttle (ip_address, siren, session_id) VALUES ($1, $2, $3) ON CONFLICT (ip_address, siren) DO NOTHING`,
+      [ip, siren, sessionId]
+    );
+  }
+
+  return company;
 }
 
 
@@ -172,7 +263,7 @@ async function resolveCompanyNameToSiret(name: string, apiKey: string): Promise<
 // once identified on any fiche, a visitor is recognized everywhere without
 // re-entering their SIRET. This is what the frontend calls on load to
 // restore that state.
-router.get('/status', async (req: Request, res: Response) => {
+router.get('/status', async (req: AuthRequest, res: Response) => {
   try {
     const sessionId = req.query.sessionId as string;
     if (!sessionId) return res.json({ companyKnown: false, leadCaptured: false });
@@ -217,7 +308,7 @@ router.post(
     body('email').isEmail().withMessage("L'e-mail n'est pas valide.").normalizeEmail(),
     body('opportunityId').optional({ checkFalsy: true }).isUUID(),
   ],
-  async (req: Request, res: Response) => {
+  async (req: AuthRequest, res: Response) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ error: errors.array()[0].msg });
@@ -276,20 +367,66 @@ router.post(
   }
 );
 
-// POST /api/siret/lookup - "reconnaissance d'entreprise" (prototype V17,
-// section 3.3). Accepts either a 14-digit SIRET or a free-text company name
-// (client's ask: label the field "SIRET ou entreprise" so either works) -
-// a name is resolved to a SIRET via Pappers' search endpoint first, then
-// follows the exact same Pappers-primary/INSEE-fallback lookup as before.
-// Caches whichever result against the visitor's session so it's recognized
-// on every fiche from then on.
+// Shared by /lookup's direct-SIRET path and /confirm: does the actual
+// Pappers-primary/INSEE-fallback fetch, wrapped in the SIREN cache + IP
+// throttle protection (getCompanyWithProtection above).
+async function resolveAndCacheCompany(
+  siret: string,
+  pappersKey: string | undefined,
+  inseeKey: string | undefined,
+  ip: string | undefined,
+  sessionId: string,
+  isAuthenticated: boolean
+): Promise<{ company: CompanyData | null; notFound: boolean }> {
+  let lastError: any = null;
+  let notFound = false;
+
+  const company = await getCompanyWithProtection(siret, ip, sessionId, isAuthenticated, async () => {
+    if (pappersKey) {
+      try {
+        return await lookupViaPappers(siret, pappersKey);
+      } catch (err: any) {
+        lastError = err;
+        if (err.response?.status === 404) {
+          logger.info(`Pappers lookup: SIRET ${siret} not found, falling back to INSEE if configured`);
+        } else {
+          logger.error('Pappers lookup error:', err.response?.data || err.message);
+        }
+      }
+    }
+    if (inseeKey) {
+      try {
+        return await lookupViaInsee(siret, inseeKey);
+      } catch (err: any) {
+        lastError = err;
+        if (err.response?.status !== 404) {
+          logger.error('INSEE lookup error:', err.response?.data || err.message);
+        }
+      }
+    }
+    return null;
+  });
+
+  if (!company && lastError?.response?.status === 404) notFound = true;
+  return { company, notFound };
+}
+
+// POST /api/siret/lookup - "reconnaissance d'entreprise" (client's 5 Sep
+// "parcours définitif"). A 14-digit SIRET is unambiguous and resolved
+// immediately, same as before. A free-text name now returns a LIST of
+// candidates instead of silently auto-picking Pappers' first match - the
+// client was explicit that the visitor must see and confirm the right one
+// ("Une liste de résultats lui est proposée. Dès qu'il sélectionne et
+// confirme la bonne entreprise..."). Nothing is saved to siret_lookups (and
+// no paid per-company Pappers call happens) until the visitor actually
+// confirms one via POST /siret/confirm below.
 router.post(
   '/lookup',
   [
     body('query').isString().trim().isLength({ min: 2, max: 200 }).withMessage("Indiquez un SIRET (14 chiffres) ou le nom de l'entreprise."),
     body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
   ],
-  async (req: Request, res: Response) => {
+  async (req: AuthRequest, res: Response) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ error: errors.array()[0].msg });
@@ -297,6 +434,8 @@ router.post(
 
     const { sessionId } = req.body;
     const query: string = req.body.query;
+    const ip = req.ip;
+    const isAuthenticated = !!req.user;
 
     // Demo shortcut - checked before the key-configured gate, and before
     // treating the query as a name-search, so it works identically whether
@@ -320,63 +459,43 @@ router.post(
       });
     }
 
-    let siret: string;
-
-    if (/^\d{14}$/.test(query)) {
-      siret = query;
-    } else {
-      // Not a SIRET - treat as a company name. Needs Pappers specifically
-      // (INSEE Sirene's own free-text search is a separate, differently-
-      // shaped endpoint not wired here yet - name search is Pappers-only
-      // for now, SIRET number entry still works either way).
+    // Free-text name -> candidates list, no lookup/cache/throttle yet.
+    if (!/^\d{14}$/.test(query)) {
       if (!pappersKey) {
         return res.status(400).json({
           error: 'name_search_not_configured',
           message: "La recherche par nom d'entreprise n'est pas disponible pour le moment. Indiquez le numéro de SIRET (14 chiffres).",
         });
       }
-      let resolved: string | null = null;
+      let candidates: CompanyCandidate[] = [];
       try {
-        resolved = await resolveCompanyNameToSiret(query, pappersKey);
+        candidates = await searchCompaniesByName(query, pappersKey);
       } catch (err: any) {
         logger.error('Pappers company-name search error:', err.response?.data || err.message);
         return res.status(502).json({ error: 'siret_lookup_failed', message: 'La recherche a échoué. Réessayez.' });
       }
-      if (!resolved) {
+      if (candidates.length === 0) {
         return res.status(404).json({ error: 'siret_not_found', message: "Aucune entreprise trouvée pour ce nom. Essayez avec le numéro de SIRET." });
       }
-      siret = resolved;
+      return res.json({ companyKnown: false, candidates });
     }
 
-    let company: CompanyData | null = null;
-    let lastError: any = null;
-
-    if (pappersKey) {
-      try {
-        company = await lookupViaPappers(siret, pappersKey);
-      } catch (err: any) {
-        lastError = err;
-        if (err.response?.status === 404) {
-          logger.info(`Pappers lookup: SIRET ${siret} not found, falling back to INSEE if configured`);
-        } else {
-          logger.error('Pappers lookup error:', err.response?.data || err.message);
-        }
+    // Direct 14-digit SIRET - unambiguous, resolve immediately (protected
+    // by the same cache/throttle as /confirm).
+    let result: { company: CompanyData | null; notFound: boolean };
+    try {
+      result = await resolveAndCacheCompany(query, pappersKey, inseeKey, ip, sessionId, isAuthenticated);
+    } catch (err) {
+      if (err instanceof SiretThrottleError) {
+        return res.status(429).json({
+          error: 'company_lookup_throttled',
+          message: "Vous avez déjà consulté deux entreprises différentes. Créez un compte pour continuer vos recherches.",
+        });
       }
+      throw err;
     }
-
-    if (!company && inseeKey) {
-      try {
-        company = await lookupViaInsee(siret, inseeKey);
-      } catch (err: any) {
-        lastError = err;
-        if (err.response?.status !== 404) {
-          logger.error('INSEE lookup error:', err.response?.data || err.message);
-        }
-      }
-    }
-
-    if (!company) {
-      if (lastError?.response?.status === 404) {
+    if (!result.company) {
+      if (result.notFound) {
         return res.status(404).json({ error: 'siret_not_found', message: 'Aucune entreprise trouvée pour ce SIRET.' });
       }
       return res.status(502).json({ error: 'siret_lookup_failed', message: "La vérification du SIRET a échoué. Réessayez." });
@@ -386,10 +505,76 @@ router.post(
       `INSERT INTO siret_lookups (session_id, siret, company_data)
        VALUES ($1, $2, $3)
        ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
-      [sessionId, siret, JSON.stringify(company)]
+      [sessionId, query, JSON.stringify(result.company)]
     );
 
-    res.json({ companyKnown: true, siret, company });
+    res.json({ companyKnown: true, siret: query, company: result.company });
+  }
+);
+
+// POST /api/siret/confirm - the visitor picked one candidate off the list
+// POST /siret/lookup returned for a name search. Does the actual (cached/
+// throttled) per-SIRET lookup and saves it as the recognized company for
+// this session, exactly like the direct-SIRET path in /lookup above.
+router.post(
+  '/confirm',
+  [
+    body('siret').matches(/^\d{14}$/).withMessage('SIRET invalide.'),
+    body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
+  ],
+  async (req: AuthRequest, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ error: errors.array()[0].msg });
+    }
+
+    const { siret, sessionId } = req.body;
+    const ip = req.ip;
+    const isAuthenticated = !!req.user;
+
+    if (siret === DEMO_SIRET) {
+      await db.query(
+        `INSERT INTO siret_lookups (session_id, siret, company_data)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
+        [sessionId, DEMO_SIRET, JSON.stringify(DEMO_COMPANY)]
+      );
+      return res.json({ companyKnown: true, siret: DEMO_SIRET, company: DEMO_COMPANY });
+    }
+
+    const pappersKey = process.env.PAPPERS_API_KEY;
+    const inseeKey = process.env.INSEE_API_KEY;
+    if (!pappersKey && !inseeKey) {
+      return res.status(501).json({ error: 'company_lookup_not_configured', message: "La reconnaissance d'entreprise n'est pas encore configurée." });
+    }
+
+    let result: { company: CompanyData | null; notFound: boolean };
+    try {
+      result = await resolveAndCacheCompany(siret, pappersKey, inseeKey, ip, sessionId, isAuthenticated);
+    } catch (err) {
+      if (err instanceof SiretThrottleError) {
+        return res.status(429).json({
+          error: 'company_lookup_throttled',
+          message: "Vous avez déjà consulté deux entreprises différentes. Créez un compte pour continuer vos recherches.",
+        });
+      }
+      throw err;
+    }
+    if (!result.company) {
+      if (result.notFound) {
+        return res.status(404).json({ error: 'siret_not_found', message: 'Aucune entreprise trouvée pour ce SIRET.' });
+      }
+      return res.status(502).json({ error: 'siret_lookup_failed', message: "La vérification du SIRET a échoué. Réessayez." });
+    }
+
+    await db.query(
+      `INSERT INTO siret_lookups (session_id, siret, company_data)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
+      [sessionId, siret, JSON.stringify(result.company)]
+    );
+
+    res.json({ companyKnown: true, siret, company: result.company });
   }
 );
 
