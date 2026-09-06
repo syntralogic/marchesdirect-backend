@@ -34,6 +34,16 @@ interface CompanyData {
   ape: string | null;
   activity: string | null;
   website: string | null;
+  // Added for client priority #7 ("Votre entreprise et votre concordance"):
+  // siren/siret/statut so the page can show them without the caller having
+  // to re-derive siren from siret itself; revenue+year from Pappers'
+  // `finances` array (most recent exercice available - Pappers returns
+  // these newest-first).
+  siren: string | null;
+  siret: string | null;
+  statut: string | null;
+  revenue: string | null;
+  revenueYear: number | null;
   // "Présence détectée" (prototype V17, section 3.3.3) - Pappers has no
   // Facebook page or Google rating data (it's a legal/financial registry,
   // not a search/SERP source), so those two stay null here regardless of
@@ -71,6 +81,11 @@ const DEMO_COMPANY: CompanyData = {
   ape: '4321A',
   activity: "Travaux d'installation électrique",
   website: 'kbelectricite.fr',
+  siren: '123456789',
+  siret: DEMO_SIRET,
+  statut: 'Active',
+  revenue: '412000',
+  revenueYear: 2025,
   facebook: 'KB Électricité Bordeaux',
   googleRating: '4.7',
   googleReviewCount: 32,
@@ -88,7 +103,7 @@ const DEMO_COMPANY: CompanyData = {
 // as the fallback instead, since it's already wired, free, and official.
 async function lookupViaPappers(siret: string, apiKey: string): Promise<CompanyData | null> {
   const { data } = await axios.get('https://api.pappers.fr/v2/entreprise', {
-    params: { api_token: apiKey, siret, champs_supplementaires: 'labels' },
+    params: { api_token: apiKey, siret, champs_supplementaires: 'labels,finances' },
     timeout: 8000,
   });
 
@@ -96,6 +111,11 @@ async function lookupViaPappers(siret: string, apiKey: string): Promise<CompanyD
   const dirigeant = (data.representants || [])[0] || (data.dirigeants || [])[0] || {};
   const directorName = [dirigeant.prenom, dirigeant.nom].filter(Boolean).join(' ') || dirigeant.nom_complet || null;
   const labels: string[] = Array.isArray(data.labels) ? data.labels.map((l: any) => l.label || l.nom || l).filter(Boolean) : [];
+  // Pappers returns `finances` newest-exercice-first; take the first entry
+  // that actually has a turnover figure rather than assuming index 0 always
+  // does (a just-filed exercice can show up with other fields still null).
+  const finances: any[] = Array.isArray(data.finances) ? data.finances : [];
+  const latestFinance = finances.find(f => f && f.chiffre_affaires != null) || null;
 
   return {
     name: data.nom_entreprise || data.denomination || null,
@@ -110,6 +130,11 @@ async function lookupViaPappers(siret: string, apiKey: string): Promise<CompanyD
     ape: data.code_naf || null,
     activity: data.libelle_code_naf || (data.code_naf ? APE_LABELS[data.code_naf] || null : null),
     website: data.site_web || null,
+    siren: data.siren || siret.slice(0, 9) || null,
+    siret: data.siege?.siret || siret || null,
+    statut: data.entreprise_cessee ? 'Cessée' : (data.statut_rcs || (data.entreprise_cessee === false ? 'Active' : null)),
+    revenue: latestFinance?.chiffre_affaires != null ? String(latestFinance.chiffre_affaires) : null,
+    revenueYear: latestFinance?.annee ?? null,
     facebook: null,
     googleRating: null,
     googleReviewCount: null,
@@ -146,6 +171,11 @@ async function lookupViaInsee(siret: string, apiKey: string): Promise<CompanyDat
     ape: apeCode,
     activity: apeCode ? (APE_LABELS[apeCode] || null) : null,
     website: null,
+    siren: unite.siren || siret.slice(0, 9) || null,
+    siret: siret || null,
+    statut: unite.etatAdministratifUniteLegale === 'A' ? 'Active' : (unite.etatAdministratifUniteLegale === 'C' ? 'Cessée' : null),
+    revenue: null, // Sirene has no financial data at all - Pappers-only field
+    revenueYear: null,
     facebook: null,
     googleRating: null,
     googleReviewCount: null,
@@ -156,11 +186,14 @@ async function lookupViaInsee(siret: string, apiKey: string): Promise<CompanyDat
 
 export interface CompanyCandidate {
   siret: string;
+  siren: string | null;
   name: string | null;
   address: string | null;
   city: string | null;
   postal: string | null;
   ape: string | null;
+  activity: string | null;
+  statut: string | null;
 }
 
 // Client's updated brief (5 Sep, "parcours définitif"): a name search must
@@ -169,6 +202,9 @@ export interface CompanyCandidate {
 // /v2/recherche already returns enough for a picker (name/address/APE) per
 // candidate without needing a separate paid per-SIRET call for each one -
 // only the confirmed choice triggers the full (cached) lookup below.
+// Client priority #6 (candidate list must show raison sociale, ville,
+// activité, SIREN/SIRET, AND the company's active/ceased statut) - added
+// statut + activity label + explicit siren alongside the fields already here.
 async function searchCompaniesByName(name: string, apiKey: string): Promise<CompanyCandidate[]> {
   const { data } = await axios.get('https://api.pappers.fr/v2/recherche', {
     params: { api_token: apiKey, q: name, par_page: 5 },
@@ -176,11 +212,14 @@ async function searchCompaniesByName(name: string, apiKey: string): Promise<Comp
   });
   return (data.resultats || []).map((r: any) => ({
     siret: r.siege?.siret || r.siret || null,
+    siren: r.siren || null,
     name: r.nom_entreprise || r.denomination || null,
     address: r.siege?.adresse_ligne_1 || null,
     city: r.siege?.ville || null,
     postal: r.siege?.code_postal || null,
     ape: r.code_naf || null,
+    activity: r.libelle_code_naf || (r.code_naf ? APE_LABELS[r.code_naf] || null : null),
+    statut: r.entreprise_cessee === true ? 'Cessée' : (r.entreprise_cessee === false ? 'Active' : null),
   })).filter((c: CompanyCandidate) => !!c.siret);
 }
 
