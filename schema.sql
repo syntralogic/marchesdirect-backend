@@ -659,6 +659,20 @@ CREATE TABLE favorites (
 CREATE INDEX favorites_company ON favorites(company_id);
 CREATE INDEX favorites_opportunity ON favorites(opportunity_id);
 
+-- Anonymous equivalent of favorites above (client's brief, 6 Sep: the Save
+-- icon on a listing card must never require login/coordinates first - it
+-- saves into the visitor's browser session immediately, then gets migrated
+-- into the real `favorites` table for their company once they're
+-- identified - see POST /api/favorites/attach).
+CREATE TABLE session_favorites (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  session_id VARCHAR(100) NOT NULL,
+  opportunity_id UUID NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(session_id, opportunity_id)
+);
+CREATE INDEX session_favorites_session ON session_favorites(session_id);
+
 -- ============================================================================
 -- 10. CHATBOT CONVERSATIONS (Milestone 7)
 -- ============================================================================

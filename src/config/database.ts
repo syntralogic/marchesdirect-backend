@@ -732,6 +732,19 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     )
   `);
   await step(`CREATE INDEX IF NOT EXISTS magic_link_tokens_email ON magic_link_tokens(email)`);
+
+  // Session-scoped favorites (client's brief, 6 Sep): Save icon on a
+  // listing card must save immediately for an anonymous visitor too.
+  await step(`
+    CREATE TABLE IF NOT EXISTS session_favorites (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      session_id VARCHAR(100) NOT NULL,
+      opportunity_id UUID NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(session_id, opportunity_id)
+    )
+  `);
+  await step(`CREATE INDEX IF NOT EXISTS session_favorites_session ON session_favorites(session_id)`);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old
