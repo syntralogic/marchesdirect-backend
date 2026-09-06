@@ -3,6 +3,7 @@ import { body, validationResult } from 'express-validator';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts } from '../services/aiService';
+import { ingestOpportunityDocuments } from '../services/documentIngestionService';
 import { computeMatchScore } from '../services/matchScoreService';
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { optionalAuth, authenticate, requireRole, AuthRequest } from '../middleware/auth';
@@ -115,6 +116,31 @@ async function ensureFactsExtracted(opportunityId: string, currentFacts: Record<
     // rest of the fiche still renders, and the batch job will retry later.
     return currentFacts;
   }
+}
+
+// Unlike ensureFactsExtracted above, DCE document ingestion downloads from
+// arbitrary (sometimes slow/unreliable) buyer platforms - that's exactly why
+// it already runs as its own separate job rather than inline during BOAMP
+// collection. Awaiting it inline here would risk slow/hung page loads. But
+// with no on-demand path at all, a specifically-viewed opportunity was
+// purely at the mercy of the batch job's queue order (see
+// documentIngestionService.ts's starvation fix) - and Qualifications
+// requises / Modalité de dépôt / Critères de notation usually live in these
+// documents (RC/CCAP), not the thin BOAMP notice text, so a record stuck
+// pending would show a permanently thinner "Détails du dossier" than it
+// should. Kick it off in the background (fire-and-forget, de-duped per
+// process like the facts extraction above) so the *next* visit or the
+// batch job's next pass picks up real documents sooner, without making
+// this request wait on it.
+const inFlightDocumentIngestions = new Set<string>();
+
+function kickOffDocumentIngestionIfPending(opportunityId: string, dceDocumentsStatus: string | null) {
+  if (dceDocumentsStatus && dceDocumentsStatus !== 'pending') return;
+  if (inFlightDocumentIngestions.has(opportunityId)) return;
+  inFlightDocumentIngestions.add(opportunityId);
+  ingestOpportunityDocuments(opportunityId)
+    .catch(err => logger.warn(`On-demand DCE ingestion failed for ${opportunityId} while serving a detail view: ${err instanceof Error ? err.message : err}`))
+    .finally(() => inFlightDocumentIngestions.delete(opportunityId));
 }
 
 // GET /api/opportunities - search & filter listings (public, powers the 3 journeys)
@@ -422,6 +448,7 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     // genuinely missing/malformed (see factsNeedExtraction) - already-good
     // records never re-call the LLM here.
     opportunity.ai_extracted_facts = await ensureFactsExtracted(opportunity.id, opportunity.ai_extracted_facts);
+    kickOffDocumentIngestionIfPending(opportunity.id, opportunity.dce_documents_status);
 
     const sessionId = (req.query.sessionId as string) || '';
     const email = (req.user?.email || (req.query.email as string) || '');
