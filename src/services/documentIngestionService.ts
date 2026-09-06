@@ -6,6 +6,7 @@ const pdfParse = require('pdf-parse');
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { uploadTenderDocument } from './storageService';
+import { extractOpportunityFacts } from './aiService';
 
 // ============================================================================
 // DCE DOCUMENT INGESTION (download + parse RC/CCAP/CCTP/AAPC attachments)
@@ -294,6 +295,19 @@ export const ingestOpportunityDocuments = async (opportunityId: string): Promise
     logger.info(
       `[DCE Ingestion] Opportunity ${opportunityId}: ${parsedCount} parsed, ${externalOnlyCount} external-only, ${failedCount} failed -> ${finalStatus}`
     );
+
+    // Re-run fact extraction now that real DCE text exists, instead of
+    // leaving Type de procédure / Qualifications requises / Modalité de
+    // dépôt / Critères de notation frozen at whatever an earlier
+    // notice-only extraction (or none at all) produced. Best-effort: a
+    // failure here shouldn't make document ingestion itself look failed -
+    // the on-demand path and the facts backfill job (both keyed off
+    // ai_facts_extracted_with_documents) will catch it on the next pass.
+    if (parsedCount > 0) {
+      extractOpportunityFacts(opportunityId).catch(err =>
+        logger.warn(`[DCE Ingestion] Post-parse facts re-extraction failed for ${opportunityId}: ${err instanceof Error ? err.message : err}`)
+      );
+    }
   } catch (err) {
     logger.error(`[DCE Ingestion] Failed for opportunity ${opportunityId}:`, err);
     await db.query(`UPDATE opportunities SET dce_documents_status = 'failed' WHERE id = $1`, [opportunityId]).catch(

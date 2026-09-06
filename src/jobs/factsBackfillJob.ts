@@ -45,6 +45,15 @@ const NEEDS_BACKFILL_QUERY = `
       -- "Critères de notation" card: selection_criteria added later,
       -- free-tier. Rows extracted before this catch up here too.
       OR ai_extracted_facts->'selection_criteria' IS NULL
+      -- Bug fix: a record whose only extraction ran before its DCE
+      -- documents (RC/CCAP/CCTP) were parsed has every key above already
+      -- present (as honest "not available" values), so none of the checks
+      -- above ever catch it - yet Type de procédure / Qualifications
+      -- requises / Modalité de dépôt / Critères de notation almost always
+      -- live only in those documents. Once documents are actually fetched,
+      -- give the record one real re-extraction with that text. Kept in sync
+      -- with routes/opportunities.ts's factsNeedExtraction.
+      OR (dce_documents_status = 'fetched' AND ai_facts_extracted_with_documents IS NOT TRUE)
     )
   -- Was ORDER BY created_at DESC: this query catches BOTH brand-new
   -- opportunities and older ones still missing newer fields, and the
