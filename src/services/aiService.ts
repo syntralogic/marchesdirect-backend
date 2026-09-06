@@ -526,13 +526,23 @@ Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
     ? `${Number(opp.estimated_value).toLocaleString('fr-FR', { maximumFractionDigits: 0 })} EUR`
     : '';
 
+  // The full BOAMP/PLACE record (procedure type, conditions de participation,
+  // critères de sélection, modalités de dépôt all live in here) was
+  // hard-capped at 2000 chars of its JSON serialization. Metadata fields and
+  // a long objet/description come first in that JSON, so on a record with a
+  // moderately detailed description the budget was often exhausted before
+  // the string ever reached procedure/criteria fields - they'd then look
+  // "not in the source" to the model purely from truncation, not real
+  // absence. Parsed DCE documents below get a 30000-char budget for the same
+  // reason; 2000 for the raw record was inconsistent with that and too
+  // tight. Raised to 8000.
   const userMessage = `SOURCE RECORD (raw, as ingested from the connector):
 Title: ${opp.title}
 Description: ${opp.description || ''}
 Deadline field: ${deadlineText}
 Estimated value field: ${estimatedValueText}
 Location: ${opp.location_city || ''}, ${opp.location_region || ''}
-Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 2000) : '{}'}
+Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 8000) : '{}'}
 ${parsedDocumentsText ? `\nREAL PARSED DCE DOCUMENTS (use these for requirements_detected):\n${parsedDocumentsText}` : ''}`;
 
   const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 1800);
