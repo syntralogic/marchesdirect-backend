@@ -14,7 +14,84 @@ interface RegisterParams {
   phone?: string;
   industry?: string;
   region?: string;
+  // Client priority #12 ("synchroniser l'entreprise et le compte client"):
+  // when registration follows an already-completed SIRET identification
+  // (see the new completeSignup() below), the rich Pappers/INSEE data
+  // gathered earlier in the funnel gets written straight into the new
+  // company row instead of the user having to re-type any of it.
+  siret?: string;
+  legalForm?: string;
+  addressStreet?: string;
+  addressPostalCode?: string;
+  websiteUrl?: string;
+  annualRevenue?: number;
+  foundingYear?: number;
 }
+
+// Client priority #10 ("Création de l'accès personnel") + #12
+// ("synchroniser l'entreprise et le compte client"): the visitor has
+// already been through SIRET identification (siret_lookups has their full
+// Pappers/INSEE company_data) and lead capture (same row's phone/email)
+// earlier in this same funnel by the time they reach this step - the only
+// new thing they should ever have to type is a password. Re-asking for
+// company name, address, sector etc. here (which the old generic
+// /auth/register form did) is exactly the "vous devez ressaisir des
+// informations déjà récupérées" complaint.
+export const completeSignupFromSession = async (
+  sessionId: string,
+  password: string,
+  brandId?: string | null
+) => {
+  const lookup = await db.query(
+    'SELECT siret, company_data, phone, email, lead_captured_at FROM siret_lookups WHERE session_id = $1',
+    [sessionId]
+  );
+  if (lookup.rows.length === 0 || !lookup.rows[0].company_data) {
+    throw new Error('Identifiez d\'abord votre entreprise avant de créer votre accès.');
+  }
+  const row = lookup.rows[0];
+  if (!row.lead_captured_at || !row.email) {
+    throw new Error('Renseignez votre e-mail et votre téléphone avant de créer votre accès.');
+  }
+  const c = row.company_data || {};
+
+  // The director's name is the closest thing to a personal name Pappers
+  // gives us - the funnel itself never asks the visitor for one (client's
+  // #8/#10 briefs only ever ask for email/phone/password). Falls back to
+  // the email's local part rather than leaving first/last name blank,
+  // since users.first_name has no NOT NULL constraint but an empty "Bonjour
+  // ," greeting would be a worse experience than a best-effort guess.
+  const directorParts = (c.director || '').trim().split(/\s+/).filter(Boolean);
+  const firstName = directorParts[0] || row.email.split('@')[0];
+  const lastName = directorParts.slice(1).join(' ') || '';
+
+  // Pappers' capital string is "25 000 EUR" (see lookupViaPappers) - not
+  // what belongs in annual_revenue, so this intentionally uses `revenue`
+  // (the raw numeric chiffre_affaires) instead, only when it parses cleanly.
+  const revenueNum = c.revenue != null ? Number(c.revenue) : NaN;
+  const foundingYear = c.created ? new Date(c.created).getFullYear() : undefined;
+
+  return registerCompanyAndUser(
+    {
+      companyName: c.name || 'Mon entreprise',
+      firstName,
+      lastName,
+      email: row.email,
+      password,
+      phone: row.phone || undefined,
+      industry: c.activity || undefined,
+      region: c.city || undefined,
+      siret: c.siret || row.siret || undefined,
+      legalForm: c.legal || undefined,
+      addressStreet: c.address || undefined,
+      addressPostalCode: c.postal || undefined,
+      websiteUrl: c.website || undefined,
+      annualRevenue: Number.isFinite(revenueNum) ? revenueNum : undefined,
+      foundingYear: Number.isFinite(foundingYear as number) ? foundingYear : undefined,
+    },
+    brandId
+  );
+};
 
 // ============================================================================
 // REGISTRATION (Milestone 1 & 8)
@@ -72,8 +149,10 @@ export const registerCompanyAndUser = async (data: RegisterParams, brandId?: str
     await client.query(
       `INSERT INTO companies 
         (id, brand_id, name, slug, email, phone, industry_sector, 
-         address_city, address_country, status, subscription_status, subscription_tier, trial_ends_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW() + INTERVAL '14 days')`,
+         address_city, address_country, status, subscription_status, subscription_tier, trial_ends_at,
+         siret, legal_form, address_street, address_postal_code, website_url, annual_revenue, founding_year)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW() + INTERVAL '14 days',
+               $13, $14, $15, $16, $17, $18, $19)`,
       [
         companyId,
         resolvedBrandId,
@@ -90,6 +169,13 @@ export const registerCompanyAndUser = async (data: RegisterParams, brandId?: str
                  // INSERT's column list), so signups got an unlimited "trial" that
                  // never expired and had no end date to show the user.
         'free',
+        data.siret || null,
+        data.legalForm || null,
+        data.addressStreet || null,
+        data.addressPostalCode || null,
+        data.websiteUrl || null,
+        data.annualRevenue ?? null,
+        data.foundingYear ?? null,
       ]
     );
 
