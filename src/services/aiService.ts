@@ -578,9 +578,19 @@ ${parsedDocumentsText ? `\nREAL PARSED DCE DOCUMENTS (use these for requirements
     facts.selection_criteria = { value: [], available: false };
   }
 
+  // Recorded alongside the facts themselves so a later caller can tell
+  // whether *this* extraction actually had parsed DCE text to work with -
+  // Type de procédure / Qualifications requises / Modalité de dépôt /
+  // Critères de notation usually only live in those documents, not the
+  // BOAMP notice. Without this flag, an extraction run before any document
+  // was parsed permanently looks "done" even though it never really had a
+  // chance to find those fields (see factsNeedExtraction in
+  // routes/opportunities.ts and the backfill queries).
+  const usedParsedDocuments = docsResult.rows.length > 0;
+
   await db.query(
-    `UPDATE opportunities SET ai_extracted_facts = $1, updated_at = NOW() WHERE id = $2`,
-    [JSON.stringify(facts), opportunityId]
+    `UPDATE opportunities SET ai_extracted_facts = $1, ai_facts_extracted_with_documents = $2, updated_at = NOW() WHERE id = $3`,
+    [JSON.stringify(facts), usedParsedDocuments, opportunityId]
   );
 
   logger.info(`✅ Extracted facts for opportunity ${opportunityId}`);

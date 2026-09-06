@@ -154,6 +154,15 @@ CREATE TABLE opportunities (
   ai_extracted_facts JSONB,                 -- Structured fact extraction (POC test): each field
                                              -- {"value": "...", "available": bool} - "not available"
                                              -- when the source record doesn't actually contain it.
+  ai_facts_extracted_with_documents BOOLEAN DEFAULT false, -- True only when the extraction run that
+                                             -- produced the current ai_extracted_facts had real parsed
+                                             -- DCE documents (RC/CCAP/CCTP) available to it. Type de
+                                             -- procédure / Qualifications requises / Modalité de dépôt /
+                                             -- Critères de notation usually live only in those documents,
+                                             -- not the thin BOAMP notice - so a first extraction that ran
+                                             -- before documents were parsed correctly returns
+                                             -- available:false for them, but without this flag nothing
+                                             -- would ever know to retry once the documents show up later.
 
   -- DCE document ingestion (attachment download/parsing - see tender_documents table)
   dce_documents_status VARCHAR(50) DEFAULT 'pending', -- 'pending', 'processing', 'fetched',
@@ -407,6 +416,7 @@ CREATE INDEX IF NOT EXISTS opportunities_search ON opportunities USING GIN(searc
 -- Safe to re-run: covers anyone who already loaded schema.sql once before this
 -- column was added to the CREATE TABLE above (which only applies on first create).
 ALTER TABLE company_certifications ADD COLUMN IF NOT EXISTS expiry_reminder_sent BOOLEAN DEFAULT false;
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS ai_facts_extracted_with_documents BOOLEAN DEFAULT false;
 
 -- Company HR & Resources (for proposal generation)
 CREATE TABLE company_resources (
