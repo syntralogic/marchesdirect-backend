@@ -46,7 +46,18 @@ const NEEDS_BACKFILL_QUERY = `
       -- free-tier. Rows extracted before this catch up here too.
       OR ai_extracted_facts->'selection_criteria' IS NULL
     )
-  ORDER BY created_at DESC
+  -- Was ORDER BY created_at DESC: this query catches BOTH brand-new
+  -- opportunities and older ones still missing newer fields, and the
+  -- on-demand path (routes/opportunities.ts's ensureFactsExtracted) already
+  -- extracts a fresh record the instant any visitor actually opens it -
+  -- this batch job's real job is only to mop up whatever nobody has viewed
+  -- yet. Newest-first meant that under sustained ingestion (BOAMP/DECP
+  -- regularly outpacing this job's throttled 15-per-30min rate), the older
+  -- backlog was permanently starved: every run's 15 slots kept going to
+  -- whatever was freshest, so a record could sit incomplete indefinitely.
+  -- Oldest-first guarantees the backlog actually drains over time instead
+  -- of just growing forever behind newer arrivals.
+  ORDER BY created_at ASC
   LIMIT $1
 `;
 

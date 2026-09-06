@@ -80,6 +80,15 @@ function factsNeedExtraction(facts: Record<string, any> | null | undefined): boo
   // Richer "Détails du dossier" (client ask): four fields added later. A
   // record extracted before this exists but is missing them - re-run it too.
   if (!facts.contract_duration) return true;
+  // "Critères de notation" card: selection_criteria added later, free-tier.
+  // Was missing from this on-demand check entirely - a record extracted
+  // before this field existed (but already has team_size_estimate/key_risks/
+  // contract_duration from an earlier catch-up) would silently never
+  // re-extract here, leaving "Critères de notation" permanently absent from
+  // the fiche until the throttled batch job (factsBackfillJob.ts) happened
+  // to reach it - which, given ingestion volume, could be a very long time.
+  // Keep this in sync with factsBackfillJob.ts's SQL condition.
+  if (!facts.selection_criteria) return true;
   return false;
 }
 
