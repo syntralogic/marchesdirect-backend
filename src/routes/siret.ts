@@ -43,6 +43,7 @@ interface CompanyData {
   siret: string | null;
   statut: string | null;
   revenue: string | null;
+  revenueEstimated?: boolean;
   revenueYear: number | null;
   // "Présence détectée" (prototype V17, section 3.3.3) - Pappers has no
   // Facebook page or Google rating data (it's a legal/financial registry,
@@ -103,7 +104,15 @@ const DEMO_COMPANY: CompanyData = {
 // as the fallback instead, since it's already wired, free, and official.
 async function lookupViaPappers(siret: string, apiKey: string): Promise<CompanyData | null> {
   const { data } = await axios.get('https://api.pappers.fr/v2/entreprise', {
-    params: { api_token: apiKey, siret, champs_supplementaires: 'labels,finances' },
+    // "finances_estimations" added alongside "finances" (per Pappers' own
+    // API changelog): a company's most recent turnover on pappers.fr is
+    // sometimes an ESTIMATION rather than a filed compte annuel, and that
+    // only comes back from the API under this separate champ - the base
+    // "finances" array only covers officially filed exercices. This is
+    // exactly the SOW CLIM case the client tested: CA visible on the
+    // Pappers website but absent here, because only "finances" was
+    // requested and its latest year had no filed accounts yet.
+    params: { api_token: apiKey, siret, champs_supplementaires: 'labels,finances,finances_estimations' },
     timeout: 8000,
   });
 
@@ -114,8 +123,15 @@ async function lookupViaPappers(siret: string, apiKey: string): Promise<CompanyD
   // Pappers returns `finances` newest-exercice-first; take the first entry
   // that actually has a turnover figure rather than assuming index 0 always
   // does (a just-filed exercice can show up with other fields still null).
+  // Fall back to `finances_estimations` (Pappers' own estimate for a year
+  // with no filed accounts yet) only when no filed figure exists at all -
+  // filed data always wins when both are present.
   const finances: any[] = Array.isArray(data.finances) ? data.finances : [];
-  const latestFinance = finances.find(f => f && f.chiffre_affaires != null) || null;
+  const financesEstimations: any[] = Array.isArray(data.finances_estimations) ? data.finances_estimations : [];
+  const latestFinance = finances.find(f => f && f.chiffre_affaires != null)
+    || financesEstimations.find(f => f && f.chiffre_affaires != null)
+    || null;
+  const isEstimated = !finances.find(f => f && f.chiffre_affaires != null) && !!latestFinance;
 
   return {
     name: data.nom_entreprise || data.denomination || null,
@@ -134,6 +150,11 @@ async function lookupViaPappers(siret: string, apiKey: string): Promise<CompanyD
     siret: data.siege?.siret || siret || null,
     statut: data.entreprise_cessee ? 'Cessée' : (data.statut_rcs || (data.entreprise_cessee === false ? 'Active' : null)),
     revenue: latestFinance?.chiffre_affaires != null ? String(latestFinance.chiffre_affaires) : null,
+    // Marked so the frontend can show "(estimé)" next to an estimated
+    // figure rather than presenting it as an equally-certain filed number -
+    // client's own rule against ever displaying something as more certain
+    // than it is.
+    revenueEstimated: isEstimated,
     revenueYear: latestFinance?.annee ?? null,
     facebook: null,
     googleRating: null,
@@ -263,7 +284,25 @@ async function getCompanyWithProtection(
 
   const cached = await db.query('SELECT company_data, source FROM company_lookup_cache WHERE siren = $1', [siren]);
   if (cached.rows.length > 0) {
-    return { ...cached.rows[0].company_data, source: cached.rows[0].source };
+    const cachedData = cached.rows[0].company_data || {};
+    // Client's test case (SOW CLIM, 5 Sep): "le chiffre d'affaires est
+    // disponible sur Pappers mais n'apparaît pas sur Marchés Direct". Root
+    // cause - revenue/revenueYear/siren/statut were added to CompanyData
+    // after this cache table started filling up, so a company looked up
+    // BEFORE that change has a company_data blob that's simply missing
+    // those keys outright (not `null` - Pappers really does return null for
+    // some fields when it has no data - but *absent*, meaning this row
+    // predates the code that populates them). The permanent-cache rule
+    // above ("never re-call Pappers for a company we've already fetched")
+    // is about avoiding wasted paid calls for a company we already have a
+    // complete profile for - it was never meant to permanently freeze an
+    // incomplete/outdated snapshot. Detect that one specific case and treat
+    // it as a cache miss so it self-heals on the next lookup, instead of
+    // silently keeping stale data forever.
+    const isOutdatedShape = !('revenue' in cachedData) || !('siren' in cachedData) || !('statut' in cachedData);
+    if (!isOutdatedShape) {
+      return { ...cachedData, source: cached.rows[0].source };
+    }
   }
 
   if (!isAuthenticated && ip) {
