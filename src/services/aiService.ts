@@ -513,11 +513,24 @@ Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
   "requirements_detected": {"value": 0, "available": false}
 }`;
 
+  // opp.deadline (a TIMESTAMP column) comes back from pg as a native JS
+  // Date object, and opp.estimated_value (DECIMAL) as a numeric string.
+  // Interpolating either directly into the prompt below used to call
+  // Date.prototype.toString() implicitly (e.g. "Wed Sep 23 2026 08:27:02
+  // GMT+0000"), which the model then faithfully echoed verbatim into
+  // submission_deadline.value per the "only use what's literally in the
+  // source" rule - showing up unformatted on the fiche. Format both into
+  // plain, unambiguous text before they ever reach the prompt.
+  const deadlineText = opp.deadline ? new Date(opp.deadline).toISOString().slice(0, 10) : '';
+  const estimatedValueText = opp.estimated_value != null && opp.estimated_value !== ''
+    ? `${Number(opp.estimated_value).toLocaleString('fr-FR', { maximumFractionDigits: 0 })} EUR`
+    : '';
+
   const userMessage = `SOURCE RECORD (raw, as ingested from the connector):
 Title: ${opp.title}
 Description: ${opp.description || ''}
-Deadline field: ${opp.deadline || ''}
-Estimated value field: ${opp.estimated_value || ''}
+Deadline field: ${deadlineText}
+Estimated value field: ${estimatedValueText}
 Location: ${opp.location_city || ''}, ${opp.location_region || ''}
 Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 2000) : '{}'}
 ${parsedDocumentsText ? `\nREAL PARSED DCE DOCUMENTS (use these for requirements_detected):\n${parsedDocumentsText}` : ''}`;
