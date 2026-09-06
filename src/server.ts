@@ -116,7 +116,7 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 app.use('/api/dashboard', authenticate, require('./routes/dashboard').default);
 app.use('/api/tenders', authenticate, require('./routes/tenders').default);
 app.use('/api/alerts', authenticate, require('./routes/alerts').default);
-app.use('/api/favorites', authenticate, require('./routes/favorites').default);
+app.use('/api/favorites', optionalAuth, require('./routes/favorites').default);
 app.use('/api/chatbot', optionalAuth, require('./routes/chatbot').default);
 app.use('/api/documents', authenticate, require('./routes/documents').default);
 app.use('/api/crm', authenticate, require('./routes/crm').default);
