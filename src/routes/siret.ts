@@ -30,6 +30,8 @@ interface CompanyData {
   city: string | null;
   postal: string | null;
   director: string | null;
+  directors: string[];
+  rgeOrganisme: string | null;
   employees: string | null;
   ape: string | null;
   activity: string | null;
@@ -78,6 +80,8 @@ const DEMO_COMPANY: CompanyData = {
   city: 'Bordeaux',
   postal: '33000',
   director: 'Karim Benali',
+  directors: ['Karim Benali'],
+  rgeOrganisme: 'Qualibat',
   employees: '6 à 9 salariés',
   ape: '4321A',
   activity: "Travaux d'installation électrique",
@@ -117,9 +121,19 @@ async function lookupViaPappers(siret: string, apiKey: string): Promise<CompanyD
   });
 
   const siege = data.siege || {};
-  const dirigeant = (data.representants || [])[0] || (data.dirigeants || [])[0] || {};
-  const directorName = [dirigeant.prenom, dirigeant.nom].filter(Boolean).join(' ') || dirigeant.nom_complet || null;
+  const allDirigeants: any[] = [...(data.representants || []), ...(data.dirigeants || [])];
+  const directorNames = allDirigeants
+    .map(d => [d.prenom, d.nom].filter(Boolean).join(' ') || d.nom_complet || null)
+    .filter((n, i, arr): n is string => !!n && arr.indexOf(n) === i); // dedupe (representants/dirigeants can overlap)
+  const directorName = directorNames[0] || null;
   const labels: string[] = Array.isArray(data.labels) ? data.labels.map((l: any) => l.label || l.nom || l).filter(Boolean) : [];
+  // Pappers' RGE label usually names the certifying body directly, e.g.
+  // "RGE Qualibat" or "Qualité RGE Qualit'ENR" - strip the "RGE"/"Qualité"
+  // noise words to surface just the organisme name for the badge.
+  const rgeLabel = labels.find(l => /rge/i.test(l));
+  const rgeOrganisme = rgeLabel
+    ? rgeLabel.replace(/qualit[ée]\s*/gi, '').replace(/rge/gi, '').trim() || null
+    : null;
   // Pappers returns `finances` newest-exercice-first; take the first entry
   // that actually has a turnover figure rather than assuming index 0 always
   // does (a just-filed exercice can show up with other fields still null).
@@ -142,6 +156,8 @@ async function lookupViaPappers(siret: string, apiKey: string): Promise<CompanyD
     city: siege.ville || null,
     postal: siege.code_postal || null,
     director: directorName,
+    directors: directorNames,
+    rgeOrganisme,
     employees: data.effectif || data.tranche_effectif || null,
     ape: data.code_naf || null,
     activity: data.libelle_code_naf || (data.code_naf ? APE_LABELS[data.code_naf] || null : null),
@@ -188,6 +204,8 @@ async function lookupViaInsee(siret: string, apiKey: string): Promise<CompanyDat
     city: adresse.libelleCommuneEtablissement || null,
     postal: adresse.codePostalEtablissement || null,
     director: null, // needs INPI/RNE, not available from Sirene
+    directors: [],
+    rgeOrganisme: null, // INSEE Sirene has no certification/labels data
     employees: unite.trancheEffectifsUniteLegale || null,
     ape: apeCode,
     activity: apeCode ? (APE_LABELS[apeCode] || null) : null,
