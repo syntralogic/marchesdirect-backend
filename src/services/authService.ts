@@ -251,21 +251,19 @@ export const registerCompanyAndUser = async (data: RegisterParams, brandId?: str
 
 export const loginUser = async (email: string, password: string) => {
   try {
-    // FLAGGED (not changed): this unconditionally logs a `success: false`
-    // login_attempts row before the password/user checks even run, then logs
-    // a separate `success: true` row further down on an actual success. That
-    // means every successful login also leaves behind one permanent "failed
-    // attempt" row, which feeds into the rate-limit COUNT() below - a real
-    // user logging in 6+ times in 15 minutes (page refresh, multiple tabs,
-    // etc.) could get locked out purely from their own successful logins.
-    // Left as-is rather than restructured under time pressure - needs a
-    // deliberate fix (log failure only in the actual failure branches), not
-    // a rushed one.
-    // Log login attempt
-    await db.query(
-      'INSERT INTO login_attempts (email, ip_address, success) VALUES ($1, $2, $3)',
-      [email, 'unknown', false] // IP would come from request in real implementation
-    );
+    // BUG (found live, 2026-09-07): this used to unconditionally INSERT a
+    // success:false row here before the user/password checks even ran, then
+    // a separate success:true row further down on actual success - meaning
+    // every successful login also permanently logged one fake "failed
+    // attempt". Those fake rows fed straight into the rate-limit COUNT()
+    // below, so a real user (or, on this project, the same demo account
+    // being logged into repeatedly across many test sessions) could get
+    // hard-locked out of their own account with "Too many failed login
+    // attempts" despite every single attempt having the correct password -
+    // this is what was actually causing the reported "error at login".
+    // Fixed by only logging a row in the branches that are an actual
+    // failure (rate-limited / unknown email / wrong password), matching the
+    // success:true insert that already only fires on the real success path.
 
     // Check rate limiting (max 5 failed attempts in 15 minutes)
     const recentAttempts = await db.query(
@@ -287,6 +285,7 @@ export const loginUser = async (email: string, password: string) => {
     );
 
     if (userResult.rows.length === 0) {
+      await db.query('INSERT INTO login_attempts (email, ip_address, success) VALUES ($1, $2, $3)', [email, 'unknown', false]);
       throw new Error('Invalid email or password');
     }
 
@@ -295,6 +294,7 @@ export const loginUser = async (email: string, password: string) => {
     // Verify password
     const passwordMatch = await bcrypt.compare(password, user.password_hash);
     if (!passwordMatch) {
+      await db.query('INSERT INTO login_attempts (email, ip_address, success) VALUES ($1, $2, $3)', [email, 'unknown', false]);
       throw new Error('Invalid email or password');
     }
 
