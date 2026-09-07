@@ -18,6 +18,14 @@ const MODEL = process.env.LLM_MODEL || 'claude-haiku-4-5-20251001';
 const TEMPERATURE = process.env.AI_TEMPERATURE ? parseFloat(process.env.AI_TEMPERATURE) : undefined;
 const MAX_TOKENS = parseInt(process.env.AI_MAX_TOKENS || '2000');
 
+// Logged once at boot so a bad LLM_MODEL env var override on Render (e.g.
+// still pointing at a retired dated snapshot from before this file's own
+// default was fixed) is visible immediately in logs, instead of only
+// showing up indirectly as a 100%-failure-rate "Request failed with status
+// code 400" on every single classification/summary/facts call with no
+// obvious cause.
+logger.info(`[aiService] Using Claude model: ${MODEL}${process.env.LLM_MODEL ? ' (from LLM_MODEL env override)' : ' (default)'}`);
+
 interface ClaudeMessage {
   role: 'user' | 'assistant';
   content: string;
@@ -52,8 +60,14 @@ const callClaudeAPI = async (
       messages: messages,
     };
     
-    // Omit temperature entirely unless explicitly configured
-    if (TEMPERATURE !== undefined) {
+    // Omit temperature entirely unless explicitly configured to a real
+    // number - AI_TEMPERATURE set to anything non-numeric (typo, empty
+    // string with whitespace, etc.) previously still passed the
+    // `!== undefined` check (NaN !== undefined is true) and sent
+    // `temperature: NaN` on every single call, which JSON.stringify
+    // silently turns into `temperature: null` on the wire - a malformed
+    // value Anthropic's API rejects.
+    if (TEMPERATURE !== undefined && !Number.isNaN(TEMPERATURE)) {
       payload.temperature = TEMPERATURE;
     }
 
@@ -86,8 +100,19 @@ const callClaudeAPI = async (
     throw new Error('No response from Claude API');
 
   } catch (err) {
+    // BUG (found live on Render, 2026-09-07): this only ever logged
+    // err.message, which for an axios error is just the generic "Request
+    // failed with status code 400" - Anthropic's actual error body (the
+    // one field that says *why* - e.g. "model: X has been deprecated",
+    // "max_tokens: ...", a specific invalid field) was never logged at all.
+    // Every single classification/facts/summary/chatbot call was failing
+    // with 400 (100% failure rate, not intermittent) and there was no way
+    // to tell why from the logs. Logging the real response body here is
+    // what actually makes this diagnosable going forward.
+    const status = axios.isAxiosError(err) ? err.response?.status : undefined;
+    const detail = axios.isAxiosError(err) ? JSON.stringify(err.response?.data) : undefined;
     const errorMessage = err instanceof Error ? err.message : String(err);
-    logger.error(`Claude API error: ${errorMessage}`);
+    logger.error(`Claude API error${status ? ` (${status})` : ''}: ${errorMessage}${detail ? ` — ${detail}` : ''}`);
     throw err;
   }
 };
