@@ -232,7 +232,7 @@ async function searchCompaniesByName(name: string, apiKey: string): Promise<Comp
     timeout: 8000,
   });
   return (data.resultats || []).map((r: any) => ({
-    siret: r.siege?.siret || r.siret || null,
+    siret: (r.siege?.siret || r.siret || '').toString().replace(/\D/g, '') || null,
     siren: r.siren || null,
     name: r.nom_entreprise || r.denomination || null,
     address: r.siege?.adresse_ligne_1 || null,
@@ -630,7 +630,7 @@ router.post(
 router.post(
   '/confirm',
   [
-    body('siret').matches(/^\d{14}$/).withMessage('SIRET invalide.'),
+    body('siret').customSanitizer((v: string) => typeof v === 'string' ? v.replace(/\D/g, '') : v).matches(/^\d{14}$/).withMessage('SIRET invalide.'),
     body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
   ],
   async (req: AuthRequest, res: Response) => {
