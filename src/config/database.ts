@@ -755,6 +755,32 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // that fix shipped. No real French region name is exactly 3 uppercase
   // letters, so this regex can't false-positive against real data.
   await step(`UPDATE opportunities SET location_region = NULL WHERE location_region ~ '^[A-Z]{3}$'`);
+
+  // Client's production audit: ~2,670 exact-duplicate rows still unmerged
+  // because deduplicateOpportunities() never recorded a REJECTED (scored,
+  // not merged) pair anywhere - only actual merges got a row, so the same
+  // near-miss pairs at the top of "ORDER BY title_similarity DESC LIMIT"
+  // got re-scored on every run forever, starving out the rest of the
+  // backlog. See deduplicationService.ts and schema.sql's
+  // opportunity_duplicate_checks for the fix; this just adds the table to
+  // an already-provisioned production DB the same way every other
+  // ALTER/CREATE IF NOT EXISTS in this file does.
+  await step(`
+    CREATE TABLE IF NOT EXISTS opportunity_duplicate_checks (
+      opportunity_id_1 UUID NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+      opportunity_id_2 UUID NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+      checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (opportunity_id_1, opportunity_id_2)
+    )
+  `);
+
+  // Same production-audit fix: deduplicateOpportunities' self-join scores
+  // similarity(title, title) with no supporting index on title (only
+  // description had one) - CREATE INDEX CONCURRENTLY isn't usable inside
+  // this migration's transaction, so this is a plain CREATE INDEX; it locks
+  // writes on `opportunities` for its duration but only runs once (IF NOT
+  // EXISTS guards every future boot).
+  await step(`CREATE INDEX IF NOT EXISTS opportunities_title_trgm ON opportunities USING GIN(title gin_trgm_ops)`);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old

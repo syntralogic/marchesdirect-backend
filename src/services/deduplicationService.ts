@@ -23,12 +23,64 @@ import { logger } from '../utils/logger';
  * title-similarity threshold allows for).
  */
 
+/**
+ * Client's production audit specifically flagged ~2,670 rows as "strictement
+ * identiques" (exact duplicates), not near-duplicates - a much simpler and
+ * cheaper case than the fuzzy title-similarity matching above, and worth a
+ * dedicated pass: group on title + deadline + estimated_value + buyer_name
+ * (normalized) and merge every extra row in a group straight away, no score
+ * threshold needed since these aren't just similar, they're identical on
+ * every field that matters to a visitor.
+ */
+export const mergeExactDuplicates = async (): Promise<number> => {
+  try {
+    const groups = await db.query(`
+      SELECT array_agg(id ORDER BY created_at ASC) AS ids
+      FROM opportunities
+      WHERE deleted_at IS NULL AND status NOT IN ('cancelled', 'expired', 'merged')
+      GROUP BY
+        lower(trim(title)),
+        deadline,
+        estimated_value,
+        lower(trim(COALESCE(buyer_name, '')))
+      HAVING COUNT(*) > 1
+      LIMIT 500
+    `);
+
+    let mergedCount = 0;
+    for (const row of groups.rows) {
+      const ids: string[] = row.ids;
+      const [primaryId, ...duplicateIds] = ids; // oldest row (by created_at) kept as primary
+      for (const dupId of duplicateIds) {
+        const merged = await mergeDuplicates(primaryId, dupId, 1.0, { exact_match: true });
+        if (merged) mergedCount++;
+      }
+    }
+
+    if (mergedCount > 0) logger.info(`Merged ${mergedCount} exact-duplicate opportunity rows (${groups.rows.length} groups)`);
+    return mergedCount;
+  } catch (err) {
+    logger.error('Exact-duplicate merge error:', err);
+    return 0;
+  }
+};
+
 export const deduplicateOpportunities = async (): Promise<number> => {
+  // Exact-duplicate pass first (cheap, no scoring needed) - see
+  // mergeExactDuplicates' own comment for why this is a separate pass from
+  // the fuzzy one below.
+  const exactMerged = await mergeExactDuplicates();
   try {
     // Cast a wider net at the SQL level than the old fixed thresholds (title
     // similarity > 0.75, deadline within 24h) - the buyer_name/montant
     // signals below now do the precision work in JS via a composite score,
     // so a candidate just needs SOME plausible overlap to be worth scoring.
+    // Bumped the LIMIT from 300 to 2000 now that rejected pairs are recorded
+    // too (see opportunity_duplicate_checks below) - the old 300 was hit on
+    // basically every run without that skip-tracking, so raising it alone
+    // wouldn't have helped before; it does now that each run actually
+    // advances through the backlog instead of re-scoring the same head of
+    // the list.
     const potentialDuplicates = await db.query(`
       SELECT 
         o1.id as id1,
@@ -53,13 +105,21 @@ export const deduplicateOpportunities = async (): Promise<number> => {
         WHERE (primary_opportunity_id = o1.id AND duplicate_opportunity_id = o2.id)
            OR (primary_opportunity_id = o2.id AND duplicate_opportunity_id = o1.id)
       )
+      AND NOT EXISTS (
+        SELECT 1 FROM opportunity_duplicate_checks
+        WHERE (opportunity_id_1 = o1.id AND opportunity_id_2 = o2.id)
+           OR (opportunity_id_1 = o2.id AND opportunity_id_2 = o1.id)
+      )
       ORDER BY title_similarity DESC
-      LIMIT 300
+      LIMIT 2000
     `);
 
     logger.info(`Found ${potentialDuplicates.rows.length} potential duplicates`);
 
     let mergedCount = 0;
+    // Recorded once at the end as one batch INSERT rather than one round-trip
+    // per pair - this loop can now process up to 2000 pairs per run.
+    const checkedPairs: [string, string][] = [];
 
     for (const dup of potentialDuplicates.rows) {
       const titleSim: number = dup.title_similarity;
@@ -95,14 +155,32 @@ export const deduplicateOpportunities = async (): Promise<number> => {
           value_diff_ratio: valueDiffRatio !== null ? Math.round(valueDiffRatio * 1000) / 1000 : null,
         });
         if (merged) mergedCount++;
+      } else {
+        // Scored and rejected - record it so this exact pair isn't pulled
+        // into the candidate list again on the next run. This is the actual
+        // fix for the backlog never clearing: without this, a pair sitting
+        // just under the 0.82 threshold got re-fetched and re-scored by
+        // "ORDER BY title_similarity DESC" forever.
+        checkedPairs.push([dup.id1, dup.id2]);
       }
     }
 
-    logger.info(`Merged ${mergedCount} duplicate opportunity pairs`);
-    return mergedCount;
+    if (checkedPairs.length > 0) {
+      const values = checkedPairs.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(', ');
+      const params = checkedPairs.flat();
+      await db.query(
+        `INSERT INTO opportunity_duplicate_checks (opportunity_id_1, opportunity_id_2)
+         VALUES ${values}
+         ON CONFLICT DO NOTHING`,
+        params
+      );
+    }
+
+    logger.info(`Merged ${mergedCount} duplicate opportunity pairs (${checkedPairs.length} scored and rejected, now skipped on future runs)`);
+    return mergedCount + exactMerged;
   } catch (err) {
     logger.error('Deduplication error:', err);
-    return 0;
+    return exactMerged;
   }
 };
 
