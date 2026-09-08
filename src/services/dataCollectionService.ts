@@ -8,6 +8,7 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { deduplicateOpportunities } from './deduplicationService';
 import { v4 as uuid } from 'uuid';
+import { regionForDepartmentCode, normalizeDepartmentCode } from '../utils/departmentRegion';
 
 // v2.1 caps each request at 100 records - a real collection run needs to
 // page through `offset` to get anywhere near the "several thousand, even
@@ -196,8 +197,15 @@ const normalizeBoampRecord = (record: any) => {
     // location - buyerName is still an available last-resort fallback for
     // display purposes only (better than nothing), same as before.
     location_city: f.ville_avis || buyerName || null,
-    location_region: f.region || null,
-    location_department: f.departement || null,
+    // f.region is often blank on BOAMP's OpenDataSoft feed even when
+    // f.departement is populated - falls back to deriving the region from
+    // the department code (see utils/departmentRegion.ts) rather than
+    // leaving location_region null whenever the source didn't bother to
+    // fill its own region column. Department itself gets the same
+    // normalization pass so "33" / "033" don't end up as two different
+    // values for the same department across records.
+    location_region: f.region || regionForDepartmentCode(f.departement) || null,
+    location_department: normalizeDepartmentCode(f.departement) || f.departement || null,
     buyer_name: buyerName,
     raw: record,
   };
@@ -397,6 +405,19 @@ export const collectDecpData = async (sourceId: number) => {
       'uid', 'id', 'acheteur_id', 'objet', 'montant', 'dureeMois',
       'dateNotification', 'datePublicationDonnees', 'codeCPV', 'nature',
       'procedure', 'formePrix', 'donneesActuelles',
+      // Location candidates - the official DECP schema nests these under
+      // `lieuExecution` (code/typeCode/nom); a flattened Parquet export
+      // commonly renders that as one of the dotted/underscored/camelCase
+      // variants below, or occasionally just a plain department code
+      // column. Every guess here goes through the same availableColumns
+      // filter as the rest of wantedColumns, so an unrecognized name is
+      // silently skipped (and logged) rather than breaking the run -
+      // costs nothing to try more than one shape instead of hardcoding a
+      // second wrong guess.
+      'lieuExecution.code', 'lieuExecution.typeCode', 'lieuExecution.nom',
+      'lieuExecution_code', 'lieuExecution_typeCode', 'lieuExecution_nom',
+      'lieuExecutionCode', 'lieuExecutionTypeCode', 'lieuExecutionNom',
+      'codeDepartement', 'departement', 'codeDepartementExecution',
     ];
     const columns = wantedColumns.filter(c => availableColumns.has(c));
     const missing = wantedColumns.filter(c => !availableColumns.has(c));
@@ -541,6 +562,20 @@ const firstDefined = (f: Record<string, any>, keys: string[]) => {
 // sourcing note on collectDecpData above) - not Opendatasoft-flattened
 // guesses like the old version of this function used.
 const normalizeDecpRecord = (record: any) => {
+  // Whichever location-ish column actually existed in this file's schema
+  // (see the widened wantedColumns list above) ends up as a key on record -
+  // try them in order of how much signal they carry (a commune/department
+  // code is more precise than a bare region name, if both showed up).
+  const rawLocationCode =
+    record['lieuExecution.code'] ?? record['lieuExecution_code'] ?? record['lieuExecutionCode']
+    ?? record['codeDepartement'] ?? record['departement'] ?? record['codeDepartementExecution']
+    ?? null;
+  const rawLocationName =
+    record['lieuExecution.nom'] ?? record['lieuExecution_nom'] ?? record['lieuExecutionNom'] ?? null;
+
+  const department = normalizeDepartmentCode(rawLocationCode);
+  const region = regionForDepartmentCode(rawLocationCode);
+
   return {
     source_reference: record.uid || record.id,
     title: record.objet || 'Marché public (DECP)',
@@ -548,15 +583,16 @@ const normalizeDecpRecord = (record: any) => {
     publication_date: record.datePublicationDonnees || record.dateNotification || null,
     deadline: null, // DECP is post-award data - there is no submission deadline to capture, unlike BOAMP/PLACE
     estimated_value: record.montant != null ? parseFloat(record.montant) : null,
-    // No location/buyer-name column is confirmed on this file (only
-    // acheteur_id, the buyer's raw SIRET) - left null rather than guessing
-    // wrong field names again. A future pass could resolve acheteur_id to a
-    // real buyer name/city via the same Pappers lookup already built for
-    // company SIRET recognition (siret.ts), since a buyer SIRET resolves
-    // the same way a company one does.
-    location_city: null,
-    location_region: null,
-    location_department: null,
+    // No buyer-name column is confirmed on this file (only acheteur_id, the
+    // buyer's raw SIRET) - left null rather than guessing wrong field names.
+    // A future pass could resolve acheteur_id to a real buyer name via the
+    // same Pappers lookup already built for company SIRET recognition
+    // (siret.ts), since a buyer SIRET resolves the same way a company one
+    // does. location_city stays null too - a department/region code alone
+    // doesn't give a real city name, and guessing one would be inventing data.
+    location_city: rawLocationName,
+    location_region: region,
+    location_department: department,
     buyer_name: null,
     raw: record,
   };
