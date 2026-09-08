@@ -217,7 +217,7 @@ router.post('/backfill-location-region', async (req: AuthRequest, res: Response)
   if (backfillLocationRegionStatus.running) {
     return res.status(409).json({ error: 'Already running - check GET /api/admin/backfill-location-region/status' });
   }
-  const limit = req.body?.limit ? parseInt(req.body.limit, 10) : undefined;
+  const limit = req.body?.limit ? parseInt(req.body.limit, 10) : 50000;
 
   const countResult = await db.query(
     `SELECT COUNT(*)::int AS count FROM opportunities WHERE (location_region IS NULL OR location_region = '') AND raw_data IS NOT NULL`
@@ -228,30 +228,11 @@ router.post('/backfill-location-region', async (req: AuthRequest, res: Response)
 
   (async () => {
     try {
-      const rowsResult = await db.query(
-        `SELECT id, raw_data, location_department FROM opportunities
-         WHERE (location_region IS NULL OR location_region = '') AND raw_data IS NOT NULL
-         ORDER BY created_at DESC
-         ${limit ? 'LIMIT $1' : ''}`,
-        limit ? [limit] : []
-      );
-
-      for (const row of rowsResult.rows) {
-        const deptFromRaw = extractDepartmentCode(row.raw_data);
-        const dept = normalizeDepartmentCode(row.location_department) || deptFromRaw;
-        const region = regionForDepartmentCode(dept);
-
-        if (region) {
-          await db.query(
-            `UPDATE opportunities SET location_region = $1, location_department = COALESCE(location_department, $2), updated_at = NOW() WHERE id = $3`,
-            [region, dept, row.id]
-          );
-          backfillLocationRegionStatus.recovered++;
-        } else {
-          backfillLocationRegionStatus.unresolved++;
-        }
-      }
-      logger.info(`[backfill-location-region] Done: ${backfillLocationRegionStatus.recovered} recovered, ${backfillLocationRegionStatus.unresolved} still unresolved`);
+      const { runLocationRegionBackfillBatch } = require('../jobs/locationRegionBackfillJob');
+      const result = await runLocationRegionBackfillBatch(limit);
+      backfillLocationRegionStatus.recovered = result.recovered;
+      backfillLocationRegionStatus.unresolved = result.unresolved;
+      logger.info(`[backfill-location-region] Done: ${result.recovered} recovered, ${result.unresolved} still unresolved`);
     } catch (err: any) {
       logger.error('[backfill-location-region] Failed:', err);
       backfillLocationRegionStatus.error = String(err?.message || err);
@@ -299,20 +280,11 @@ router.post('/regenerate-stale-summaries', async (req: AuthRequest, res: Respons
 
   (async () => {
     try {
-      const rowsResult = await db.query(
-        `SELECT id FROM opportunities WHERE LENGTH(ai_summary) > 500 ORDER BY updated_at DESC LIMIT $1`,
-        [limit]
-      );
-      for (const row of rowsResult.rows) {
-        try {
-          await generateOpportunitySummary(row.id);
-          regenerateStaleSummariesStatus.regenerated++;
-        } catch (err) {
-          logger.error(`[regenerate-stale-summaries] Failed for ${row.id}:`, err);
-          regenerateStaleSummariesStatus.failed++;
-        }
-      }
-      logger.info(`[regenerate-stale-summaries] Done: ${regenerateStaleSummariesStatus.regenerated} regenerated, ${regenerateStaleSummariesStatus.failed} failed`);
+      const { runStaleSummaryBackfillBatch } = require('../jobs/staleSummaryBackfillJob');
+      const result = await runStaleSummaryBackfillBatch(limit);
+      regenerateStaleSummariesStatus.regenerated = result.regenerated;
+      regenerateStaleSummariesStatus.failed = result.failed;
+      logger.info(`[regenerate-stale-summaries] Done: ${result.regenerated} regenerated, ${result.failed} failed`);
     } catch (err: any) {
       logger.error('[regenerate-stale-summaries] Failed:', err);
       regenerateStaleSummariesStatus.error = String(err?.message || err);
