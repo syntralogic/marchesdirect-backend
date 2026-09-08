@@ -188,6 +188,8 @@ const startServer = async () => {
     require('./jobs/backupManagement').startBackupSchedule();
     require('./jobs/searchIndexRefresh').startSearchIndexRefresh();
     require('./jobs/factsBackfillJob').startFactsBackfillJob();
+    require('./jobs/locationRegionBackfillJob').startLocationRegionBackfillJob();
+    require('./jobs/staleSummaryBackfillJob').startStaleSummaryBackfillJob();
     require('./jobs/aiProcessing').startAIProcessing();
     require('./jobs/opportunityAlerts').startOpportunityAlerts();
     require('./jobs/crmRetry').startCrmRetrySchedule();
