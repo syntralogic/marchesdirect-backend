@@ -199,16 +199,29 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       params.push(trade_id);
     }
     if (region) {
-      conditions.push(`osi.location_region ILIKE $${idx++}`);
-      params.push(`%${region}%`);
+      // Client's map lets several regions be selected at once (e.g.
+      // "Nouvelle-Aquitaine, Bretagne") - was a single ILIKE match, so
+      // picking 2+ regions on the map silently searched only the first one
+      // once the frontend passed them through (comma-separated below).
+      const regions = region.split(',').map(r => r.trim()).filter(Boolean);
+      if (regions.length > 0) {
+        conditions.push(`osi.location_region ILIKE ANY($${idx++}::text[])`);
+        params.push(regions.map(r => `%${r}%`));
+      }
     }
     if (city) {
-      conditions.push(`osi.location_city ILIKE $${idx++}`);
-      params.push(`%${city}%`);
+      const cities = city.split(',').map(c => c.trim()).filter(Boolean);
+      if (cities.length > 0) {
+        conditions.push(`osi.location_city ILIKE ANY($${idx++}::text[])`);
+        params.push(cities.map(c => `%${c}%`));
+      }
     }
     if (department) {
-      conditions.push(`osi.location_department = $${idx++}`);
-      params.push(department);
+      const departments = department.split(',').map(d => d.trim()).filter(Boolean);
+      if (departments.length > 0) {
+        conditions.push(`osi.location_department = ANY($${idx++}::text[])`);
+        params.push(departments);
+      }
     }
     if (min_value) {
       conditions.push(`osi.estimated_value >= $${idx++}`);
