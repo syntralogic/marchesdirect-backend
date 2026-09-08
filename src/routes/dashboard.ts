@@ -13,9 +13,20 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const companyId = req.user!.companyId;
 
     const [matchesResult, alertsResult, bidsResult, documentsResult] = await Promise.all([
+      // Was querying `opportunities` directly with `deadline > NOW()`
+      // (which SQL-silently drops every NULL-deadline row - all of DECP,
+      // the largest source) plus an unrelated `ai_classification_status =
+      // 'classified'` filter, on top of not being company-specific at all
+      // despite the "Nouvelles opportunités" label implying it was. That's
+      // the exact bug behind the client's "4187 vs 47787, quel est le vrai
+      // nombre ?" report. Now uses the same opportunity_search_index view
+      // and the same "still open" definition (deadline IS NULL OR
+      // deadline >= NOW()) as the homepage/search counters
+      // (GET /stats/counts) and the main search route, so this can never
+      // disagree with what the rest of the site shows again.
       db.query(
-        `SELECT COUNT(*) as count FROM opportunities
-         WHERE status = 'active' AND deadline > NOW() AND ai_classification_status = 'classified'`
+        `SELECT COUNT(*)::int as count FROM opportunity_search_index
+         WHERE (deadline IS NULL OR deadline >= NOW())`
       ),
       db.query(
         'SELECT COUNT(*) as count FROM company_alerts WHERE company_id = $1 AND is_read = false',
