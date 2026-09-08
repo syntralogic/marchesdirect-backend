@@ -43,7 +43,7 @@
  *   npx ts-node scripts/backfillLocationRegion.ts --yes --limit 5000
  */
 import { db } from '../src/config/database';
-import { regionForDepartmentCode, normalizeDepartmentCode } from '../src/utils/departmentRegion';
+import { regionForDepartmentCode, normalizeDepartmentCode, extractDepartmentCode } from '../src/utils/departmentRegion';
 import readline from 'readline';
 
 const args = process.argv.slice(2);
@@ -60,24 +60,6 @@ const confirm = (question: string): Promise<boolean> => {
       resolve(answer.trim().toLowerCase() === 'y');
     });
   });
-};
-
-// Pulls a department-code-shaped value out of a raw source record,
-// regardless of which connector produced it - tries every field name the
-// live connectors are now known (or guessed) to use.
-const extractDepartmentCode = (raw: any): string | null => {
-  if (!raw || typeof raw !== 'object') return null;
-  const f = raw.fields || raw; // BOAMP nests under `fields`, DECP doesn't
-  const candidates = [
-    f.departement, f.codeDepartement, f.codeDepartementExecution,
-    f['lieuExecution.code'], f['lieuExecution_code'], f['lieuExecutionCode'],
-    f.lieuExecution?.code,
-  ];
-  for (const c of candidates) {
-    const normalized = normalizeDepartmentCode(c);
-    if (normalized) return normalized;
-  }
-  return null;
 };
 
 async function main() {

@@ -94,3 +94,24 @@ export function normalizeDepartmentCode(raw: string | null | undefined): string 
   }
   return null;
 }
+
+// Pulls a department-code-shaped value out of a raw source record,
+// regardless of which connector produced it. Shared by
+// scripts/backfillLocationRegion.ts and the admin HTTP route (Render free
+// tier often has no Shell tab, so the route is the only way to run this
+// backfill for some deployments) - one implementation, not two copies that
+// could drift.
+export function extractDepartmentCode(raw: any): string | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const f = raw.fields || raw; // BOAMP nests under `fields`, DECP doesn't
+  const candidates = [
+    f.departement, f.codeDepartement, f.codeDepartementExecution,
+    f['lieuExecution.code'], f['lieuExecution_code'], f['lieuExecutionCode'],
+    f.lieuExecution?.code,
+  ];
+  for (const c of candidates) {
+    const normalized = normalizeDepartmentCode(c);
+    if (normalized) return normalized;
+  }
+  return null;
+}
