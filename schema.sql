@@ -189,6 +189,23 @@ CREATE TABLE opportunity_duplicates (
   UNIQUE(primary_opportunity_id, duplicate_opportunity_id)
 );
 
+-- Client's production audit found ~2,670 exact-duplicate rows still sitting
+-- unmerged despite deduplicateOpportunities() running after every connector
+-- pass: only actually-merged pairs got recorded anywhere, so a pair that
+-- scored just under the merge threshold (confidence < 0.82) was re-fetched
+-- and re-scored by the SAME query's `ORDER BY title_similarity DESC LIMIT`
+-- on every single run, forever - on a large backlog those near-miss pairs
+-- dominate the LIMIT every time and starve out any pair further down the
+-- list from ever being reached at all. This records every pair once it's
+-- been scored, merged or not, so each run makes forward progress instead of
+-- re-scoring the same head-of-queue candidates indefinitely.
+CREATE TABLE IF NOT EXISTS opportunity_duplicate_checks (
+  opportunity_id_1 UUID NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+  opportunity_id_2 UUID NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+  checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (opportunity_id_1, opportunity_id_2)
+);
+
 -- ============================================================================
 -- 5. COMPANIES / USERS (MULTI-TENANT)
 -- ============================================================================
@@ -1036,6 +1053,12 @@ CREATE TABLE system_health (
 
 CREATE INDEX opportunities_title ON opportunities USING BTREE(title);
 CREATE INDEX opportunities_description_trgm ON opportunities USING GIN(description gin_trgm_ops);
+-- deduplicateOpportunities' self-join scores similarity(title, title) - was
+-- running that comparison across the whole table with no supporting index
+-- (only description had one), meaning the query's cost scaled with total
+-- row count on every single dedup pass. This is what pg_trgm's similarity()
+-- operator actually uses for an index scan instead of a full comparison.
+CREATE INDEX opportunities_title_trgm ON opportunities USING GIN(title gin_trgm_ops);
 
 -- Materialized view for fast search (refresh periodically)
 -- Columns mirror exactly what src/routes/opportunities.ts GET / selects from
