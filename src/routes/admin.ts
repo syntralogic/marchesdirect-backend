@@ -7,6 +7,7 @@ import { verifyDeduplicationQuality, getDeduplicationReport, deduplicateOpportun
 import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities } from '../services/aiService';
 import { collectBoampData, collectPlaceData, collectTedData, collectDecpData, collectBatiwebData } from '../services/dataCollectionService';
 import { runBackup, testRestore } from '../jobs/backupManagement';
+import { regionForDepartmentCode, normalizeDepartmentCode, extractDepartmentCode } from '../utils/departmentRegion';
 
 const router = Router();
 
@@ -199,6 +200,72 @@ router.post('/data-sources/:code/run', async (req: AuthRequest, res: Response) =
       detail: String(err?.message || err),
     });
   }
+});
+
+// POST /api/admin/backfill-location-region - recovers location_region for
+// existing opportunities from their stored raw_data, without needing Render
+// Shell access (free-tier plans often don't have a Shell tab at all - this
+// is the HTTP equivalent of scripts/backfillLocationRegion.ts, same logic,
+// callable from a browser/Postman with just the admin auth token). Runs in
+// the background (can be tens of thousands of rows) - poll
+// GET /api/admin/backfill-location-region/status for progress.
+let backfillLocationRegionStatus: { running: boolean; recovered: number; unresolved: number; total: number; startedAt: string | null; finishedAt: string | null; error: string | null } = {
+  running: false, recovered: 0, unresolved: 0, total: 0, startedAt: null, finishedAt: null, error: null,
+};
+
+router.post('/backfill-location-region', async (req: AuthRequest, res: Response) => {
+  if (backfillLocationRegionStatus.running) {
+    return res.status(409).json({ error: 'Already running - check GET /api/admin/backfill-location-region/status' });
+  }
+  const limit = req.body?.limit ? parseInt(req.body.limit, 10) : undefined;
+
+  const countResult = await db.query(
+    `SELECT COUNT(*)::int AS count FROM opportunities WHERE (location_region IS NULL OR location_region = '') AND raw_data IS NOT NULL`
+  );
+  const total = countResult.rows[0].count;
+
+  backfillLocationRegionStatus = { running: true, recovered: 0, unresolved: 0, total, startedAt: new Date().toISOString(), finishedAt: null, error: null };
+
+  (async () => {
+    try {
+      const rowsResult = await db.query(
+        `SELECT id, raw_data, location_department FROM opportunities
+         WHERE (location_region IS NULL OR location_region = '') AND raw_data IS NOT NULL
+         ORDER BY created_at DESC
+         ${limit ? 'LIMIT $1' : ''}`,
+        limit ? [limit] : []
+      );
+
+      for (const row of rowsResult.rows) {
+        const deptFromRaw = extractDepartmentCode(row.raw_data);
+        const dept = normalizeDepartmentCode(row.location_department) || deptFromRaw;
+        const region = regionForDepartmentCode(dept);
+
+        if (region) {
+          await db.query(
+            `UPDATE opportunities SET location_region = $1, location_department = COALESCE(location_department, $2), updated_at = NOW() WHERE id = $3`,
+            [region, dept, row.id]
+          );
+          backfillLocationRegionStatus.recovered++;
+        } else {
+          backfillLocationRegionStatus.unresolved++;
+        }
+      }
+      logger.info(`[backfill-location-region] Done: ${backfillLocationRegionStatus.recovered} recovered, ${backfillLocationRegionStatus.unresolved} still unresolved`);
+    } catch (err: any) {
+      logger.error('[backfill-location-region] Failed:', err);
+      backfillLocationRegionStatus.error = String(err?.message || err);
+    } finally {
+      backfillLocationRegionStatus.running = false;
+      backfillLocationRegionStatus.finishedAt = new Date().toISOString();
+    }
+  })();
+
+  res.status(202).json({ status: 'started', total, message: 'Running in the background - poll GET /api/admin/backfill-location-region/status for progress.' });
+});
+
+router.get('/backfill-location-region/status', async (req: AuthRequest, res: Response) => {
+  res.json(backfillLocationRegionStatus);
 });
 
 // POST /api/admin/deduplication/run - trigger the dedup sweep independently of
