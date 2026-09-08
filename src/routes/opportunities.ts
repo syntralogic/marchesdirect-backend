@@ -155,6 +155,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       department,
       min_value,
       max_value,
+      status,        // 'active' | 'expired' | 'awarded' | 'cancelled' (comma-separated for multiple)
       page = '1',
       limit = '20',
     } = req.query as Record<string, string>;
@@ -230,6 +231,21 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     if (max_value) {
       conditions.push(`osi.estimated_value <= $${idx++}`);
       params.push(max_value);
+    }
+    if (status) {
+      const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
+      if (statuses.length > 0) {
+        conditions.push(`osi.status = ANY($${idx++}::text[])`);
+        params.push(statuses);
+      }
+    } else {
+      // No explicit status filter -> default browsing view. The search
+      // index view's own WHERE already drops cancelled/expired/merged
+      // (schema.sql), but not 'awarded' - DECP's post-award records
+      // otherwise leak into the default "browse open opportunities" list
+      // looking exactly like a fresh, biddable tender (client's exact
+      // complaint: already-awarded contracts shown as new opportunities).
+      conditions.push(`osi.status != 'awarded'`);
     }
 
     const pageNum = Math.max(parseInt(page) || 1, 1);

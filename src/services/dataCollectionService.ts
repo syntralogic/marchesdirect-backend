@@ -594,6 +594,7 @@ const normalizeDecpRecord = (record: any) => {
     location_region: region,
     location_department: department,
     buyer_name: null,
+    status: 'awarded',
     raw: record,
   };
 };
@@ -938,8 +939,8 @@ async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: stri
     const values: any[] = [];
     const rowsSql: string[] = [];
     chunk.forEach((data, idx) => {
-      const base = idx * 13;
-      rowsSql.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13})`);
+      const base = idx * 14;
+      rowsSql.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13}, $${base + 14})`);
       values.push(
         sourceId,
         data.source_reference,
@@ -954,6 +955,7 @@ async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: stri
         opportunityTypeId,
         JSON.stringify(data.raw || data),
         'not_analyzed',
+        data.status || 'active',
       );
     });
 
@@ -962,13 +964,14 @@ async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: stri
         `INSERT INTO opportunities
           (source_id, source_reference, title, description, publication_date, deadline,
            estimated_value, location_city, location_region, buyer_name, opportunity_type_id,
-           raw_data, ai_classification_status)
+           raw_data, ai_classification_status, status)
          VALUES ${rowsSql.join(', ')}
          ON CONFLICT (source_id, source_reference) DO UPDATE SET
            description = EXCLUDED.description,
            deadline = EXCLUDED.deadline,
            estimated_value = EXCLUDED.estimated_value,
            raw_data = EXCLUDED.raw_data,
+           status = EXCLUDED.status,
            updated_at = NOW()
          RETURNING (xmax = 0) AS was_insert`,
         values

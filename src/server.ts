@@ -190,6 +190,7 @@ const startServer = async () => {
     require('./jobs/factsBackfillJob').startFactsBackfillJob();
     require('./jobs/locationRegionBackfillJob').startLocationRegionBackfillJob();
     require('./jobs/staleSummaryBackfillJob').startStaleSummaryBackfillJob();
+    require('./jobs/opportunityStatusJob').startOpportunityStatusJob();
     require('./jobs/aiProcessing').startAIProcessing();
     require('./jobs/opportunityAlerts').startOpportunityAlerts();
     require('./jobs/crmRetry').startCrmRetrySchedule();
