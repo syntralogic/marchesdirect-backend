@@ -847,14 +847,22 @@ export const generateOpportunitySummary = async (opportunityId: string): Promise
 
     const opp = oppResult.rows[0];
 
-    const systemPrompt = `You are a French business opportunity analyst. Generate a clear, concise summary highlighting:
-- Main work/deliverables
-- Key requirements
-- Timeline
-- Opportunity for small businesses
-- Red flags or risks
+    // Plain prose only, no markdown (client's ask, screenshot evidence
+    // 8 Sep: raw "# Résumé..." / "**bold**" markers were showing up
+    // verbatim on the opportunity page, which only ever renders this in a
+    // plain <p> tag, never through a markdown renderer). Also kept short
+    // and single-purpose - client's separate brief on duplicated content:
+    // "Résumé : explication simple de l'opportunité", not a full
+    // multi-section report (that's what "Le marché en 30 secondes" and
+    // "Points de vigilance" are already for elsewhere on the page).
+    const systemPrompt = `Tu es un analyste de marchés publics/privés français. Rédige un résumé simple de cette opportunité, en 2 à 4 phrases maximum, en français courant.
 
-Keep it to 2-3 paragraphs. Use simple, actionable language.`;
+Ce résumé doit se limiter à expliquer simplement en quoi consiste l'opportunité (l'objet de la mission). Ne développe pas les exigences, le calendrier, ou les points de vigilance - ces informations sont déjà présentées ailleurs sur la page et ne doivent pas être répétées ici.
+
+Règles de formatage strictes :
+- Texte brut uniquement, sans aucun markdown (pas de #, pas de **, pas de listes à puces, pas de titres).
+- Pas de titre du type "Résumé de l'opportunité" - va directement au contenu.
+- Un ou deux paragraphes courts, jamais plus.`;
 
     const userMessage = `Title: ${opp.title}
 Description: ${opp.description}
