@@ -745,6 +745,16 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     )
   `);
   await step(`CREATE INDEX IF NOT EXISTS session_favorites_session ON session_favorites(session_id)`);
+
+  // Confirmed live (client's report + Supabase query): the TED connector
+  // was writing buyer-country ISO codes ('DEU','POL','FRA'...) into
+  // location_region, a French-region facet everywhere else (the /zones
+  // map, the region search filter) - not a country field. Fixed the
+  // connector itself (dataCollectionService.ts) so this can't happen
+  // again; this cleans up rows already polluted by the old code before
+  // that fix shipped. No real French region name is exactly 3 uppercase
+  // letters, so this regex can't false-positive against real data.
+  await step(`UPDATE opportunities SET location_region = NULL WHERE location_region ~ '^[A-Z]{3}$'`);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old

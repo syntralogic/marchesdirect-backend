@@ -799,7 +799,17 @@ export const collectTedData = async (sourceId: number) => {
           deadline,
           source_reference: tedId,
           opportunity_type: 'public_procurement',
-          location_region: firstText(item['buyer-country']) || 'EU',
+          // Confirmed live (Supabase, client's report - map region filter
+          // matching almost nothing): this used to put buyer-country's
+          // ISO code ('DEU', 'POL', 'FRA'...) straight into location_region,
+          // which is a French-region facet everywhere else in this app (the
+          // /zones map, the region search filter) - not a country field.
+          // TED is EU-wide and the fields requested here don't give
+          // department/region-level granularity even for French buyers, so
+          // there's nothing valid to put here; leaving it null keeps this
+          // connector out of the French-region facet entirely rather than
+          // polluting it with country codes.
+          location_region: null,
           buyer_name: firstText(item['buyer-name']) || firstText(item.buyerName) || null,
         };
 
