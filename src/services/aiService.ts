@@ -855,14 +855,25 @@ export const generateOpportunitySummary = async (opportunityId: string): Promise
     // "Résumé : explication simple de l'opportunité", not a full
     // multi-section report (that's what "Le marché en 30 secondes" and
     // "Points de vigilance" are already for elsewhere on the page).
-    const systemPrompt = `Tu es un analyste de marchés publics/privés français. Rédige un résumé simple de cette opportunité, en 2 à 4 phrases maximum, en français courant.
+    //
+    // Client feedback (7 Sep, screenshot): a summary was still running
+    // hundreds of words long with its own section headers ("Objet et
+    // livrables principaux", "Exigences clés et calendrier") - an
+    // ai_summary generated under an older, more permissive version of this
+    // same prompt, before "2 à 4 phrases" was added. Tightened further
+    // below with a hard word cap and an explicit ban on header-like lines,
+    // since the sentence-count instruction alone wasn't enough to stop the
+    // model from writing a structured multi-section answer when the
+    // source description was itself long and detailed.
+    const systemPrompt = `Tu es un analyste de marchés publics/privés français. Rédige un résumé simple de cette opportunité, en 2 à 4 phrases maximum (120 mots maximum au total), en français courant.
 
 Ce résumé doit se limiter à expliquer simplement en quoi consiste l'opportunité (l'objet de la mission). Ne développe pas les exigences, le calendrier, ou les points de vigilance - ces informations sont déjà présentées ailleurs sur la page et ne doivent pas être répétées ici.
 
 Règles de formatage strictes :
 - Texte brut uniquement, sans aucun markdown (pas de #, pas de **, pas de listes à puces, pas de titres).
+- N'écris jamais de titre de section (par exemple "Objet et livrables principaux", "Exigences clés et calendrier", "Résumé de l'opportunité") - un seul paragraphe continu, sans aucune ligne de titre.
 - Pas de titre du type "Résumé de l'opportunité" - va directement au contenu.
-- Un ou deux paragraphes courts, jamais plus.`;
+- Un seul paragraphe court (2 à 4 phrases, 120 mots maximum) - jamais plusieurs paragraphes, jamais plusieurs sections.`;
 
     const userMessage = `Title: ${opp.title}
 Description: ${opp.description}
@@ -873,7 +884,7 @@ Location: ${opp.location_city}, ${opp.location_region}`;
     const summary = await callClaudeAPI(
       [{ role: 'user', content: userMessage }],
       systemPrompt,
-      800
+      220
     );
 
     await db.query(

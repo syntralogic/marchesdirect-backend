@@ -4,7 +4,7 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { AuthRequest, requireRole } from '../middleware/auth';
 import { verifyDeduplicationQuality, getDeduplicationReport, deduplicateOpportunities } from '../services/deduplicationService';
-import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities } from '../services/aiService';
+import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities, generateOpportunitySummary } from '../services/aiService';
 import { collectBoampData, collectPlaceData, collectTedData, collectDecpData, collectBatiwebData } from '../services/dataCollectionService';
 import { runBackup, testRestore } from '../jobs/backupManagement';
 import { regionForDepartmentCode, normalizeDepartmentCode, extractDepartmentCode } from '../utils/departmentRegion';
@@ -266,6 +266,67 @@ router.post('/backfill-location-region', async (req: AuthRequest, res: Response)
 
 router.get('/backfill-location-region/status', async (req: AuthRequest, res: Response) => {
   res.json(backfillLocationRegionStatus);
+});
+
+// POST /api/admin/regenerate-stale-summaries - client feedback (7 Sep
+// screenshot): some ai_summary rows are hundreds of words long with their
+// own section headers, from before the prompt was tightened to "2 à 4
+// phrases, 120 mots max, un seul paragraphe" (see
+// generateOpportunitySummary). generateSummariesForOpportunities only
+// covers ai_summary_status='not_generated', so it never touches these
+// already-generated-but-verbose rows - this route targets exactly those,
+// oldest/most-viewed rows aren't the point here, length is: LENGTH(ai_summary)
+// > 500 chars is a reasonable proxy for "written under the old, more
+// permissive prompt" (the new prompt physically can't produce that many
+// characters given its own ~220-token budget). Background + limit, same
+// reasoning as the location-region route: this calls the paid Claude API
+// once per row, so it's opt-in and controllable rather than an automatic
+// mass-regenerate of every summary on the site.
+let regenerateStaleSummariesStatus: { running: boolean; regenerated: number; failed: number; total: number; startedAt: string | null; finishedAt: string | null; error: string | null } = {
+  running: false, regenerated: 0, failed: 0, total: 0, startedAt: null, finishedAt: null, error: null,
+};
+
+router.post('/regenerate-stale-summaries', async (req: AuthRequest, res: Response) => {
+  if (regenerateStaleSummariesStatus.running) {
+    return res.status(409).json({ error: 'Already running - check GET /api/admin/regenerate-stale-summaries/status' });
+  }
+  const limit = req.body?.limit ? parseInt(req.body.limit, 10) : 500;
+
+  const countResult = await db.query(`SELECT COUNT(*)::int AS count FROM opportunities WHERE LENGTH(ai_summary) > 500`);
+  const total = countResult.rows[0].count;
+
+  regenerateStaleSummariesStatus = { running: true, regenerated: 0, failed: 0, total: Math.min(total, limit), startedAt: new Date().toISOString(), finishedAt: null, error: null };
+
+  (async () => {
+    try {
+      const rowsResult = await db.query(
+        `SELECT id FROM opportunities WHERE LENGTH(ai_summary) > 500 ORDER BY updated_at DESC LIMIT $1`,
+        [limit]
+      );
+      for (const row of rowsResult.rows) {
+        try {
+          await generateOpportunitySummary(row.id);
+          regenerateStaleSummariesStatus.regenerated++;
+        } catch (err) {
+          logger.error(`[regenerate-stale-summaries] Failed for ${row.id}:`, err);
+          regenerateStaleSummariesStatus.failed++;
+        }
+      }
+      logger.info(`[regenerate-stale-summaries] Done: ${regenerateStaleSummariesStatus.regenerated} regenerated, ${regenerateStaleSummariesStatus.failed} failed`);
+    } catch (err: any) {
+      logger.error('[regenerate-stale-summaries] Failed:', err);
+      regenerateStaleSummariesStatus.error = String(err?.message || err);
+    } finally {
+      regenerateStaleSummariesStatus.running = false;
+      regenerateStaleSummariesStatus.finishedAt = new Date().toISOString();
+    }
+  })();
+
+  res.status(202).json({ status: 'started', total: regenerateStaleSummariesStatus.total, message: 'Running in the background (one paid API call per row) - poll GET /api/admin/regenerate-stale-summaries/status for progress.' });
+});
+
+router.get('/regenerate-stale-summaries/status', async (req: AuthRequest, res: Response) => {
+  res.json(regenerateStaleSummariesStatus);
 });
 
 // POST /api/admin/deduplication/run - trigger the dedup sweep independently of
