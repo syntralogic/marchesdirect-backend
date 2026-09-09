@@ -180,6 +180,28 @@ const startServer = async () => {
       });
     }
 
+    // Same "no shell on Render's free tier" reasoning as the demo seed above -
+    // client can't run `node scripts/backfillRegionNames.js` by hand, so it
+    // has to happen on boot too. Fixes the region-name bug (pre-2016 région
+    // names + accent mismatches - see utils/departmentRegion.ts) on rows
+    // that were already ingested before this fix shipped; new imports are
+    // already correct without this. Fully idempotent (every row is
+    // independently re-derived from its own current value each run, nothing
+    // accumulates), so running it again on every restart is harmless - same
+    // as the seed script. Set SKIP_REGION_BACKFILL=true once this has run
+    // successfully in production a first time, to skip the full-table pass
+    // on every subsequent restart.
+    if (process.env.SKIP_REGION_BACKFILL !== 'true') {
+      const { execFile } = require('child_process');
+      const backfillScriptPath = require('path').resolve(process.cwd(), 'scripts', 'backfillRegionNames.js');
+      execFile('node', [backfillScriptPath], (err: any, stdout: string, stderr: string) => {
+        if (stdout) logger.info(`[region backfill] ${stdout.trim()}`);
+        if (err) {
+          logger.error('[region backfill] failed (non-fatal):', stderr || err.message);
+        }
+      });
+    }
+
     // Start background jobs
     require('./jobs/dataCollection').startScheduledJobs();
     require('./jobs/documentIngestion').startDocumentIngestion();
