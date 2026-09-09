@@ -1102,7 +1102,7 @@ LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
 LEFT JOIN trades t ON o.trade_id = t.id
 LEFT JOIN data_sources ds ON o.source_id = ds.id
 LEFT JOIN brands c ON ot.brand_id = c.id
-WHERE o.deleted_at IS NULL AND o.status NOT IN ('cancelled', 'expired', 'merged');
+WHERE o.deleted_at IS NULL AND o.status != 'merged';
 
 CREATE INDEX opportunity_search_index_search ON opportunity_search_index USING GIN(search_vector);
 CREATE INDEX opportunity_search_index_deadline ON opportunity_search_index(deadline);

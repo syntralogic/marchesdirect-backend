@@ -175,17 +175,16 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     const params: any[] = [];
     let idx = 1;
 
-    // The view's own WHERE clause (schema.sql) excludes status IN
-    // ('cancelled','expired','merged'), but nothing ever flips an
-    // opportunity's status to 'expired' when its deadline actually passes -
-    // there's no cron job for it. Without this, a listing with a
-    // submission deadline in the past stays 'active' forever and keeps
-    // showing up in search (worse: sorted to the very top, since results
-    // are ORDER BY deadline ASC). Filtering here is an immediate, always-
-    // correct fix regardless of whether a status-flipping job ever gets
-    // built - deadline IS NULL is kept visible since a missing deadline
-    // isn't the same as a passed one.
-    conditions.push(`(osi.deadline IS NULL OR osi.deadline >= NOW())`);
+    // Client (2026-09-09): "sab dikhna chahiye jitna hai" - closed/awarded/
+    // cancelled opportunities used to be hidden outright (both by this
+    // deadline check and, separately, by the view's own status exclusion
+    // widened in database.ts). Now that a real `status` column is
+    // maintained (opportunityStatusJob.ts) and returned below, hiding rows
+    // entirely is no longer necessary - the frontend labels non-active ones
+    // ("Marché clôturé" / "Attribué" / "Annulé") instead of pretending they
+    // don't exist. Sorting still puts genuinely open opportunities first
+    // (see ORDER BY below) so this doesn't bury active listings under a
+    // pile of history.
 
     if (journey) {
       conditions.push(`osi.opportunity_type = $${idx++}`);
@@ -262,7 +261,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
               osi.opportunity_type as journey, osi.trade_name, osi.buyer_name
        FROM opportunity_search_index osi
        WHERE ${whereClause}
-       ORDER BY osi.deadline ASC NULLS LAST
+       ORDER BY (osi.status = 'active' AND (osi.deadline IS NULL OR osi.deadline >= NOW())) DESC, osi.deadline ASC NULLS LAST
        LIMIT $${idx++} OFFSET $${idx++}`,
       [...params, limitNum, offset]
     );
@@ -314,16 +313,15 @@ const extractSourceUrl = (rawData: any): string | null => {
 // different numbers appeared across the homepage (~3,421, hardcoded),
 // dashboard (~2,940) and search (46,000+), with no way to tell what each
 // one represented. Uses opportunity_search_index with the exact same
-// "still open" definition the main search route uses (deadline not
-// passed; the view's own WHERE already drops cancelled/expired/merged),
-// so this can never disagree with what clicking through to a category
-// actually shows.
+// scope the main search route uses (deadline-based hiding removed
+// 2026-09-09 - closed/awarded rows are labeled by the frontend now
+// instead of being excluded), so this can never disagree with what
+// clicking through to a category actually shows.
 router.get('/stats/counts', async (req: Request, res: Response) => {
   try {
     const result = await db.query(
       `SELECT opportunity_type AS journey, COUNT(*)::int AS count
        FROM opportunity_search_index
-       WHERE (deadline IS NULL OR deadline >= NOW())
        GROUP BY opportunity_type`
     );
     const byJourney: Record<string, number> = {};
@@ -354,21 +352,16 @@ router.get('/stats/counts', async (req: Request, res: Response) => {
 // sets (grep confirms), so that condition never excluded anything. The
 // region/department badges on the map counted every row regardless of
 // status - active, expired, cancelled, awarded, merged alike - while the
-// actual search below (GET /) reads opportunity_search_index, whose own
-// WHERE already drops cancelled/expired/merged, plus a deadline-passed
-// filter and (by default) an awarded filter. So the map promised far more
-// per region than clicking through could ever return. Now reads from the
-// same view with the same "still open" definition GET / uses, so a
-// region's badge count and what searching that region actually returns
-// can no longer disagree.
+// actual search below (GET /) reads opportunity_search_index. Now reads
+// from the same view with the same "show everything, let the frontend
+// label status" scope GET / uses (2026-09-09), so a region's badge count
+// and what searching that region actually returns can no longer disagree.
 router.get('/stats/regions', async (req: Request, res: Response) => {
   try {
     const result = await db.query(
       `SELECT location_region AS region, COUNT(*)::int AS count
        FROM opportunity_search_index
        WHERE location_region IS NOT NULL AND location_region != ''
-         AND (deadline IS NULL OR deadline >= NOW())
-         AND status != 'awarded'
        GROUP BY location_region
        ORDER BY count DESC`
     );
@@ -388,8 +381,6 @@ router.get('/stats/departments', async (req: Request, res: Response) => {
       `SELECT location_department AS department, COUNT(*)::int AS count
        FROM opportunity_search_index
        WHERE location_department IS NOT NULL AND location_department != ''
-         AND (deadline IS NULL OR deadline >= NOW())
-         AND status != 'awarded'
        GROUP BY location_department
        ORDER BY count DESC`
     );
@@ -417,8 +408,7 @@ router.get('/stats/near', async (req: Request, res: Response) => {
        FROM opportunities
        WHERE location_latitude IS NOT NULL AND location_longitude IS NOT NULL
          AND deleted_at IS NULL
-         AND status NOT IN ('cancelled', 'expired', 'merged', 'awarded')
-         AND (deadline IS NULL OR deadline >= NOW())
+         AND status != 'merged'
          AND (
            6371 * acos(
              LEAST(1, GREATEST(-1,
