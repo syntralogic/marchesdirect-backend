@@ -234,10 +234,29 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       }
     }
     if (department) {
-      const departments = department.split(',').map(d => d.trim()).filter(Boolean);
+      // Was a strict `=` match against whatever format the frontend sent -
+      // fine when it exactly matches how location_department was stored,
+      // but dataCollectionService.ts falls back to the source's raw,
+      // un-normalized department string whenever normalizeDepartmentCode()
+      // can't parse it (see departmentRegion.ts), so some rows carry "5"
+      // instead of the padded "05", stray whitespace, or lowercase "2a"/
+      // "2b" for Corsica. A visitor picking "Whole department" (which
+      // sends the clean 2/3-digit code from the address lookup) would
+      // silently miss every one of those rows - real matches quietly
+      // dropped, not a search problem, a comparison-strictness one.
+      // Compares case-insensitively, trimmed, and against both the padded
+      // and unpadded form of each requested code instead.
+      const departments = department.split(',').map(d => d.trim().toUpperCase()).filter(Boolean);
       if (departments.length > 0) {
-        conditions.push(`o.location_department = ANY($${idx++}::text[])`);
-        params.push(departments);
+        const departmentVariants = new Set<string>();
+        for (const d of departments) {
+          departmentVariants.add(d);
+          departmentVariants.add(d.padStart(2, '0'));
+          departmentVariants.add(d.padStart(3, '0'));
+          departmentVariants.add(d.replace(/^0+/, '') || d);
+        }
+        conditions.push(`UPPER(TRIM(o.location_department)) = ANY($${idx++}::text[])`);
+        params.push(Array.from(departmentVariants));
       }
     }
     if (min_value) {
