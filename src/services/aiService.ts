@@ -824,6 +824,13 @@ export const matchOpportunitiesToCompany = async (
       return [];
     }
 
+    // Was `o.deadline > NOW()` - same NULL-drops-silently bug already fixed
+    // in dashboard.ts's activeOpportunities counter and opportunities.ts's
+    // search route (DECP, the largest source, publishes no deadline on most
+    // records). Left unfixed here meant the dashboard's personalized
+    // "matches" recommendations - the one feature meant to actually surface
+    // relevant opportunities to a given company - silently never included
+    // any DECP listing, no matter how good a fit.
     const matchResult = await db.query(
       `SELECT o.id,
               o.title,
@@ -832,7 +839,7 @@ export const matchOpportunitiesToCompany = async (
        FROM opportunities o
        LEFT JOIN trades t ON o.trade_id = t.id
        WHERE o.status = 'active'
-         AND o.deadline > NOW()
+         AND (o.deadline IS NULL OR o.deadline > NOW())
          AND o.ai_classification_status = 'classified'
          AND (
            t.id IN (SELECT id FROM trades WHERE name = ANY($1::text[]))
@@ -841,7 +848,7 @@ export const matchOpportunitiesToCompany = async (
          AND (
            $2::decimal IS NULL OR o.estimated_value <= $2 * 3
          )
-       ORDER BY o.deadline ASC
+       ORDER BY o.deadline ASC NULLS LAST
        LIMIT 50`,
       [
         trades,
