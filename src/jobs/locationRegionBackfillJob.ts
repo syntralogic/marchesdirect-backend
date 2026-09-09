@@ -19,10 +19,11 @@
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { extractDepartmentCode, normalizeDepartmentCode, regionForDepartmentCode } from '../utils/departmentRegion';
+import { trackJob } from '../utils/jobTracker';
 
 const CHUNK_SIZE = 500;
 
-export async function runLocationRegionBackfillBatch(limit = 2000): Promise<{ recovered: number; unresolved: number }> {
+export async function runLocationRegionBackfillBatch(limit = 8000): Promise<{ recovered: number; unresolved: number }> {
   let rows: { id: string; raw_data: any; location_department: string | null }[];
   try {
     const result = await db.query(
@@ -89,15 +90,20 @@ export const startLocationRegionBackfillJob = () => {
   const cron = require('node-cron');
 
   setTimeout(() => {
-    runLocationRegionBackfillBatch().catch(err => logger.error('[Job] Boot-time location-region backfill failed (non-fatal):', err));
+    trackJob('locationRegionBackfill:boot', () => runLocationRegionBackfillBatch())
+      .catch(err => logger.error('[Job] Boot-time location-region backfill failed (non-fatal):', err));
   }, 20_000);
 
-  // Every 30 minutes - a batch of 2,000 bulk-updated rows per run clears a
-  // large backlog within a few hours without competing too heavily with
-  // the other scheduled jobs for DB connections.
-  cron.schedule('*/30 * * * *', () => {
-    runLocationRegionBackfillBatch().catch(err => logger.error('[Job] Scheduled location-region backfill failed (non-fatal):', err));
+  // Every 3 minutes, 8,000 rows per run (bulk chunked UPDATE, not an
+  // external API call, so there's no cost/rate-limit reason to go slow
+  // here) - client feedback (screenshot, region counts still summing to
+  // ~1,500 instead of ~40,000+): the previous cadence (2,000/30min) would
+  // have taken roughly half a day to clear a 47k-row backlog. This
+  // converges the whole backlog in well under an hour instead.
+  cron.schedule('*/3 * * * *', () => {
+    trackJob('locationRegionBackfill:cron', () => runLocationRegionBackfillBatch())
+      .catch(err => logger.error('[Job] Scheduled location-region backfill failed (non-fatal):', err));
   });
 
-  logger.info('✅ Location-region backfill job scheduled (batch of 2,000 on boot, then every 30 minutes)');
+  logger.info('✅ Location-region backfill job scheduled (batch of 8,000 on boot, then every 3 minutes until the backlog clears)');
 };
