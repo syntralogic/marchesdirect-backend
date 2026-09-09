@@ -188,10 +188,28 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       }
     }
     if (q) {
-      conditions.push(
-        `to_tsvector('french', COALESCE(o.title, '') || ' ' || COALESCE(o.description, '')) @@ plainto_tsquery('french', $${idx++})`
-      );
-      params.push(q);
+      // Was plainto_tsquery(q), which AND's every word together - fine for
+      // a single word but the journey page's search step (and its trade
+      // suggestion chips, e.g. "Installation et maintenance de
+      // climatisation" or "Chauffage / plomberie") sends multi-word
+      // phrases, and a title/description matching most-but-not-all of
+      // those words was silently excluded, undercounting real matches for
+      // any query longer than one word. Builds an OR'd tsquery from the
+      // individual words instead (still French-stemmed via to_tsquery's
+      // 'french' config on each lexeme) so a fiche matches on any of the
+      // terms, same as a normal search engine. If sanitizing strips the
+      // query down to nothing (e.g. it was only punctuation), the q filter
+      // is simply skipped rather than erroring or matching nothing.
+      const qWords = q
+        .split(/\s+/)
+        .map(w => w.replace(/[^\p{L}\p{N}-]/gu, '').trim())
+        .filter(Boolean);
+      if (qWords.length > 0) {
+        conditions.push(
+          `to_tsvector('french', COALESCE(o.title, '') || ' ' || COALESCE(o.description, '')) @@ to_tsquery('french', $${idx++})`
+        );
+        params.push(qWords.join(' | '));
+      }
     }
     if (trade_id) {
       conditions.push(`o.trade_id = $${idx++}`);
