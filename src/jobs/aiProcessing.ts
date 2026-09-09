@@ -20,13 +20,19 @@ import { trackJob } from '../utils/jobTracker';
 // bursting past rate limits when a connector run just inserted hundreds of
 // records at once.
 
-// Bumped from 20: the BOAMP/DECP connectors (dataCollectionService.ts) now
-// pull up to 3000 records per source per run instead of ~100, so this queue
-// needs meaningfully higher throughput to keep up - at 20/15min that backlog
-// alone would take days to clear, leaving most new listings showing raw
-// unprocessed text (no ai_summary) the whole time. 50/15min is still well
-// within a normal Claude API rate limit for sequential single-item calls.
-const BATCH_SIZE = 50;
+// Bumped again (client feedback: secteur/métier filters like "Peinture"
+// showing far fewer results than the real total) - trade_id (what those
+// filters match on) is only ever set by classifyOpportunity() below, and
+// at the previous 50/15min pace, classifying a 47k-row backlog would take
+// roughly 10 days - the vast majority of listings would sit with no
+// trade_id, invisible to any métier filter, for well over a week. This is
+// a real paid Claude API call per row (unlike the free bulk-UPDATE region
+// backfill), so scaled up more conservatively than that one: 3x the batch
+// size and 3x the frequency (~9x combined throughput) rather than blasting
+// the whole backlog in one go - roughly a day to clear instead of ten,
+// while staying comfortably inside normal rate limits at 2 calls/sec max
+// (500ms delay, unchanged).
+const BATCH_SIZE = 150;
 const DELAY_BETWEEN_CALLS_MS = 500;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -106,10 +112,9 @@ export const processMissingSummaries = async () => {
 };
 
 export const startAIProcessing = () => {
-  // Runs every 15 minutes - frequent enough that new opportunities from a 6-hourly
-  // connector run don't sit unclassified for long, without hammering the Claude API
-  // continuously.
-  cron.schedule('*/15 * * * *', async () => {
+  // Every 5 minutes (was 15) - see BATCH_SIZE comment above for why: at the
+  // old cadence, classifying the current backlog would take about 10 days.
+  cron.schedule('*/5 * * * *', async () => {
     await trackJob('aiProcessing:cron', async () => {
       await processUnclassifiedOpportunities();
       await processMissingSummaries();
@@ -132,5 +137,5 @@ export const startAIProcessing = () => {
       .then(() => logger.info('[Job] Boot-time AI processing pass complete'))
   ).catch((err) => logger.error('[Job] Boot-time AI processing pass failed (non-fatal, next cron tick or restart will retry):', err));
 
-  logger.info('✅ AI processing scheduler started (runs every 15 minutes)');
+  logger.info('✅ AI processing scheduler started (runs every 5 minutes)');
 };
