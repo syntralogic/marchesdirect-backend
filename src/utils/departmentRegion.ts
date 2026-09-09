@@ -40,6 +40,66 @@ export const DEPARTMENT_TO_REGION: Record<string, string> = {
   '971': 'Guadeloupe', '972': 'Martinique', '973': 'Guyane', '974': 'La Réunion', '976': 'Mayotte',
 };
 
+// Client's 9 Sep report: selecting all 13 current regions on the map only
+// pulled back ~1,500 of the ~40k expected opportunities. Root cause (found
+// by loading schema.sql + realistic BOAMP-shaped rows into a local Postgres
+// and testing the actual filter query): normalizeBoampRecord trusts a raw
+// `f.region` field whenever BOAMP's feed supplies one, with no validation -
+// and BOAMP (in continuous operation since 1957) still surfaces the
+// pre-2016 22-region names on plenty of notices, which don't match any of
+// the 13 current region names the map/filter use, not even as an ILIKE
+// substring. Those rows were never being excluded from the *count*, just
+// silently unreachable by every region filter. Official 2016 territorial
+// reform mapping (22 old régions -> 13 new): each key here is already
+// lowercased/unaccented (see normalizeRegionName below, which does the
+// same to whatever it's asked to look up) so the comparison doesn't depend
+// on the source's own accenting being correct either - scripts/seed.js and
+// generateSyntheticListings.js both turned out to store a few of these
+// unaccented ("Auvergne-Rhone-Alpes"), which used to silently fail an
+// accent-sensitive match the same way.
+const OLD_TO_NEW_REGION: Record<string, string> = {
+  'alsace': 'Grand Est', 'champagne-ardenne': 'Grand Est', 'lorraine': 'Grand Est',
+  'aquitaine': 'Nouvelle-Aquitaine', 'limousin': 'Nouvelle-Aquitaine', 'poitou-charentes': 'Nouvelle-Aquitaine',
+  'auvergne': 'Auvergne-Rhône-Alpes', 'rhone-alpes': 'Auvergne-Rhône-Alpes',
+  'bourgogne': 'Bourgogne-Franche-Comté', 'franche-comte': 'Bourgogne-Franche-Comté',
+  'basse-normandie': 'Normandie', 'haute-normandie': 'Normandie',
+  'languedoc-roussillon': 'Occitanie', 'midi-pyrenees': 'Occitanie',
+  'nord-pas-de-calais': 'Hauts-de-France', 'picardie': 'Hauts-de-France',
+  'centre': 'Centre-Val de Loire', // renamed (not merged) in 2015
+};
+
+const stripAccents = (s: string): string =>
+  s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+// Canonical current region names, keyed by their own lowercased/unaccented
+// form - lets a source's own accenting/casing quirks (confirmed real,
+// see seed.js above) resolve to the correct current name too, not just
+// old-name -> new-name.
+const CURRENT_REGIONS = [
+  'Île-de-France', 'Centre-Val de Loire', 'Bourgogne-Franche-Comté', 'Normandie',
+  'Hauts-de-France', 'Grand Est', 'Pays de la Loire', 'Bretagne', 'Nouvelle-Aquitaine',
+  'Occitanie', 'Auvergne-Rhône-Alpes', "Provence-Alpes-Côte d'Azur", 'Corse',
+];
+const CURRENT_REGION_BY_KEY: Record<string, string> = {};
+for (const name of CURRENT_REGIONS) {
+  CURRENT_REGION_BY_KEY[stripAccents(name).toLowerCase()] = name;
+}
+
+/**
+ * Resolves any region name a source might supply - current official name
+ * (any accenting/casing), a pre-2016 name, stray whitespace - to one of the
+ * 13 current canonical names. Returns null (never a guess) when the input
+ * doesn't match anything known, so an unrecognized string doesn't silently
+ * become a fake region either - same "null over invented data" rule as
+ * regionForDepartmentCode below.
+ */
+export function normalizeRegionName(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const key = stripAccents(String(raw).trim().toLowerCase());
+  if (!key) return null;
+  return CURRENT_REGION_BY_KEY[key] || OLD_TO_NEW_REGION[key] || null;
+}
+
 /**
  * Normalizes a department code found in varied source formats ("33",
  * "033", "2A", a 5-digit INSEE commune code like "33063" where the first
