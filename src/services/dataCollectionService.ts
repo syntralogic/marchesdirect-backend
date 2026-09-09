@@ -8,7 +8,7 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { deduplicateOpportunities } from './deduplicationService';
 import { v4 as uuid } from 'uuid';
-import { regionForDepartmentCode, normalizeDepartmentCode } from '../utils/departmentRegion';
+import { regionForDepartmentCode, normalizeDepartmentCode, normalizeRegionName } from '../utils/departmentRegion';
 import { buildOfficialUrl } from '../utils/officialUrl';
 
 // v2.1 caps each request at 100 records - a real collection run needs to
@@ -207,7 +207,17 @@ const normalizeBoampRecord = (record: any) => {
     // fill its own region column. Department itself gets the same
     // normalization pass so "33" / "033" don't end up as two different
     // values for the same department across records.
-    location_region: f.region || regionForDepartmentCode(f.departement) || null,
+    //
+    // Client's 9 Sep report: f.region, when present, used to be trusted
+    // as-is - but BOAMP still surfaces pre-2016 region names on plenty of
+    // notices ("Nord-Pas-de-Calais", "Midi-Pyrénées", ...), which don't
+    // match any of the 13 current regions the map filter searches by, so
+    // those rows were unreachable from every region filter even with a
+    // value present. normalizeRegionName maps old->new (and fixes accent/
+    // casing mismatches) instead of storing the raw string; falls through
+    // to the department-derived region when f.region doesn't resolve to
+    // anything recognized, same as when it's blank.
+    location_region: normalizeRegionName(f.region) || regionForDepartmentCode(f.departement) || null,
     location_department: normalizeDepartmentCode(f.departement) || f.departement || null,
     buyer_name: buyerName,
     raw: record,
@@ -895,7 +905,13 @@ const insertOpportunity = async (sourceId: number, data: any) => {
       data.deadline,
       data.estimated_value,
       data.location_city,
-      data.location_region || data.region,
+      // Centralized here too (not just in normalizeBoampRecord) so PLACE/TED,
+      // which pass a region string straight through without their own
+      // normalization pass, get the same old-name/accent handling. Falls
+      // back to the raw value only if normalizeRegionName doesn't recognize
+      // it, since a source-specific string PLACE (undocumented shape) sends
+      // is still better shown as-is than dropped to null outright.
+      normalizeRegionName(data.location_region || data.region) || data.location_region || data.region || null,
       data.location_department || null,
       // PLACE/TED feeds don't reliably expose a distinct buyer field the
       // way BOAMP's `nomacheteur` does - null there rather than a guess.

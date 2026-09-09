@@ -47,9 +47,9 @@ const pool = connectionString
     });
 
 const CITIES = [
-  ["Paris", "75", "Ile-de-France"],
-  ["Lyon", "69", "Auvergne-Rhone-Alpes"],
-  ["Marseille", "13", "Provence-Alpes-Cote d'Azur"],
+  ["Paris", "75", "Île-de-France"],
+  ["Lyon", "69", "Auvergne-Rhône-Alpes"],
+  ["Marseille", "13", "Provence-Alpes-Côte d'Azur"],
   ["Toulouse", "31", "Occitanie"],
   ["Nantes", "44", "Pays de la Loire"],
   ["Lille", "59", "Hauts-de-France"],
