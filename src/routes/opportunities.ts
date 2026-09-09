@@ -347,13 +347,28 @@ router.get('/stats/counts', async (req: Request, res: Response) => {
 // GET /api/opportunities/stats/regions - opportunity count per French region,
 // for the interactive map on /zones. Groups on location_region as stored by
 // the connectors (BOAMP etc. give a region name directly on most notices).
+//
+// Root cause of the client's '47k+ in the DB but search only shows ~5k'
+// report: this used to count straight off the `opportunities` table with
+// `status != 'archived'` - a status value nothing in this codebase ever
+// sets (grep confirms), so that condition never excluded anything. The
+// region/department badges on the map counted every row regardless of
+// status - active, expired, cancelled, awarded, merged alike - while the
+// actual search below (GET /) reads opportunity_search_index, whose own
+// WHERE already drops cancelled/expired/merged, plus a deadline-passed
+// filter and (by default) an awarded filter. So the map promised far more
+// per region than clicking through could ever return. Now reads from the
+// same view with the same "still open" definition GET / uses, so a
+// region's badge count and what searching that region actually returns
+// can no longer disagree.
 router.get('/stats/regions', async (req: Request, res: Response) => {
   try {
     const result = await db.query(
       `SELECT location_region AS region, COUNT(*)::int AS count
-       FROM opportunities
+       FROM opportunity_search_index
        WHERE location_region IS NOT NULL AND location_region != ''
-         AND status != 'archived'
+         AND (deadline IS NULL OR deadline >= NOW())
+         AND status != 'awarded'
        GROUP BY location_region
        ORDER BY count DESC`
     );
@@ -365,14 +380,16 @@ router.get('/stats/regions', async (req: Request, res: Response) => {
 });
 
 // GET /api/opportunities/stats/departments - same, grouped by French
-// department (numeric code, e.g. "33" for Gironde).
+// department (numeric code, e.g. "33" for Gironde). Same fix as
+// /stats/regions above, for the same reason.
 router.get('/stats/departments', async (req: Request, res: Response) => {
   try {
     const result = await db.query(
       `SELECT location_department AS department, COUNT(*)::int AS count
-       FROM opportunities
+       FROM opportunity_search_index
        WHERE location_department IS NOT NULL AND location_department != ''
-         AND status != 'archived'
+         AND (deadline IS NULL OR deadline >= NOW())
+         AND status != 'awarded'
        GROUP BY location_department
        ORDER BY count DESC`
     );
@@ -385,7 +402,8 @@ router.get('/stats/departments', async (req: Request, res: Response) => {
 
 // GET /api/opportunities/stats/near?lat=&lng=&radius_km= - count within a
 // radius of a point, for the "Villes" (city) tab. Uses the Haversine formula
-// directly in SQL since PostGIS isn't set up on this database.
+// directly in SQL since PostGIS isn't set up on this database. Same fix as
+// /stats/regions above, for the same reason.
 router.get('/stats/near', async (req: Request, res: Response) => {
   try {
     const lat = parseFloat(req.query.lat as string);
@@ -398,7 +416,9 @@ router.get('/stats/near', async (req: Request, res: Response) => {
       `SELECT COUNT(*)::int AS count
        FROM opportunities
        WHERE location_latitude IS NOT NULL AND location_longitude IS NOT NULL
-         AND status != 'archived'
+         AND deleted_at IS NULL
+         AND status NOT IN ('cancelled', 'expired', 'merged', 'awarded')
+         AND (deadline IS NULL OR deadline >= NOW())
          AND (
            6371 * acos(
              LEAST(1, GREATEST(-1,
