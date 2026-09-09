@@ -249,7 +249,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
        LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
        LEFT JOIN trades t ON o.trade_id = t.id
        WHERE ${whereClause}
-       ORDER BY o.deadline ASC NULLS LAST
+       ORDER BY (o.status = 'active' AND (o.deadline IS NULL OR o.deadline >= NOW())) DESC, o.deadline ASC NULLS LAST
        LIMIT $${idx++} OFFSET $${idx++}`,
       [...params, limitNum, offset]
     );
