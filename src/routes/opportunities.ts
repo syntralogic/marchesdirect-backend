@@ -160,43 +160,34 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       limit = '20',
     } = req.query as Record<string, string>;
 
-    // Reads from opportunity_search_index (refreshed every 15 min by
-    // jobs/searchIndexRefresh.ts) instead of joining `opportunities` on every
-    // request - the view pre-joins opportunity_types/trades and carries its
-    // own GIN-indexed search_vector, which is what actually pays off at the
-    // 1M-row scale Milestone 12's load test targets. Trade-off: listings can
-    // be up to ~15 min stale here (new/updated rows won't appear until the
-    // next refresh) - acceptable for a browse/search page, but do NOT reuse
-    // this view for anything that needs the current row (e.g. the bid flow
-    // reads `opportunities` directly for that reason, unchanged by this).
-    // deleted_at/cancelled/expired/merged are already filtered by the view's
-    // own WHERE clause (see schema.sql), so they don't need repeating here.
-    const conditions: string[] = ['1=1'];
+    // Client's explicit ask: show every opportunity in the DB regardless of
+    // status - no automatic hiding of expired/cancelled/awarded/merged rows,
+    // no deadline-passed filter. Previously this read from
+    // opportunity_search_index, a materialized view whose own WHERE clause
+    // (schema.sql) hard-excludes status IN ('cancelled','expired','merged')
+    // at the database level - so even removing every condition in this route
+    // couldn't have shown those rows, the view itself never carried them.
+    // Reading straight off `opportunities` instead removes that ceiling.
+    // Trade-off: search_vector was precomputed + GIN-indexed on the view for
+    // speed; here it's computed on the fly per request. Fine at the current
+    // ~47k row scale, would need a functional index (or reinstating a view
+    // without the status/deadline exclusions) if that becomes a bottleneck.
+    const conditions: string[] = ['o.deleted_at IS NULL'];
     const params: any[] = [];
     let idx = 1;
 
-    // The view's own WHERE clause (schema.sql) excludes status IN
-    // ('cancelled','expired','merged'), but nothing ever flips an
-    // opportunity's status to 'expired' when its deadline actually passes -
-    // there's no cron job for it. Without this, a listing with a
-    // submission deadline in the past stays 'active' forever and keeps
-    // showing up in search (worse: sorted to the very top, since results
-    // are ORDER BY deadline ASC). Filtering here is an immediate, always-
-    // correct fix regardless of whether a status-flipping job ever gets
-    // built - deadline IS NULL is kept visible since a missing deadline
-    // isn't the same as a passed one.
-    conditions.push(`(osi.deadline IS NULL OR osi.deadline >= NOW())`);
-
     if (journey) {
-      conditions.push(`osi.opportunity_type = $${idx++}`);
+      conditions.push(`ot.code = $${idx++}`);
       params.push(journey);
     }
     if (q) {
-      conditions.push(`osi.search_vector @@ plainto_tsquery('french', $${idx++})`);
+      conditions.push(
+        `to_tsvector('french', COALESCE(o.title, '') || ' ' || COALESCE(o.description, '')) @@ plainto_tsquery('french', $${idx++})`
+      );
       params.push(q);
     }
     if (trade_id) {
-      conditions.push(`osi.trade_id = $${idx++}`);
+      conditions.push(`o.trade_id = $${idx++}`);
       params.push(trade_id);
     }
     if (region) {
@@ -206,46 +197,40 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       // once the frontend passed them through (comma-separated below).
       const regions = region.split(',').map(r => r.trim()).filter(Boolean);
       if (regions.length > 0) {
-        conditions.push(`osi.location_region ILIKE ANY($${idx++}::text[])`);
+        conditions.push(`o.location_region ILIKE ANY($${idx++}::text[])`);
         params.push(regions.map(r => `%${r}%`));
       }
     }
     if (city) {
       const cities = city.split(',').map(c => c.trim()).filter(Boolean);
       if (cities.length > 0) {
-        conditions.push(`osi.location_city ILIKE ANY($${idx++}::text[])`);
+        conditions.push(`o.location_city ILIKE ANY($${idx++}::text[])`);
         params.push(cities.map(c => `%${c}%`));
       }
     }
     if (department) {
       const departments = department.split(',').map(d => d.trim()).filter(Boolean);
       if (departments.length > 0) {
-        conditions.push(`osi.location_department = ANY($${idx++}::text[])`);
+        conditions.push(`o.location_department = ANY($${idx++}::text[])`);
         params.push(departments);
       }
     }
     if (min_value) {
-      conditions.push(`osi.estimated_value >= $${idx++}`);
+      conditions.push(`o.estimated_value >= $${idx++}`);
       params.push(min_value);
     }
     if (max_value) {
-      conditions.push(`osi.estimated_value <= $${idx++}`);
+      conditions.push(`o.estimated_value <= $${idx++}`);
       params.push(max_value);
     }
     if (status) {
+      // Only filters by status when the caller explicitly asks for one -
+      // otherwise every status is included (see comment above).
       const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
       if (statuses.length > 0) {
-        conditions.push(`osi.status = ANY($${idx++}::text[])`);
+        conditions.push(`o.status = ANY($${idx++}::text[])`);
         params.push(statuses);
       }
-    } else {
-      // No explicit status filter -> default browsing view. The search
-      // index view's own WHERE already drops cancelled/expired/merged
-      // (schema.sql), but not 'awarded' - DECP's post-award records
-      // otherwise leak into the default "browse open opportunities" list
-      // looking exactly like a fresh, biddable tender (client's exact
-      // complaint: already-awarded contracts shown as new opportunities).
-      conditions.push(`osi.status != 'awarded'`);
     }
 
     const pageNum = Math.max(parseInt(page) || 1, 1);
@@ -255,21 +240,25 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     const whereClause = conditions.join(' AND ');
 
     const listResult = await db.query(
-      `SELECT osi.id, osi.title, osi.description, osi.deadline, osi.publication_date,
-              osi.estimated_value, osi.currency, osi.location_city, osi.location_region,
-              osi.location_department, osi.estimated_start_date, osi.estimated_end_date,
-              osi.ai_classification_status, osi.ai_summary, osi.ai_matched_trades, osi.status,
-              osi.opportunity_type as journey, osi.trade_name, osi.buyer_name
-       FROM opportunity_search_index osi
+      `SELECT o.id, o.title, o.description, o.deadline, o.publication_date,
+              o.estimated_value, o.currency, o.location_city, o.location_region,
+              o.location_department, o.estimated_start_date, o.estimated_end_date,
+              o.ai_classification_status, o.ai_summary, o.ai_matched_trades, o.status,
+              ot.code as journey, t.name as trade_name, o.buyer_name
+       FROM opportunities o
+       LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+       LEFT JOIN trades t ON o.trade_id = t.id
        WHERE ${whereClause}
-       ORDER BY osi.deadline ASC NULLS LAST
+       ORDER BY o.deadline ASC NULLS LAST
        LIMIT $${idx++} OFFSET $${idx++}`,
       [...params, limitNum, offset]
     );
 
     const countResult = await db.query(
       `SELECT COUNT(*) as total
-       FROM opportunity_search_index osi
+       FROM opportunities o
+       LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+       LEFT JOIN trades t ON o.trade_id = t.id
        WHERE ${whereClause}`,
       params
     );
@@ -348,27 +337,19 @@ router.get('/stats/counts', async (req: Request, res: Response) => {
 // for the interactive map on /zones. Groups on location_region as stored by
 // the connectors (BOAMP etc. give a region name directly on most notices).
 //
-// Root cause of the client's '47k+ in the DB but search only shows ~5k'
-// report: this used to count straight off the `opportunities` table with
-// `status != 'archived'` - a status value nothing in this codebase ever
-// sets (grep confirms), so that condition never excluded anything. The
-// region/department badges on the map counted every row regardless of
-// status - active, expired, cancelled, awarded, merged alike - while the
-// actual search below (GET /) reads opportunity_search_index, whose own
-// WHERE already drops cancelled/expired/merged, plus a deadline-passed
-// filter and (by default) an awarded filter. So the map promised far more
-// per region than clicking through could ever return. Now reads from the
-// same view with the same "still open" definition GET / uses, so a
-// region's badge count and what searching that region actually returns
-// can no longer disagree.
+// Client's explicit ask: count regardless of status - no excluding
+// expired/cancelled/awarded/merged, no deadline-passed filter. Reads
+// straight off `opportunities` (not opportunity_search_index, whose own
+// WHERE clause hard-excludes cancelled/expired/merged at the view
+// definition level) so every row counts here exactly like the main search
+// (GET /) now does.
 router.get('/stats/regions', async (req: Request, res: Response) => {
   try {
     const result = await db.query(
       `SELECT location_region AS region, COUNT(*)::int AS count
-       FROM opportunity_search_index
+       FROM opportunities
        WHERE location_region IS NOT NULL AND location_region != ''
-         AND (deadline IS NULL OR deadline >= NOW())
-         AND status != 'awarded'
+         AND deleted_at IS NULL
        GROUP BY location_region
        ORDER BY count DESC`
     );
@@ -380,16 +361,15 @@ router.get('/stats/regions', async (req: Request, res: Response) => {
 });
 
 // GET /api/opportunities/stats/departments - same, grouped by French
-// department (numeric code, e.g. "33" for Gironde). Same fix as
-// /stats/regions above, for the same reason.
+// department (numeric code, e.g. "33" for Gironde). Same "count everything"
+// rule as /stats/regions above.
 router.get('/stats/departments', async (req: Request, res: Response) => {
   try {
     const result = await db.query(
       `SELECT location_department AS department, COUNT(*)::int AS count
-       FROM opportunity_search_index
+       FROM opportunities
        WHERE location_department IS NOT NULL AND location_department != ''
-         AND (deadline IS NULL OR deadline >= NOW())
-         AND status != 'awarded'
+         AND deleted_at IS NULL
        GROUP BY location_department
        ORDER BY count DESC`
     );
@@ -402,8 +382,8 @@ router.get('/stats/departments', async (req: Request, res: Response) => {
 
 // GET /api/opportunities/stats/near?lat=&lng=&radius_km= - count within a
 // radius of a point, for the "Villes" (city) tab. Uses the Haversine formula
-// directly in SQL since PostGIS isn't set up on this database. Same fix as
-// /stats/regions above, for the same reason.
+// directly in SQL since PostGIS isn't set up on this database. Same "count
+// everything" rule as /stats/regions above.
 router.get('/stats/near', async (req: Request, res: Response) => {
   try {
     const lat = parseFloat(req.query.lat as string);
@@ -417,8 +397,6 @@ router.get('/stats/near', async (req: Request, res: Response) => {
        FROM opportunities
        WHERE location_latitude IS NOT NULL AND location_longitude IS NOT NULL
          AND deleted_at IS NULL
-         AND status NOT IN ('cancelled', 'expired', 'merged', 'awarded')
-         AND (deadline IS NULL OR deadline >= NOW())
          AND (
            6371 * acos(
              LEAST(1, GREATEST(-1,
