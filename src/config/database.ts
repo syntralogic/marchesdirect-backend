@@ -461,6 +461,86 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     logger.error('⚠️ Migration step failed (continuing with the rest): opportunity_search_index rebuild', err);
   }
 
+  // Client (2026-09-09): "sab dikhna chahiye jitna hai" - after
+  // opportunityStatusJob.ts started correctly marking stale/deadline-passed
+  // rows as 'expired' (a fix for the client's own earlier audit complaint
+  // about ~41k stale listings still showing as fresh/active), the view's
+  // pre-existing `status NOT IN ('cancelled','expired','merged')` clause
+  // started hiding all of them from search entirely - total visible count
+  // dropped from ~47k to ~1.5k. Both things were individually correct, but
+  // together they over-corrected: closed/awarded opportunities shouldn't
+  // masquerade as open ones, but they also shouldn't vanish outright once
+  // there's a real status field to label them with instead. Only 'merged'
+  // (a confirmed duplicate) is still excluded - genuinely nothing to show
+  // for that one. 'cancelled'/'expired'/'awarded' now stay in the index;
+  // GET /api/opportunities below stops hard-filtering on deadline and
+  // returns `status` so the frontend can render a "Marché clôturé" /
+  // "Attribué" badge instead of just omitting the listing.
+  try {
+    const viewDef = await pool.query(
+      `SELECT pg_get_viewdef('opportunity_search_index'::regclass, true) AS def
+       WHERE to_regclass('opportunity_search_index') IS NOT NULL`
+    );
+    const needsWideningView = viewDef.rows.length > 0 && /'cancelled'/.test(viewDef.rows[0].def || '');
+
+    if (needsWideningView) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`DROP MATERIALIZED VIEW IF EXISTS opportunity_search_index`);
+        await client.query(`
+          CREATE MATERIALIZED VIEW opportunity_search_index AS
+          SELECT 
+            o.id,
+            o.title,
+            o.description,
+            o.deadline,
+            o.publication_date,
+            o.estimated_value,
+            o.currency,
+            o.location_city,
+            o.location_region,
+            o.location_department,
+            o.estimated_start_date,
+            o.estimated_end_date,
+            o.ai_classification_status,
+            o.ai_summary,
+            o.ai_matched_trades,
+            o.status,
+            o.trade_id,
+            o.buyer_name,
+            ot.code as opportunity_type,
+            t.name as trade_name,
+            c.code as brand_code,
+            ds.code as source_code,
+            (
+              to_tsvector('french', COALESCE(o.title, '')) ||
+              to_tsvector('french', COALESCE(o.description, ''))
+            ) as search_vector
+          FROM opportunities o
+          LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+          LEFT JOIN trades t ON o.trade_id = t.id
+          LEFT JOIN data_sources ds ON o.source_id = ds.id
+          LEFT JOIN brands c ON ot.brand_id = c.id
+          WHERE o.deleted_at IS NULL AND o.status != 'merged'
+        `);
+        await client.query(`CREATE INDEX opportunity_search_index_search ON opportunity_search_index USING GIN(search_vector)`);
+        await client.query(`CREATE INDEX opportunity_search_index_deadline ON opportunity_search_index(deadline)`);
+        await client.query(`CREATE INDEX opportunity_search_index_status ON opportunity_search_index(status)`);
+        await client.query(`CREATE UNIQUE INDEX opportunity_search_index_id ON opportunity_search_index(id)`);
+        await client.query('COMMIT');
+        logger.info('✅ opportunity_search_index widened to include cancelled/expired/awarded (labeled, not hidden)');
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+  } catch (err) {
+    logger.error('⚠️ Migration step failed (continuing with the rest): opportunity_search_index status-widening', err);
+  }
+
   // Opportunity detail page graduated access (level1 teaser -> level2 after
   // lead capture -> level3 after a chargé d'affaires manually validates) +
   // self-published subcontracting needs ("Je cherche un sous-traitant").

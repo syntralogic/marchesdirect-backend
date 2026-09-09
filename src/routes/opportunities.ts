@@ -303,16 +303,15 @@ const extractSourceUrl = (rawData: any): string | null => {
 // different numbers appeared across the homepage (~3,421, hardcoded),
 // dashboard (~2,940) and search (46,000+), with no way to tell what each
 // one represented. Uses opportunity_search_index with the exact same
-// "still open" definition the main search route uses (deadline not
-// passed; the view's own WHERE already drops cancelled/expired/merged),
-// so this can never disagree with what clicking through to a category
-// actually shows.
+// scope the main search route uses (deadline-based hiding removed
+// 2026-09-09 - closed/awarded rows are labeled by the frontend now
+// instead of being excluded), so this can never disagree with what
+// clicking through to a category actually shows.
 router.get('/stats/counts', async (req: Request, res: Response) => {
   try {
     const result = await db.query(
       `SELECT opportunity_type AS journey, COUNT(*)::int AS count
        FROM opportunity_search_index
-       WHERE (deadline IS NULL OR deadline >= NOW())
        GROUP BY opportunity_type`
     );
     const byJourney: Record<string, number> = {};
