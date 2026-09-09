@@ -158,6 +158,10 @@ CREATE TABLE opportunities (
   -- DCE document ingestion (attachment download/parsing - see tender_documents table)
   dce_documents_status VARCHAR(50) DEFAULT 'pending', -- 'pending', 'processing', 'fetched',
                                              -- 'no_documents_found', 'external_platform_only', 'failed'
+
+  -- Link back to the official notice (client's audit: missing on the fiche).
+  -- See src/utils/officialUrl.ts for how this is built per source.
+  official_url TEXT,
   
   -- Audit
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

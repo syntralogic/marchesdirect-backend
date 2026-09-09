@@ -9,6 +9,7 @@ import { logger } from '../utils/logger';
 import { deduplicateOpportunities } from './deduplicationService';
 import { v4 as uuid } from 'uuid';
 import { regionForDepartmentCode, normalizeDepartmentCode } from '../utils/departmentRegion';
+import { buildOfficialUrl } from '../utils/officialUrl';
 
 // v2.1 caps each request at 100 records - a real collection run needs to
 // page through `offset` to get anywhere near the "several thousand, even
@@ -186,8 +187,10 @@ export const collectBoampData = async (sourceId: number) => {
 const normalizeBoampRecord = (record: any) => {
   const f = record.fields ? record.fields : record; // tolerate either shape
   const buyerName = firstDefined(f, ['nomacheteur', 'denominationacheteur', 'acheteur_nom', 'nom_acheteur']);
+  const sourceReference = f.idweb || f.id || record.recordid;
   return {
-    source_reference: f.idweb || f.id || record.recordid,
+    source_reference: sourceReference,
+    official_url: buildOfficialUrl('boamp', sourceReference, record),
     title: f.objet || f.titulaire || 'Sans titre',
     description: f.objet || f.resume || '',
     publication_date: f.dateparution || record.record_timestamp,
@@ -252,6 +255,11 @@ export const collectPlaceData = async (sourceId: number) => {
           'SELECT id FROM opportunities WHERE source_id = $1 AND source_reference = $2',
           [sourceId, notice.id]
         );
+
+        // notice is PLACE's raw response shape (no dedicated normalizer
+        // exists for this source) - attach official_url the same way the
+        // BOAMP/TED normalizers do before it reaches insert/update.
+        notice.official_url = buildOfficialUrl('place', notice.id, notice);
 
         if (existing.rows.length > 0) {
           await updateOpportunity(existing.rows[0].id, notice);
@@ -595,6 +603,9 @@ const normalizeDecpRecord = (record: any) => {
     location_department: department,
     buyer_name: null,
     status: 'awarded',
+    // No confirmed stable per-notice public URL for DECP (see officialUrl.ts) -
+    // explicit null rather than silently omitting the field.
+    official_url: buildOfficialUrl('decp', record.uid || record.id, record),
     raw: record,
   };
 };
@@ -812,6 +823,7 @@ export const collectTedData = async (sourceId: number) => {
           // polluting it with country codes.
           location_region: null,
           buyer_name: firstText(item['buyer-name']) || firstText(item.buyerName) || null,
+          official_url: buildOfficialUrl('ted', tedId, item),
         };
 
         if (existing.rows.length > 0) {
@@ -869,10 +881,10 @@ const insertOpportunity = async (sourceId: number, data: any) => {
     `INSERT INTO opportunities 
       (source_id, source_reference, title, description, publication_date, deadline, 
        estimated_value, location_city, location_region, location_department, buyer_name, opportunity_type_id, 
-       raw_data, ai_classification_status)
+       raw_data, official_url, ai_classification_status)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
        (SELECT id FROM opportunity_types WHERE code = 'public_procurement'),
-       $12, 'not_analyzed')
+       $12, $13, 'not_analyzed')
      RETURNING id`,
     [
       sourceId,
@@ -889,6 +901,7 @@ const insertOpportunity = async (sourceId: number, data: any) => {
       // way BOAMP's `nomacheteur` does - null there rather than a guess.
       data.buyer_name || data.organism || null,
       JSON.stringify(data.raw || data), // raw_data - keep original source payload for audit
+      data.official_url || null,
     ]
   );
 
@@ -898,15 +911,21 @@ const insertOpportunity = async (sourceId: number, data: any) => {
 const updateOpportunity = async (opportunityId: string, data: any) => {
   // Only touch fields that legitimately change between runs (deadline extensions, cancellations,
   // corrected values); title/publication_date/source_reference stay immutable once ingested.
+  // official_url uses COALESCE(EXCLUDED, existing) rather than a plain
+  // overwrite: a row backfilled with a real link shouldn't get clobbered
+  // back to null on a later run where the field happened to come through
+  // empty (e.g. a raw payload missing the id this run).
   await db.query(
     `UPDATE opportunities 
-     SET description = $1, deadline = $2, estimated_value = $3, raw_data = $4, updated_at = NOW()
-     WHERE id = $5`,
+     SET description = $1, deadline = $2, estimated_value = $3, raw_data = $4,
+         official_url = COALESCE($5, official_url), updated_at = NOW()
+     WHERE id = $6`,
     [
       data.description,
       data.deadline,
       data.estimated_value,
       JSON.stringify(data.raw || data),
+      data.official_url || null,
       opportunityId,
     ]
   );
@@ -939,8 +958,8 @@ async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: stri
     const values: any[] = [];
     const rowsSql: string[] = [];
     chunk.forEach((data, idx) => {
-      const base = idx * 14;
-      rowsSql.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13}, $${base + 14})`);
+      const base = idx * 15;
+      rowsSql.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13}, $${base + 14}, $${base + 15})`);
       values.push(
         sourceId,
         data.source_reference,
@@ -956,6 +975,7 @@ async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: stri
         JSON.stringify(data.raw || data),
         'not_analyzed',
         data.status || 'active',
+        data.official_url || null,
       );
     });
 
@@ -964,7 +984,7 @@ async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: stri
         `INSERT INTO opportunities
           (source_id, source_reference, title, description, publication_date, deadline,
            estimated_value, location_city, location_region, buyer_name, opportunity_type_id,
-           raw_data, ai_classification_status, status)
+           raw_data, ai_classification_status, status, official_url)
          VALUES ${rowsSql.join(', ')}
          ON CONFLICT (source_id, source_reference) DO UPDATE SET
            description = EXCLUDED.description,
@@ -972,6 +992,7 @@ async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: stri
            estimated_value = EXCLUDED.estimated_value,
            raw_data = EXCLUDED.raw_data,
            status = EXCLUDED.status,
+           official_url = COALESCE(EXCLUDED.official_url, opportunities.official_url),
            updated_at = NOW()
          RETURNING (xmax = 0) AS was_insert`,
         values
