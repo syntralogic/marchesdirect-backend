@@ -781,6 +781,13 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // writes on `opportunities` for its duration but only runs once (IF NOT
   // EXISTS guards every future boot).
   await step(`CREATE INDEX IF NOT EXISTS opportunities_title_trgm ON opportunities USING GIN(title gin_trgm_ops)`);
+
+  // Client's audit (6 Sep): fiche has no link back to the official notice
+  // (BOAMP/TED/PLACE/DECP) despite that being one of the fields they
+  // explicitly listed as missing. Stored (not computed only at read time)
+  // so a source whose URL scheme changes later doesn't silently break old
+  // rows, and so it's backfillable independently of a redeploy.
+  await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS official_url TEXT`);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old
