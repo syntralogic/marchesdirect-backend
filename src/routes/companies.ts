@@ -152,6 +152,22 @@ router.post('/me/certifications', async (req: AuthRequest, res: Response) => {
   }
 });
 
+router.delete('/me/certifications/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await db.query(
+      'DELETE FROM company_certifications WHERE id = $1 AND company_id = $2 RETURNING id',
+      [req.params.id, req.user!.companyId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Certification not found' });
+    }
+    res.json({ success: true });
+  } catch (err: any) {
+    logger.error('Certification delete error:', err);
+    res.status(500).json({ error: 'Failed to delete certification' });
+  }
+});
+
 // -- References (past projects, for tech memo reuse) --
 router.get('/me/references', async (req: AuthRequest, res: Response) => {
   try {
@@ -183,6 +199,22 @@ router.post('/me/references', async (req: AuthRequest, res: Response) => {
   }
 });
 
+router.delete('/me/references/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await db.query(
+      'DELETE FROM company_references WHERE id = $1 AND company_id = $2 RETURNING id',
+      [req.params.id, req.user!.companyId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Reference not found' });
+    }
+    res.json({ success: true });
+  } catch (err: any) {
+    logger.error('Reference delete error:', err);
+    res.status(500).json({ error: 'Failed to delete reference' });
+  }
+});
+
 // -- Resources (staff/equipment, for proposal generation) --
 router.get('/me/resources', async (req: AuthRequest, res: Response) => {
   try {
@@ -210,6 +242,22 @@ router.post('/me/resources', async (req: AuthRequest, res: Response) => {
   }
 });
 
+router.delete('/me/resources/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await db.query(
+      'DELETE FROM company_resources WHERE id = $1 AND company_id = $2 RETURNING id',
+      [req.params.id, req.user!.companyId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Resource not found' });
+    }
+    res.json({ success: true });
+  } catch (err: any) {
+    logger.error('Resource delete error:', err);
+    res.status(500).json({ error: 'Failed to delete resource' });
+  }
+});
+
 // -- Policies (quality/safety/HR text, reused across bids) --
 router.get('/me/policies', async (req: AuthRequest, res: Response) => {
   try {
@@ -234,6 +282,22 @@ router.post('/me/policies', async (req: AuthRequest, res: Response) => {
     res.status(201).json(result.rows[0]);
   } catch (err: any) {
     res.status(500).json({ error: 'Failed to save policy' });
+  }
+});
+
+router.delete('/me/policies/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await db.query(
+      'DELETE FROM company_policies WHERE id = $1 AND company_id = $2 RETURNING id',
+      [req.params.id, req.user!.companyId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Policy not found' });
+    }
+    res.json({ success: true });
+  } catch (err: any) {
+    logger.error('Policy delete error:', err);
+    res.status(500).json({ error: 'Failed to delete policy' });
   }
 });
 
