@@ -457,6 +457,20 @@ export type ExtractedOpportunityFacts = {
   // every opportunity (public included) since that block is free-tier in
   // the reference screenshots, not gated behind a subscription.
   selection_criteria: ExtractedCriteriaList;
+  // Client's audit: "les informations d'attribution lorsque le marché est
+  // terminé" - completely absent until now. Only meaningful once a notice
+  // has actually been awarded (BOAMP publishes a separate "avis
+  // d'attribution" for that, DECP records are award data by definition -
+  // see normalizeDecpRecord), so "not available" is the correct/expected
+  // result for any notice that's still just a call for tenders, not a bug.
+  attribution_winner: ExtractedFact;
+  attribution_amount: ExtractedFact;
+  attribution_date: ExtractedFact;
+  // Coordonnées du donneur d'ordre beyond the email already captured by
+  // contact_email - client's audit listed phone and website as separately
+  // missing fields.
+  buyer_phone: ExtractedFact;
+  buyer_website: ExtractedFact;
   // Real count of distinct requirements found in actually-parsed DCE
   // documents (see documentIngestionService.ts) - available:false whenever
   // no documents have been parsed yet, never estimated from the notice text.
@@ -503,6 +517,13 @@ Additionally extract these four fields, same "not available" rule if the source 
 - allotment: whether the marché is split into lots, and which/how many (e.g. "Marche alloti en 3 lots", "Marche unique, non alloti"). If the source is silent on lots, treat as not available rather than assuming "non alloti".
 - technical_visit: whether a site visit is mentioned as obligatory or optional (e.g. "Visite du site obligatoire avant remise des offres"). If never mentioned, not available.
 
+Also extract, when the source states them:
+- attribution_winner: the name of the company/companies the contract was actually awarded to ("titulaire", "attributaire"). Only present on an "avis d'attribution" / award notice or award data (DECP) - a plain call-for-tenders notice will not have this, which is expected: return not available rather than guessing.
+- attribution_amount: the awarded amount, if stated separately from the estimated_value of the original call for tenders.
+- attribution_date: the date the contract was signed/notified/awarded, if stated.
+- buyer_phone: the awarding buyer's phone number, if stated.
+- buyer_website: the awarding buyer's website URL, if stated.
+
 Also extract selection_criteria: the award/scoring criteria and their weighting, if explicitly stated
 (e.g. "Critere prix: 40%, Critere valeur technique: 45%, Critere delais: 15%"). Only include criteria the
 source actually names; if a weight isn't given for a named criterion, set weight_percent to null and
@@ -534,6 +555,11 @@ Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
   "submission_method": {"value": "not available", "available": false},
   "allotment": {"value": "not available", "available": false},
   "technical_visit": {"value": "not available", "available": false},
+  "attribution_winner": {"value": "not available", "available": false},
+  "attribution_amount": {"value": "not available", "available": false},
+  "attribution_date": {"value": "not available", "available": false},
+  "buyer_phone": {"value": "not available", "available": false},
+  "buyer_website": {"value": "not available", "available": false},
   "selection_criteria": {"value": [{"label": "Prix", "weight_percent": 40, "not_specified": false}], "available": true},
   "requirements_detected": {"value": 0, "available": false}
 }`;
@@ -570,7 +596,11 @@ Location: ${opp.location_city || ''}, ${opp.location_region || ''}
 Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 8000) : '{}'}
 ${parsedDocumentsText ? `\nREAL PARSED DCE DOCUMENTS (use these for requirements_detected):\n${parsedDocumentsText}` : ''}`;
 
-  const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 1800);
+  // 1800 -> 2200: five more fields added (attribution_*, buyer_phone/website)
+  // without headroom risked truncating the JSON mid-object on notices with
+  // a long key_risks/selection_criteria list, which would fail JSON.parse
+  // below rather than just omitting a field.
+  const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 2200);
 
   // Clean and parse response
   const cleanedResponse = cleanJsonResponse(response);
