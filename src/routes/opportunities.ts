@@ -200,6 +200,12 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       // terms, same as a normal search engine. If sanitizing strips the
       // query down to nothing (e.g. it was only punctuation), the q filter
       // is simply skipped rather than erroring or matching nothing.
+      // Also: RecherchePage fires this on every keystroke (400ms debounce),
+      // so the in-progress word (e.g. "trav" on the way to "travaux") was
+      // still whole-word matched even after the OR fix above and returned
+      // nothing until fully typed. Suffixing each term with `:*` makes
+      // to_tsquery match it as a prefix instead, so live typing shows
+      // results immediately rather than only once each word is complete.
       const qWords = q
         .split(/\s+/)
         .map(w => w.replace(/[^\p{L}\p{N}-]/gu, '').trim())
@@ -208,7 +214,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         conditions.push(
           `to_tsvector('french', COALESCE(o.title, '') || ' ' || COALESCE(o.description, '')) @@ to_tsquery('french', $${idx++})`
         );
-        params.push(qWords.join(' | '));
+        params.push(qWords.map(w => `${w}:*`).join(' | '));
       }
     }
     if (trade_id) {
