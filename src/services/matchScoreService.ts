@@ -215,10 +215,16 @@ export const computeMatchScore = async (
   }
 
   if (daysToDeadline !== null) {
-    if (daysToDeadline <= 10 && !warning) {
+    // Was `daysToDeadline <= 10` checked first, which also matches
+    // negative values (deadline already passed) since -3 <= 10 - so an
+    // opportunity whose deadline passed 3 days ago showed "Délai de
+    // remise de -3 jour(s)" instead of the intended "dépassée" message
+    // below, which could then never actually fire. Check the passed-
+    // deadline case first.
+    if (daysToDeadline <= 0) {
+      if (!warning) warning = 'La date limite de remise est dépassée.';
+    } else if (daysToDeadline <= 10 && !warning) {
       warning = `Délai de remise de ${daysToDeadline} jour${daysToDeadline > 1 ? 's' : ''} : organisation à lancer rapidement.`;
-    } else if (daysToDeadline <= 0) {
-      warning = 'La date limite de remise est dépassée.';
     }
   }
 
