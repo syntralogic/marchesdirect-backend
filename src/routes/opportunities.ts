@@ -177,8 +177,15 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     let idx = 1;
 
     if (journey) {
-      conditions.push(`ot.code = $${idx++}`);
-      params.push(journey);
+      // Client's journey step lets several opportunity types be selected
+      // at once - was a single `=` match so the frontend picking 2+ types
+      // (comma-separated, same convention as region/city/department below)
+      // only ever matched the first one.
+      const journeys = journey.split(',').map(j => j.trim()).filter(Boolean);
+      if (journeys.length > 0) {
+        conditions.push(`ot.code = ANY($${idx++}::text[])`);
+        params.push(journeys);
+      }
     }
     if (q) {
       conditions.push(
