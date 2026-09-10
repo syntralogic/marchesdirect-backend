@@ -984,7 +984,15 @@ Location: ${opp.location_city || ''}, ${opp.location_region || ''}
 Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 6000) : '{}'}`;
 
   try {
-    const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 900);
+    // Was 900 - too tight for the JSON envelope (3 keys + escaping) plus 3
+    // French sections of up to 5 sentences each. Verbose fiches (long
+    // raw_data, technical contracts like assurance/BTP) routinely hit that
+    // ceiling mid-string, so the response had no closing brace,
+    // cleanJsonResponse's `{...}` match failed, JSON.parse threw, and the
+    // row got stuck on ai_analysis_sections_status='failed' - retried (and
+    // truncated the same way) on every subsequent visit, so the fiche never
+    // stopped showing the old single-paragraph ai_summary fallback.
+    const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 2200);
     const cleaned = cleanJsonResponse(response);
     let sections: { presentation: string; conditions: string; entreprises: string };
     try {
