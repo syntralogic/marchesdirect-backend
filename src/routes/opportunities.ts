@@ -172,7 +172,15 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     // speed; here it's computed on the fly per request. Fine at the current
     // ~47k row scale, would need a functional index (or reinstating a view
     // without the status/deadline exclusions) if that becomes a bottleneck.
-    const conditions: string[] = ['o.deleted_at IS NULL'];
+    //
+    // status = 'merged' is the one exception kept hard-excluded below:
+    // that's not a real-world tender status the client asked to surface,
+    // it's deduplicationService.ts's internal marker on the losing side of
+    // a duplicate pair (~2,670 rows at last count). Client's "sab dikhna
+    // chahiye" ask was about not hiding cancelled/expired/awarded - not
+    // about undoing deduplication. Without this, merged duplicates that
+    // were already fixed once (see dedup commit) silently reappear here.
+    const conditions: string[] = ["o.deleted_at IS NULL", "o.status != 'merged'"];
     const params: any[] = [];
     let idx = 1;
 
@@ -391,7 +399,10 @@ router.get('/stats/counts', async (req: Request, res: Response) => {
 // straight off `opportunities` (not opportunity_search_index, whose own
 // WHERE clause hard-excludes cancelled/expired/merged at the view
 // definition level) so every row counts here exactly like the main search
-// (GET /) now does.
+// (GET /) now does. Exception: status = 'merged' (deduplicationService.ts's
+// marker for the losing side of a duplicate pair) stays excluded here too,
+// same reasoning as the GET / route above - "show everything" was never
+// meant to bring back already-deduplicated rows.
 router.get('/stats/regions', async (req: Request, res: Response) => {
   try {
     const result = await db.query(
@@ -399,6 +410,7 @@ router.get('/stats/regions', async (req: Request, res: Response) => {
        FROM opportunities
        WHERE location_region IS NOT NULL AND location_region != ''
          AND deleted_at IS NULL
+         AND status != 'merged'
        GROUP BY location_region
        ORDER BY count DESC`
     );
@@ -410,8 +422,8 @@ router.get('/stats/regions', async (req: Request, res: Response) => {
 });
 
 // GET /api/opportunities/stats/departments - same, grouped by French
-// department (numeric code, e.g. "33" for Gironde). Same "count everything"
-// rule as /stats/regions above.
+// department (numeric code, e.g. "33" for Gironde). Same "count everything
+// except merged duplicates" rule as /stats/regions above.
 router.get('/stats/departments', async (req: Request, res: Response) => {
   try {
     const result = await db.query(
@@ -419,6 +431,7 @@ router.get('/stats/departments', async (req: Request, res: Response) => {
        FROM opportunities
        WHERE location_department IS NOT NULL AND location_department != ''
          AND deleted_at IS NULL
+         AND status != 'merged'
        GROUP BY location_department
        ORDER BY count DESC`
     );
@@ -432,7 +445,7 @@ router.get('/stats/departments', async (req: Request, res: Response) => {
 // GET /api/opportunities/stats/near?lat=&lng=&radius_km= - count within a
 // radius of a point, for the "Villes" (city) tab. Uses the Haversine formula
 // directly in SQL since PostGIS isn't set up on this database. Same "count
-// everything" rule as /stats/regions above.
+// everything except merged duplicates" rule as /stats/regions above.
 router.get('/stats/near', async (req: Request, res: Response) => {
   try {
     const lat = parseFloat(req.query.lat as string);
@@ -446,6 +459,7 @@ router.get('/stats/near', async (req: Request, res: Response) => {
        FROM opportunities
        WHERE location_latitude IS NOT NULL AND location_longitude IS NOT NULL
          AND deleted_at IS NULL
+         AND status != 'merged'
          AND (
            6371 * acos(
              LEAST(1, GREATEST(-1,
