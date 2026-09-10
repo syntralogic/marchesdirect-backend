@@ -208,7 +208,23 @@ const mergeDuplicates = async (
         ]
       );
 
-      // Merge metadata (take non-null values from secondary)
+      // Merge metadata (take non-null/non-empty values from secondary).
+      //
+      // BUG FIX (client report, Sep 2026): this used to only backfill
+      // estimated_value/lat/lng. Which side of a merge ends up "primary" is
+      // decided by the caller via id/created_at ordering, not by which
+      // record actually has fuller data - so a thin DECP row (buyer_name,
+      // deadline, official_url all null by construction - see
+      // normalizeDecpRecord) could easily end up as primary over a BOAMP/
+      // PLACE/TED row for the same tender, and the richer BOAMP data was
+      // then silently discarded (the BOAMP row gets marked 'merged' and is
+      // no longer shown). That's the direct mechanism behind "some
+      // opportunities only have administrative data, even though the same
+      // tender exists in full on BOAMP" - the full data existed, the merge
+      // just dropped it. Now every field the client flagged as
+      // DECP-incomplete (buyer_name, official_url, deadline, description,
+      // location) is backfilled from whichever side of the merge actually
+      // has it, regardless of which id ended up primary.
       const secondary = await client.query(
         'SELECT * FROM opportunities WHERE id = $1',
         [secondaryId]
@@ -221,9 +237,28 @@ const mergeDuplicates = async (
           estimated_value = COALESCE(estimated_value, $1),
           location_latitude = COALESCE(location_latitude, $2),
           location_longitude = COALESCE(location_longitude, $3),
+          buyer_name = COALESCE(NULLIF(buyer_name, ''), $4),
+          official_url = COALESCE(NULLIF(official_url, ''), $5),
+          deadline = COALESCE(deadline, $6),
+          description = COALESCE(NULLIF(description, ''), $7),
+          location_city = COALESCE(NULLIF(location_city, ''), $8),
+          location_region = COALESCE(NULLIF(location_region, ''), $9),
+          location_department = COALESCE(NULLIF(location_department, ''), $10),
           updated_at = NOW()
-         WHERE id = $4`,
-        [sec.estimated_value, sec.location_latitude, sec.location_longitude, primaryId]
+         WHERE id = $11`,
+        [
+          sec.estimated_value,
+          sec.location_latitude,
+          sec.location_longitude,
+          sec.buyer_name,
+          sec.official_url,
+          sec.deadline,
+          sec.description,
+          sec.location_city,
+          sec.location_region,
+          sec.location_department,
+          primaryId,
+        ]
       );
 
       // Optionally mark secondary as merged (don't delete for audit trail)
