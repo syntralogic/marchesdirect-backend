@@ -868,6 +868,23 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // so a source whose URL scheme changes later doesn't silently break old
   // rows, and so it's backfillable independently of a redeploy.
   await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS official_url TEXT`);
+
+  // Client's 10 Sep ask: the opportunity page's AI analysis renders as one
+  // dense text block (visible proof: a fully-populated fiche - Saint-
+  // Yrieix-sur-Charente food supply - was still "hard to read" per their
+  // screenshot). Wants it split into 3 fixed accordions reused on every
+  // fiche (Présentation du marché / Conditions et points à vérifier /
+  // Entreprises concernées), first one open by default. Storing the 3
+  // sections as their own JSONB column rather than trying to re-parse
+  // generateOpportunitySummary's free-form ai_summary text on the
+  // frontend (that field is a short 2-4 sentence blurb by design per the
+  // 8 Sep fix above, a different, shorter piece of copy - not a source
+  // for 3 separate structured sections). Status column follows the same
+  // not_generated/processing/generated/failed pattern as ai_summary_status
+  // so the backfill job (generateAnalysisSectionsForOpportunities) can
+  // find rows that still need it.
+  await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS ai_analysis_sections JSONB`);
+  await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS ai_analysis_sections_status VARCHAR(50)`);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old

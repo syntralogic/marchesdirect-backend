@@ -937,6 +937,117 @@ Location: ${opp.location_city}, ${opp.location_region}`;
   }
 };
 
+// Client's 10 Sep spec: the opportunity page's free-form analysis text
+// ("Analyse de l'opportunité") is hard to read as one dense block, even on
+// a fully-populated fiche (their own example: Saint-Yrieix-sur-Charente
+// food supply notice). Wants exactly 3 fixed accordions, reused on every
+// fiche, first one open by default:
+//   - Présentation du marché: objet, prestations, périmètre.
+//   - Conditions et points à vérifier: calendrier, exigences, critères,
+//     contraintes.
+//   - Entreprises concernées: métiers/profils concernés - explicitly NOT a
+//     guarantee of unverified eligibility, so the prompt below is worded
+//     to describe fit rather than certify it.
+// Same "never invent, mark missing" discipline as extractOpportunityFacts
+// above - each section says so in French when the source doesn't cover it,
+// rather than padding with generic filler.
+export const generateOpportunityAnalysisSections = async (
+  opportunityId: string
+): Promise<{ presentation: string; conditions: string; entreprises: string }> => {
+  const oppResult = await db.query('SELECT * FROM opportunities WHERE id = $1', [opportunityId]);
+  if (oppResult.rows.length === 0) {
+    throw new Error(`Opportunity ${opportunityId} not found`);
+  }
+  const opp = oppResult.rows[0];
+
+  const deadlineText = opp.deadline ? new Date(opp.deadline).toISOString().slice(0, 10) : 'non communiquée';
+  const estimatedValueText = opp.estimated_value != null && opp.estimated_value !== ''
+    ? `${Number(opp.estimated_value).toLocaleString('fr-FR', { maximumFractionDigits: 0 })} EUR`
+    : 'non communiqué';
+
+  const systemPrompt = `Tu es un analyste de marchés publics/privés français. À partir de la fiche source ci-dessous, rédige exactement 3 sections destinées à 3 accordéons fixes sur la page d'une opportunité. Chaque section fait 2 à 5 phrases, en français courant, texte brut (aucun markdown, aucun titre répété dans le texte).
+
+1. presentation ("Présentation du marché") : l'objet du marché, les prestations demandées et le périmètre de la mission.
+2. conditions ("Conditions et points à vérifier") : calendrier (dates clés), exigences, critères de sélection et contraintes à connaître avant de candidater.
+3. entreprises ("Entreprises concernées") : les métiers et profils d'entreprises concernés par ce marché. Décris uniquement le type d'entreprise auquel ce marché correspond a priori (taille, secteur, spécialité) - ne certifie jamais qu'une entreprise est éligible, puisque l'éligibilité réelle dépend de critères que tu ne peux pas vérifier.
+
+RÈGLE STRICTE : n'utilise que ce qui est réellement présent dans la source ci-dessous. Si une section manque d'information dans la source (ex : aucune exigence mentionnée, aucun montant), dis-le explicitement dans cette section plutôt que d'inventer un contenu plausible.
+
+Réponds UNIQUEMENT en JSON valide, exactement sous cette forme, sans markdown ni texte hors JSON :
+{"presentation": "...", "conditions": "...", "entreprises": "..."}`;
+
+  const userMessage = `Title: ${opp.title}
+Description: ${opp.description || ''}
+Deadline: ${deadlineText}
+Estimated Value: ${estimatedValueText}
+Location: ${opp.location_city || ''}, ${opp.location_region || ''}
+Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 6000) : '{}'}`;
+
+  try {
+    const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 900);
+    const cleaned = cleanJsonResponse(response);
+    let sections: { presentation: string; conditions: string; entreprises: string };
+    try {
+      sections = JSON.parse(cleaned);
+    } catch (err) {
+      logger.error(`Raw analysis-sections response for ${opportunityId}: ${response}`);
+      throw new Error(`Invalid analysis-sections response format: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // Same defensive coercion as extractOpportunityFacts - never let a
+    // malformed field (wrong type, missing key) crash the fiche page.
+    const safeSections = {
+      presentation: typeof sections.presentation === 'string' ? sections.presentation : '',
+      conditions: typeof sections.conditions === 'string' ? sections.conditions : '',
+      entreprises: typeof sections.entreprises === 'string' ? sections.entreprises : '',
+    };
+
+    await db.query(
+      'UPDATE opportunities SET ai_analysis_sections = $1, ai_analysis_sections_status = $2 WHERE id = $3',
+      [JSON.stringify(safeSections), 'generated', opportunityId]
+    );
+
+    return safeSections;
+  } catch (err) {
+    await db.query(
+      'UPDATE opportunities SET ai_analysis_sections_status = $1 WHERE id = $2',
+      ['failed', opportunityId]
+    );
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logger.error(`Analysis-sections generation failed for ${opportunityId}: ${errorMessage}`);
+    throw err;
+  }
+};
+
+// Backfill sibling to generateSummariesForOpportunities below - same
+// not_generated/failed selection, same batch-size/rate-limit shape, kept as
+// its own function (not merged into that one) since the two are genuinely
+// different pieces of AI-generated copy (short blurb vs. 3 structured
+// sections) that can succeed/fail independently.
+export const generateAnalysisSectionsForOpportunities = async (limit: number = 50) => {
+  const result = await db.query(
+    `SELECT id FROM opportunities
+     WHERE (ai_analysis_sections_status IS NULL OR ai_analysis_sections_status IN ('not_generated', 'failed'))
+       AND description IS NOT NULL AND description != ''
+     ORDER BY created_at DESC
+     LIMIT $1`,
+    [limit]
+  );
+
+  let succeeded = 0;
+  let failed = 0;
+  for (const row of result.rows) {
+    try {
+      await generateOpportunityAnalysisSections(row.id);
+      succeeded++;
+    } catch (err) {
+      failed++;
+      logger.error(`Analysis-sections backfill failed for ${row.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  logger.info(`[AnalysisSectionsBackfill] ${succeeded} generated, ${failed} failed, ${result.rows.length} attempted`);
+  return { succeeded, failed, attempted: result.rows.length };
+};
+
 // ============================================================================
 // CHATBOT (MILESTONE 7)
 // ============================================================================

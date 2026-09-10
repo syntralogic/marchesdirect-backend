@@ -151,6 +151,11 @@ CREATE TABLE opportunities (
   -- Matching & Recommendations (Milestone 6)
   ai_summary_status VARCHAR(50),            -- 'not_generated', 'processing', 'generated', 'failed'
   ai_summary TEXT,                          -- Auto-generated summary
+  ai_analysis_sections_status VARCHAR(50),  -- 'not_generated', 'processing', 'generated', 'failed'
+  ai_analysis_sections JSONB,               -- {presentation, conditions, entreprises} - the 3 fixed
+                                             -- accordions on the opportunity page (client's 10 Sep
+                                             -- spec). Separate from ai_summary above, which stays a
+                                             -- short 2-4 sentence blurb, not a source for these 3.
   ai_extracted_facts JSONB,                 -- Structured fact extraction (POC test): each field
                                              -- {"value": "...", "available": bool} - "not available"
                                              -- when the source record doesn't actually contain it.
