@@ -240,15 +240,36 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       // nothing until fully typed. Suffixing each term with `:*` makes
       // to_tsquery match it as a prefix instead, so live typing shows
       // results immediately rather than only once each word is complete.
+      //
+      // Client report (Sep 2026): typing a profession directly into the
+      // search box (e.g. "peintre", "électricien") returned an inconsistent/
+      // too-small number of results. Root cause: this only ever matched the
+      // literal notice text (title+description) - a listing already
+      // correctly AI-classified into the "Peinture" trade (trade_id set by
+      // classifyOpportunity, see aiService.ts) is invisible to this box
+      // whenever the raw BOAMP/DECP wording doesn't happen to contain the
+      // word "peintre" itself (common - French notices often say "travaux
+      // de finition" or just list a CPV code). The trade-chip flow already
+      // avoided this by sending trade_id directly instead of q - the manual
+      // search box had no equivalent. Now also matches against the joined
+      // trade's name and the AI's own matched-trades list (same
+      // ai_matched_trades::text ILIKE pattern already used by
+      // matchOpportunitiesToCompany in aiService.ts), so a profession typed
+      // as free text finds the same results a trade-chip search would.
       const qWords = q
         .split(/\s+/)
         .map(w => w.replace(/[^\p{L}\p{N}-]/gu, '').trim())
         .filter(Boolean);
       if (qWords.length > 0) {
+        const tsIdx = idx++;
+        const tradeIdx = idx++;
         conditions.push(
-          `to_tsvector('french', COALESCE(o.title, '') || ' ' || COALESCE(o.description, '')) @@ to_tsquery('french', $${idx++})`
+          `(to_tsvector('french', COALESCE(o.title, '') || ' ' || COALESCE(o.description, '')) @@ to_tsquery('french', $${tsIdx})
+            OR t.name ILIKE ANY($${tradeIdx}::text[])
+            OR o.ai_matched_trades::text ILIKE ANY($${tradeIdx}::text[]))`
         );
         params.push(qWords.map(w => `${w}:*`).join(' | '));
+        params.push(qWords.map(w => `%${w}%`));
       }
     }
     if (trade_id) {
