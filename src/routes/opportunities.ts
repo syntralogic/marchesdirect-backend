@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
-import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts } from '../services/aiService';
+import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts, generateOpportunityAnalysisSections } from '../services/aiService';
 import { ingestOpportunityDocuments } from '../services/documentIngestionService';
 import { computeMatchScore } from '../services/matchScoreService';
 import { syncLeadToCrm } from '../services/crmSyncService';
@@ -115,6 +115,32 @@ async function ensureFactsExtracted(opportunityId: string, currentFacts: Record<
     // Fall through with whatever facts already existed (likely none) - the
     // rest of the fiche still renders, and the batch job will retry later.
     return currentFacts;
+  }
+}
+
+// Same on-demand + de-dupe pattern as ensureFactsExtracted above, for the 3
+// analysis accordions (analysisSectionsBackfillJob.ts is the slow hourly
+// catch-up for everything this doesn't reach first) - a visitor opening a
+// fiche the backfill hasn't gotten to yet gets it generated for their
+// request instead of an empty accordion until the next cron run.
+const inFlightAnalysisSections = new Map<string, Promise<any>>();
+
+async function ensureAnalysisSectionsGenerated(
+  opportunityId: string,
+  currentSections: Record<string, any> | null | undefined,
+  status: string | null
+) {
+  if (currentSections || status === 'processing') return currentSections;
+  try {
+    let pending = inFlightAnalysisSections.get(opportunityId);
+    if (!pending) {
+      pending = generateOpportunityAnalysisSections(opportunityId).finally(() => inFlightAnalysisSections.delete(opportunityId));
+      inFlightAnalysisSections.set(opportunityId, pending);
+    }
+    return await pending;
+  } catch (err) {
+    logger.warn(`On-demand analysis-sections generation failed for ${opportunityId} while serving a detail view: ${err instanceof Error ? err.message : err}`);
+    return currentSections;
   }
 }
 
@@ -538,6 +564,7 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     // genuinely missing/malformed (see factsNeedExtraction) - already-good
     // records never re-call the LLM here.
     opportunity.ai_extracted_facts = await ensureFactsExtracted(opportunity.id, opportunity.ai_extracted_facts);
+    opportunity.ai_analysis_sections = await ensureAnalysisSectionsGenerated(opportunity.id, opportunity.ai_analysis_sections, opportunity.ai_analysis_sections_status);
     kickOffDocumentIngestionIfPending(opportunity.id, opportunity.dce_documents_status);
 
     const sessionId = (req.query.sessionId as string) || '';

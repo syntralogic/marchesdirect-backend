@@ -4,7 +4,7 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { AuthRequest, requireRole } from '../middleware/auth';
 import { verifyDeduplicationQuality, getDeduplicationReport, deduplicateOpportunities } from '../services/deduplicationService';
-import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities, generateOpportunitySummary } from '../services/aiService';
+import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities, generateOpportunitySummary, generateAnalysisSectionsForOpportunities } from '../services/aiService';
 import { collectBoampData, collectPlaceData, collectTedData, collectDecpData, collectBatiwebData } from '../services/dataCollectionService';
 import { runBackup, testRestore } from '../jobs/backupManagement';
 import { regionForDepartmentCode, normalizeDepartmentCode, extractDepartmentCode } from '../utils/departmentRegion';
@@ -346,6 +346,21 @@ router.post('/ai/summarize-batch', async (req: AuthRequest, res: Response) => {
   } catch (err: any) {
     logger.error('Admin summarize batch error:', err);
     res.status(500).json({ error: 'Batch summarization failed' });
+  }
+});
+
+// POST /api/admin/ai/analysis-sections-batch - manual trigger for the
+// 3-accordion analysis backfill (analysisSectionsBackfillJob already runs
+// this automatically, same "no Shell on Render free tier" reasoning as
+// summarize-batch above - lets the client force a bigger batch on demand).
+router.post('/ai/analysis-sections-batch', async (req: AuthRequest, res: Response) => {
+  try {
+    const limit = parseInt(req.body.limit) || 50;
+    const result = await generateAnalysisSectionsForOpportunities(limit);
+    res.json(result);
+  } catch (err: any) {
+    logger.error('Admin analysis-sections batch error:', err);
+    res.status(500).json({ error: 'Batch analysis-sections generation failed' });
   }
 });
 
