@@ -109,13 +109,68 @@ router.put('/brands/:id', async (req: AuthRequest, res: Response) => {
 });
 
 // GET /api/admin/data-sources - connector status (proof for Milestone 2)
+//
+// Client's ask (10 Sep, WhatsApp): "which sources are you actually using,
+// and how many listings come from each" - `sources` alone (active flag,
+// last_run, total_imports-since-last-restart) couldn't answer that; it says
+// nothing about what's actually sitting in `opportunities` right now, or
+// how complete those rows are per source. Added `sourceStats`: a live
+// COUNT(*) per source_id plus, for the fields the client specifically
+// flagged as sometimes missing (official_url / buyer_name / deadline /
+// a real description), how many rows per source actually have them. This
+// is what turns "some listings are almost empty" into a concrete per-source
+// answer instead of a guess - e.g. DECP rows structurally can't have a
+// deadline or official_url (see normalizeDecpRecord/buildOfficialUrl - DECP
+// is post-award administrative data with no confirmed per-notice public
+// URL), which should show up here as 0% for those two columns on the decp
+// row specifically, not as a bug to chase.
 router.get('/data-sources', async (req: AuthRequest, res: Response) => {
   try {
     const sources = await db.query('SELECT * FROM data_sources ORDER BY code');
     const logs = await db.query(
       `SELECT * FROM connector_logs ORDER BY started_at DESC LIMIT 20`
     );
-    res.json({ sources: sources.rows, recentRuns: logs.rows });
+    // description completeness uses a length threshold (not just NOT NULL)
+    // because several connectors (DECP's `objet`, Batiweb's RSS snippet)
+    // populate description with a short string rather than leaving it
+    // null - "present but thin" needs to count as incomplete here too, or
+    // this would undercount exactly the rows the client is asking about.
+    const stats = await db.query(`
+      SELECT
+        o.source_id,
+        COUNT(*) AS opportunity_count,
+        COUNT(*) FILTER (WHERE o.official_url IS NOT NULL AND o.official_url <> '') AS with_official_url,
+        COUNT(*) FILTER (WHERE o.buyer_name IS NOT NULL AND o.buyer_name <> '') AS with_buyer_name,
+        COUNT(*) FILTER (WHERE o.deadline IS NOT NULL) AS with_deadline,
+        COUNT(*) FILTER (WHERE o.description IS NOT NULL AND length(o.description) >= 100) AS with_substantial_description,
+        COUNT(*) FILTER (WHERE o.estimated_value IS NOT NULL) AS with_estimated_value
+      FROM opportunities o
+      WHERE o.deleted_at IS NULL
+      GROUP BY o.source_id
+    `);
+    const statsBySourceId = new Map(stats.rows.map(r => [r.source_id, r]));
+    const sourceStats = sources.rows.map(s => {
+      const row = statsBySourceId.get(s.id);
+      const total = row ? Number(row.opportunity_count) : 0;
+      const pct = (n: number) => (total > 0 ? Math.round((n / total) * 1000) / 10 : 0);
+      return {
+        source_id: s.id,
+        code: s.code,
+        active: s.active,
+        opportunity_count: total,
+        with_official_url: row ? Number(row.with_official_url) : 0,
+        with_official_url_pct: row ? pct(Number(row.with_official_url)) : 0,
+        with_buyer_name: row ? Number(row.with_buyer_name) : 0,
+        with_buyer_name_pct: row ? pct(Number(row.with_buyer_name)) : 0,
+        with_deadline: row ? Number(row.with_deadline) : 0,
+        with_deadline_pct: row ? pct(Number(row.with_deadline)) : 0,
+        with_substantial_description: row ? Number(row.with_substantial_description) : 0,
+        with_substantial_description_pct: row ? pct(Number(row.with_substantial_description)) : 0,
+        with_estimated_value: row ? Number(row.with_estimated_value) : 0,
+        with_estimated_value_pct: row ? pct(Number(row.with_estimated_value)) : 0,
+      };
+    });
+    res.json({ sources: sources.rows, recentRuns: logs.rows, sourceStats });
   } catch (err: any) {
     logger.error('Admin data-sources error:', err);
     res.status(500).json({ error: 'Failed to fetch data sources' });
