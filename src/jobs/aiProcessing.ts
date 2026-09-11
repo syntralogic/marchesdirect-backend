@@ -32,7 +32,18 @@ import { trackJob } from '../utils/jobTracker';
 // the whole backlog in one go - roughly a day to clear instead of ten,
 // while staying comfortably inside normal rate limits at 2 calls/sec max
 // (500ms delay, unchanged).
-const BATCH_SIZE = 150;
+// Cost fix (11 Sep, client flagged AI spend running too high): this was
+// bumped to 150/5min (~3,600 combined classify+summary calls/hour) to clear
+// a 47k-row one-time backlog in about a day. That throughput is what was
+// actually driving spend, not any single call's cost - each call itself is
+// already on Haiku with a trimmed raw_data context (see
+// extractRawDataContext in aiService.ts). Dialed back down to a sustainable
+// steady-state pace: the backlog clears slower, but a live site only ever
+// adds a handful of new opportunities per connector run (see
+// dataCollectionService.ts), so this rate is what matters for cost going
+// forward, not backlog-clearing speed. Re-bump temporarily (as before) only
+// for another genuine one-time backlog, not as the permanent setting.
+const BATCH_SIZE = 40;
 const DELAY_BETWEEN_CALLS_MS = 500;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -112,9 +123,10 @@ export const processMissingSummaries = async () => {
 };
 
 export const startAIProcessing = () => {
-  // Every 5 minutes (was 15) - see BATCH_SIZE comment above for why: at the
-  // old cadence, classifying the current backlog would take about 10 days.
-  cron.schedule('*/5 * * * *', async () => {
+  // Cost fix (11 Sep): was */5 * * * * (every 5 min) to burn through the
+  // backlog fast for go-live. Dialed back to every 15 min at the smaller
+  // BATCH_SIZE above - see that comment for the reasoning.
+  cron.schedule('*/15 * * * *', async () => {
     await trackJob('aiProcessing:cron', async () => {
       await processUnclassifiedOpportunities();
       await processMissingSummaries();

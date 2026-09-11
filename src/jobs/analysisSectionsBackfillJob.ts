@@ -7,23 +7,16 @@
  * generateOpportunityAnalysisSections for the generation itself and
  * schema.sql for the ai_analysis_sections column.
  *
- * That column starts NULL on every already-ingested opportunity (tens of
- * thousands of rows) and on every new one until this job reaches it, so
- * this runs the same "small batch on boot, then hourly" shape as
- * staleSummaryBackfillJob.ts - one paid Claude call per row, so
- * deliberately throttled unlike the free bulk-SQL backfills
- * (facts/location-region).
- *
- * Bumped 30/hour -> 50 every 5 min (11 Sep, going-live push): the
- * free-text-JSON generation approach (fixed in aiService.ts - see
- * callClaudeAPIWithTool) left a large backlog of rows stuck on
- * ai_analysis_sections_status='failed' from before that fix, which this
- * same WHERE clause already retries (generateAnalysisSectionsForOpportunities
- * selects not_generated/failed) - just too slowly at 30/hour to clear
- * before go-live. This is intentionally aggressive to work through that
- * one-time backlog fast; safe to dial back down to hourly once
- * GET /api/admin/data-sources (or the analysis-sections-batch endpoint)
- * shows the failed/not_generated count near zero.
+ * Cost fix (11 Sep, client flagged AI spend): this was bumped to 50 every
+ * 5 min (~600/hour) to clear a one-time stuck-record backlog fast for
+ * go-live. That throughput, combined with aiProcessing.ts's own bump to
+ * 150/5min, is what actually drove spend up - not any single call's cost.
+ * Dialed back down to 20 every 15 min (~80/hour): still faster than the
+ * original hourly-10 steady-state pace, but nowhere near the emergency
+ * rate. On-demand generation (routes/opportunities.ts, triggered the
+ * moment a visitor opens a fiche) still covers any specific record
+ * immediately regardless of this job's pace - this cron is only for
+ * opportunities nobody has viewed yet.
  */
 
 import { generateAnalysisSectionsForOpportunities } from '../services/aiService';
@@ -33,17 +26,16 @@ export const startAnalysisSectionsBackfillJob = () => {
   const cron = require('node-cron');
 
   setTimeout(() => {
-    generateAnalysisSectionsForOpportunities(50).catch(err =>
+    generateAnalysisSectionsForOpportunities(20).catch(err =>
       logger.error('[Job] Boot-time analysis-sections backfill failed (non-fatal):', err)
     );
   }, 45_000);
 
-  // Every 5 minutes while clearing the pre-fix backlog (see comment above).
-  cron.schedule('*/5 * * * *', () => {
-    generateAnalysisSectionsForOpportunities(50).catch(err =>
+  cron.schedule('*/15 * * * *', () => {
+    generateAnalysisSectionsForOpportunities(20).catch(err =>
       logger.error('[Job] Scheduled analysis-sections backfill failed (non-fatal):', err)
     );
   });
 
-  logger.info('✅ Analysis-sections backfill job scheduled (batch of 50 on boot, then every 5 min)');
+  logger.info('✅ Analysis-sections backfill job scheduled (batch of 20 on boot, then every 15 min)');
 };
