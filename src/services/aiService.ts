@@ -1091,17 +1091,27 @@ Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 6
     };
 
     await db.query(
-      'UPDATE opportunities SET ai_analysis_sections = $1, ai_analysis_sections_status = $2 WHERE id = $3',
+      'UPDATE opportunities SET ai_analysis_sections = $1, ai_analysis_sections_status = $2, ai_analysis_sections_error = NULL WHERE id = $3',
       [JSON.stringify(safeSections), 'generated', opportunityId]
     );
 
     return safeSections;
   } catch (err) {
-    await db.query(
-      'UPDATE opportunities SET ai_analysis_sections_status = $1 WHERE id = $2',
-      ['failed', opportunityId]
-    );
+    // Persist the real error alongside the status (see ai_analysis_sections_error
+    // migration, 11 Sep) - this is what's surfaced in the public GET /:id
+    // response for diagnosis without needing an authenticated admin session.
+    const isAxiosErr = axios.isAxiosError(err);
+    const apiStatus = isAxiosErr ? err.response?.status : undefined;
+    const apiBody = isAxiosErr ? JSON.stringify(err.response?.data) : undefined;
     const errorMessage = err instanceof Error ? err.message : String(err);
+    const storedError = [apiStatus ? `HTTP ${apiStatus}` : null, errorMessage, apiBody]
+      .filter(Boolean)
+      .join(' | ')
+      .slice(0, 2000);
+    await db.query(
+      'UPDATE opportunities SET ai_analysis_sections_status = $1, ai_analysis_sections_error = $2 WHERE id = $3',
+      ['failed', storedError, opportunityId]
+    );
     logger.error(`Analysis-sections generation failed for ${opportunityId}: ${errorMessage}`);
     throw err;
   }
