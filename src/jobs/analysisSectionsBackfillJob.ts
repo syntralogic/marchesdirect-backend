@@ -13,6 +13,17 @@
  * staleSummaryBackfillJob.ts - one paid Claude call per row, so
  * deliberately throttled unlike the free bulk-SQL backfills
  * (facts/location-region).
+ *
+ * Bumped 30/hour -> 50 every 5 min (11 Sep, going-live push): the
+ * free-text-JSON generation approach (fixed in aiService.ts - see
+ * callClaudeAPIWithTool) left a large backlog of rows stuck on
+ * ai_analysis_sections_status='failed' from before that fix, which this
+ * same WHERE clause already retries (generateAnalysisSectionsForOpportunities
+ * selects not_generated/failed) - just too slowly at 30/hour to clear
+ * before go-live. This is intentionally aggressive to work through that
+ * one-time backlog fast; safe to dial back down to hourly once
+ * GET /api/admin/data-sources (or the analysis-sections-batch endpoint)
+ * shows the failed/not_generated count near zero.
  */
 
 import { generateAnalysisSectionsForOpportunities } from '../services/aiService';
@@ -22,21 +33,17 @@ export const startAnalysisSectionsBackfillJob = () => {
   const cron = require('node-cron');
 
   setTimeout(() => {
-    generateAnalysisSectionsForOpportunities(30).catch(err =>
+    generateAnalysisSectionsForOpportunities(50).catch(err =>
       logger.error('[Job] Boot-time analysis-sections backfill failed (non-fatal):', err)
     );
   }, 45_000);
 
-  // Every hour, small batch - same cadence/reasoning as the summary backfill.
-  // Bumped 10 -> 30 (10 Sep): with tens of thousands of pre-existing
-  // opportunities and only on-demand generation otherwise reaching a given
-  // fiche, 10/hour meant most of the backlog would still be showing the old
-  // single-paragraph ai_summary fallback for weeks.
-  cron.schedule('15 * * * *', () => {
-    generateAnalysisSectionsForOpportunities(30).catch(err =>
+  // Every 5 minutes while clearing the pre-fix backlog (see comment above).
+  cron.schedule('*/5 * * * *', () => {
+    generateAnalysisSectionsForOpportunities(50).catch(err =>
       logger.error('[Job] Scheduled analysis-sections backfill failed (non-fatal):', err)
     );
   });
 
-  logger.info('✅ Analysis-sections backfill job scheduled (batch of 30 on boot, then hourly)');
+  logger.info('✅ Analysis-sections backfill job scheduled (batch of 50 on boot, then every 5 min)');
 };
