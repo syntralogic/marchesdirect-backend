@@ -22,17 +22,21 @@ export const startAnalysisSectionsBackfillJob = () => {
   const cron = require('node-cron');
 
   setTimeout(() => {
-    generateAnalysisSectionsForOpportunities(10).catch(err =>
+    generateAnalysisSectionsForOpportunities(30).catch(err =>
       logger.error('[Job] Boot-time analysis-sections backfill failed (non-fatal):', err)
     );
   }, 45_000);
 
   // Every hour, small batch - same cadence/reasoning as the summary backfill.
+  // Bumped 10 -> 30 (10 Sep): with tens of thousands of pre-existing
+  // opportunities and only on-demand generation otherwise reaching a given
+  // fiche, 10/hour meant most of the backlog would still be showing the old
+  // single-paragraph ai_summary fallback for weeks.
   cron.schedule('15 * * * *', () => {
-    generateAnalysisSectionsForOpportunities(10).catch(err =>
+    generateAnalysisSectionsForOpportunities(30).catch(err =>
       logger.error('[Job] Scheduled analysis-sections backfill failed (non-fatal):', err)
     );
   });
 
-  logger.info('✅ Analysis-sections backfill job scheduled (batch of 10 on boot, then hourly)');
+  logger.info('✅ Analysis-sections backfill job scheduled (batch of 30 on boot, then hourly)');
 };

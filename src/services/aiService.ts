@@ -992,7 +992,7 @@ Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 6
     // row got stuck on ai_analysis_sections_status='failed' - retried (and
     // truncated the same way) on every subsequent visit, so the fiche never
     // stopped showing the old single-paragraph ai_summary fallback.
-    const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 2200);
+    const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 2800);
     const cleaned = cleanJsonResponse(response);
     let sections: { presentation: string; conditions: string; entreprises: string };
     try {
@@ -1033,8 +1033,23 @@ Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 6
 // sections) that can succeed/fail independently.
 export const generateAnalysisSectionsForOpportunities = async (limit: number = 50) => {
   const result = await db.query(
+    // Also re-picks rows stuck at status='generated' with an effectively
+    // empty sections object (all 3 keys blank) - same edge case
+    // ensureAnalysisSectionsGenerated's hasAnalysisContent() guards against
+    // on the on-demand path in routes/opportunities.ts; without this here
+    // too, a row that got saved empty once would never be retried by this
+    // batch job either.
     `SELECT id FROM opportunities
-     WHERE (ai_analysis_sections_status IS NULL OR ai_analysis_sections_status IN ('not_generated', 'failed'))
+     WHERE (
+       ai_analysis_sections_status IS NULL
+       OR ai_analysis_sections_status IN ('not_generated', 'failed')
+       OR (
+         ai_analysis_sections_status = 'generated'
+         AND coalesce(ai_analysis_sections->>'presentation', '') = ''
+         AND coalesce(ai_analysis_sections->>'conditions', '') = ''
+         AND coalesce(ai_analysis_sections->>'entreprises', '') = ''
+       )
+     )
        AND description IS NOT NULL AND description != ''
      ORDER BY created_at DESC
      LIMIT $1`,
