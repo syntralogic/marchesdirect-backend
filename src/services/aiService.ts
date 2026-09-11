@@ -47,6 +47,84 @@ const cleanJsonResponse = (raw: string): string => {
   return cleaned;
 };
 
+// Cost fix (11 Sep, client flagged AI spend): extractOpportunityFacts and
+// generateOpportunityAnalysisSections were each independently dumping
+// JSON.stringify(opp.raw_data).substring(0, 8000/6000) as input - full price
+// input tokens on every single call, for every opportunity, duplicated
+// across every AI feature that reads raw_data (facts, analysis-sections,
+// classification/summary elsewhere in this file all do their own separate
+// call+truncation of the same row's raw_data).
+//
+// Two problems, one fix:
+//  1. Cost: most of a BOAMP/TED record's raw_data is connector/EFORMS
+//     plumbing (party IDs, NUTS codes, UBL extension wrappers, repeated
+//     addresses for the platform operator/tribunal/buyer) that a summary
+//     never needs - paying to ship all of that as input on every call for
+//     every opportunity is the actual spend driver, not max_tokens (max_tokens
+//     only caps output; raising it earlier for the truncation bug did not
+//     raise cost).
+//  2. Quality: for EFORMS-shaped notices (TED/European, e.g. the CHU de la
+//     Réunion case) the real free-text description
+//     (ProcurementProject > cbc:Description) sits AFTER several KB of that
+//     boilerplate in the JSON, so a positional substring(0, N) cut it off
+//     entirely - the model was working from less real content than a
+//     smaller, targeted extract gives it.
+// Pull out the actual free-text description(s) wherever they live in the
+// object shape (works across BOAMP/PLACE/DECP/TED without per-source
+// schema-specific parsing) and put them first, then cap the rest of the
+// payload much smaller than before - the model gets the part that matters
+// even on a huge notice, while paying for far fewer boilerplate tokens on
+// every call.
+function extractRawDataContext(rawData: any, restCap: number = 2500): string {
+  if (!rawData) return '{}';
+  const descriptions: string[] = [];
+  const seen = new Set<string>();
+  const visit = (node: any) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    for (const [key, value] of Object.entries(node)) {
+      const bareKey = key.includes(':') ? key.split(':').pop()! : key;
+      if (
+        typeof value === 'string' &&
+        value.trim().length > 40 &&
+        /^(description|note|objet|resume_objet)$/i.test(bareKey)
+      ) {
+        if (!seen.has(value)) {
+          seen.add(value);
+          descriptions.push(value.trim());
+        }
+      } else if (value && typeof value === 'object') {
+        visit(value);
+      } else if (typeof value === 'string' && bareKey === '#text' && value.trim().length > 40) {
+        // EFORMS wraps text as {"#text": "..."} under the real key
+        // (handled above via the key check on the parent), but some
+        // connectors' Description-equivalent nodes are one level off -
+        // this catches those without a full schema map.
+      }
+    }
+  };
+  try {
+    visit(rawData);
+  } catch {
+    // Malformed/circular raw_data - fall back to the plain truncated dump below.
+  }
+  descriptions.sort((a, b) => b.length - a.length);
+  const topDescriptions = descriptions.slice(0, 2).join('\n---\n');
+  let full: string;
+  try {
+    full = JSON.stringify(rawData);
+  } catch {
+    full = String(rawData);
+  }
+  const rest = full.substring(0, restCap);
+  return topDescriptions
+    ? `Full description text found in source:\n${topDescriptions}\n\nRest of source payload (truncated):\n${rest}`
+    : rest;
+}
+
 const callClaudeAPI = async (
   messages: ClaudeMessage[],
   systemPrompt: string,
@@ -666,7 +744,7 @@ Description: ${opp.description || ''}
 Deadline field: ${deadlineText}
 Estimated value field: ${estimatedValueText}
 Location: ${opp.location_city || ''}, ${opp.location_region || ''}
-Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 8000) : '{}'}
+Raw source payload: ${opp.raw_data ? extractRawDataContext(opp.raw_data, 3000) : '{}'}
 ${parsedDocumentsText ? `\nREAL PARSED DCE DOCUMENTS (use these for requirements_detected):\n${parsedDocumentsText}` : ''}`;
 
   // 1800 -> 2200: five more fields added (attribution_*, buyer_phone/website)
@@ -1051,7 +1129,7 @@ Description: ${opp.description || ''}
 Deadline: ${deadlineText}
 Estimated Value: ${estimatedValueText}
 Location: ${opp.location_city || ''}, ${opp.location_region || ''}
-Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 6000) : '{}'}`;
+Raw source payload: ${opp.raw_data ? extractRawDataContext(opp.raw_data, 2000) : '{}'}`;
 
   try {
     // Switched from "ask for raw JSON in the system prompt" to a forced
