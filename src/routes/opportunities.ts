@@ -125,12 +125,33 @@ async function ensureFactsExtracted(opportunityId: string, currentFacts: Record<
 // request instead of an empty accordion until the next cron run.
 const inFlightAnalysisSections = new Map<string, Promise<any>>();
 
+// BUG (found 10 Sep, live-testing "Commune d'Anse" signalisation fiche vs.
+// the client's own Saint-Yrieix-sur-Charente sample): `if (currentSections
+// || ...)` treated ANY saved object as "already generated", including
+// `{presentation: '', conditions: '', entreprises: ''}` - which
+// generateOpportunityAnalysisSections's defensive coercion can produce for
+// a very thin/edge-case notice (safeSections falls back to '' per key
+// rather than throwing). Once that shape is saved once, this guard skipped
+// regeneration on every later visit forever, AND the frontend's own
+// `opportunity.ai_analysis_sections ? <Accordions/> : <ai_summary/>` check
+// treats that same non-null-but-empty object as truthy - so the fiche
+// never re-tried and never fell back to ai_summary either; a visitor
+// landing mid-way through a first, still-empty save saw nothing rendered
+// at all where a paragraph used to be. Checking for real content in at
+// least one field, on both ends, is what actually means "generated".
+function hasAnalysisContent(sections: Record<string, any> | null | undefined): boolean {
+  if (!sections) return false;
+  return ['presentation', 'conditions', 'entreprises'].some(
+    key => typeof sections[key] === 'string' && sections[key].trim().length > 0
+  );
+}
+
 async function ensureAnalysisSectionsGenerated(
   opportunityId: string,
   currentSections: Record<string, any> | null | undefined,
   status: string | null
 ) {
-  if (currentSections || status === 'processing') return currentSections;
+  if (hasAnalysisContent(currentSections) || status === 'processing') return currentSections;
   try {
     let pending = inFlightAnalysisSections.get(opportunityId);
     if (!pending) {
@@ -584,8 +605,20 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     // comes up in a future 15-minute run. Only fires when facts are
     // genuinely missing/malformed (see factsNeedExtraction) - already-good
     // records never re-call the LLM here.
-    opportunity.ai_extracted_facts = await ensureFactsExtracted(opportunity.id, opportunity.ai_extracted_facts);
-    opportunity.ai_analysis_sections = await ensureAnalysisSectionsGenerated(opportunity.id, opportunity.ai_analysis_sections, opportunity.ai_analysis_sections_status);
+    // Run these two on-demand LLM calls in parallel rather than back-to-back
+    // awaits - a fiche that needs BOTH facts and analysis-sections generated
+    // for the first time (2 sequential Claude calls, easily several seconds
+    // each) roughly doubled the response time this request had to sit
+    // through, and a slow/cold generation on either side risked tripping
+    // the platform's own gateway timeout before the response ever went out
+    // - which reads to the visitor as "the fiche just didn't update",
+    // indistinguishable from generation never having run at all.
+    const [extractedFacts, analysisSections] = await Promise.all([
+      ensureFactsExtracted(opportunity.id, opportunity.ai_extracted_facts),
+      ensureAnalysisSectionsGenerated(opportunity.id, opportunity.ai_analysis_sections, opportunity.ai_analysis_sections_status),
+    ]);
+    opportunity.ai_extracted_facts = extractedFacts;
+    opportunity.ai_analysis_sections = analysisSections;
     kickOffDocumentIngestionIfPending(opportunity.id, opportunity.dce_documents_status);
 
     const sessionId = (req.query.sessionId as string) || '';
