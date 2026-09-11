@@ -4,7 +4,7 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { AuthRequest, requireRole } from '../middleware/auth';
 import { verifyDeduplicationQuality, getDeduplicationReport, deduplicateOpportunities } from '../services/deduplicationService';
-import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities, generateOpportunitySummary, generateAnalysisSectionsForOpportunities } from '../services/aiService';
+import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities, generateOpportunitySummary, generateAnalysisSectionsForOpportunities, generateOpportunityAnalysisSections } from '../services/aiService';
 import { collectBoampData, collectPlaceData, collectTedData, collectDecpData, collectBatiwebData } from '../services/dataCollectionService';
 import { runBackup, testRestore } from '../jobs/backupManagement';
 import { regionForDepartmentCode, normalizeDepartmentCode, extractDepartmentCode } from '../utils/departmentRegion';
@@ -416,6 +416,36 @@ router.post('/ai/analysis-sections-batch', async (req: AuthRequest, res: Respons
   } catch (err: any) {
     logger.error('Admin analysis-sections batch error:', err);
     res.status(500).json({ error: 'Batch analysis-sections generation failed' });
+  }
+});
+
+// POST /api/admin/ai/analysis-sections-debug/:id - one-off diagnostic: runs
+// generateOpportunityAnalysisSections for a single opportunity and returns
+// the REAL error message in the JSON response instead of only logging it.
+// Added 10 Sep because every other diagnostic path for this feature
+// (on-demand via GET /:id, the cron backfill, the batch endpoint above)
+// only ever writes failures to server logs - useless without shell/log
+// access on Render's free tier (same reasoning as summarize-batch and
+// analysis-sections-batch already having manual-trigger endpoints above).
+// Lets whoever's debugging this hit one URL and see exactly why a specific
+// fiche's analysis-sections generation is failing, in the response body.
+router.post('/ai/analysis-sections-debug/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const sections = await generateOpportunityAnalysisSections(req.params.id);
+    res.json({ ok: true, sections });
+  } catch (err: any) {
+    // Surface the underlying Claude API response (status + body), not just
+    // err.message - message alone is a generic "Request failed with status
+    // code 400" for an axios error, same gap the 7 Sep callClaudeAPI logging
+    // fix addressed for server logs. This is the same detail, in the
+    // response body instead of a log line.
+    const isAxiosErr = err?.isAxiosError === true;
+    res.status(500).json({
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      apiStatus: isAxiosErr ? err.response?.status : undefined,
+      apiResponseBody: isAxiosErr ? err.response?.data : undefined,
+    });
   }
 });
 
