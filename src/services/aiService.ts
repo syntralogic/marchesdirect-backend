@@ -117,6 +117,79 @@ const callClaudeAPI = async (
   }
 };
 
+// Forces a schema-conformant JSON object back from Claude via tool use
+// (tool_choice: {type: 'tool', name: ...}) instead of asking for "raw JSON"
+// in prose and hoping the model doesn't wrap it in commentary, markdown
+// fences, or truncate it mid-string. generateOpportunityAnalysisSections
+// below was built the "ask for JSON in the system prompt" way and kept
+// failing in production in ways that were hard to pin down without shell/
+// log access (900 tokens too tight, then 2200, then 2800 - three rounds of
+// "give it more room" without solid proof any of them was the actual
+// cause). Tool-forced output isn't a length workaround, it's a different
+// mechanism: Anthropic validates the response against input_schema before
+// it comes back, so cleanJsonResponse's brace-matching regex and its
+// silent failure modes (stray prose before/after the JSON, a fenced code
+// block, truncation cutting off mid-object) stop being possible outcomes
+// for calls that go through this path.
+const callClaudeAPIWithTool = async (
+  messages: ClaudeMessage[],
+  systemPrompt: string,
+  toolName: string,
+  toolDescription: string,
+  inputSchema: Record<string, any>,
+  maxTokens: number = MAX_TOKENS
+): Promise<Record<string, any>> => {
+  try {
+    const payload: any = {
+      model: MODEL,
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      messages,
+      tools: [
+        {
+          name: toolName,
+          description: toolDescription,
+          input_schema: inputSchema,
+        },
+      ],
+      tool_choice: { type: 'tool', name: toolName },
+    };
+    if (TEMPERATURE !== undefined && !Number.isNaN(TEMPERATURE)) {
+      payload.temperature = TEMPERATURE;
+    }
+
+    const response = await axios.post(ANTHROPIC_API_URL, payload, {
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      timeout: 30000,
+    });
+
+    const toolBlock = response.data.content?.find(
+      (block: any) => block.type === 'tool_use' && block.name === toolName
+    );
+    if (toolBlock && toolBlock.input && typeof toolBlock.input === 'object') {
+      return toolBlock.input;
+    }
+
+    // If Claude stopped because it ran out of tokens mid-arguments, the
+    // tool_use block itself may be missing or have partial/absent input.
+    // Surface stop_reason so this is distinguishable in logs from an
+    // outright API error.
+    throw new Error(
+      `No valid tool_use block from Claude API (stop_reason: ${response.data.stop_reason ?? 'unknown'})`
+    );
+  } catch (err) {
+    const status = axios.isAxiosError(err) ? err.response?.status : undefined;
+    const detail = axios.isAxiosError(err) ? JSON.stringify(err.response?.data) : undefined;
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logger.error(`Claude API (tool) error${status ? ` (${status})` : ''}: ${errorMessage}${detail ? ` — ${detail}` : ''}`);
+    throw err;
+  }
+};
+
 // ============================================================================
 // DCE ANALYSIS - TENDER DOCUMENT EXTRACTION (MILESTONE 6.1 / 9.1)
 // ============================================================================
@@ -971,10 +1044,7 @@ export const generateOpportunityAnalysisSections = async (
 2. conditions ("Conditions et points à vérifier") : calendrier (dates clés), exigences, critères de sélection et contraintes à connaître avant de candidater.
 3. entreprises ("Entreprises concernées") : les métiers et profils d'entreprises concernés par ce marché. Décris uniquement le type d'entreprise auquel ce marché correspond a priori (taille, secteur, spécialité) - ne certifie jamais qu'une entreprise est éligible, puisque l'éligibilité réelle dépend de critères que tu ne peux pas vérifier.
 
-RÈGLE STRICTE : n'utilise que ce qui est réellement présent dans la source ci-dessous. Si une section manque d'information dans la source (ex : aucune exigence mentionnée, aucun montant), dis-le explicitement dans cette section plutôt que d'inventer un contenu plausible.
-
-Réponds UNIQUEMENT en JSON valide, exactement sous cette forme, sans markdown ni texte hors JSON :
-{"presentation": "...", "conditions": "...", "entreprises": "..."}`;
+RÈGLE STRICTE : n'utilise que ce qui est réellement présent dans la source ci-dessous. Si une section manque d'information dans la source (ex : aucune exigence mentionnée, aucun montant), dis-le explicitement dans cette section plutôt que d'inventer un contenu plausible.`;
 
   const userMessage = `Title: ${opp.title}
 Description: ${opp.description || ''}
@@ -984,23 +1054,34 @@ Location: ${opp.location_city || ''}, ${opp.location_region || ''}
 Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 6000) : '{}'}`;
 
   try {
-    // Was 900 - too tight for the JSON envelope (3 keys + escaping) plus 3
-    // French sections of up to 5 sentences each. Verbose fiches (long
-    // raw_data, technical contracts like assurance/BTP) routinely hit that
-    // ceiling mid-string, so the response had no closing brace,
-    // cleanJsonResponse's `{...}` match failed, JSON.parse threw, and the
-    // row got stuck on ai_analysis_sections_status='failed' - retried (and
-    // truncated the same way) on every subsequent visit, so the fiche never
-    // stopped showing the old single-paragraph ai_summary fallback.
-    const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 2800);
-    const cleaned = cleanJsonResponse(response);
-    let sections: { presentation: string; conditions: string; entreprises: string };
-    try {
-      sections = JSON.parse(cleaned);
-    } catch (err) {
-      logger.error(`Raw analysis-sections response for ${opportunityId}: ${response}`);
-      throw new Error(`Invalid analysis-sections response format: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    // Switched from "ask for raw JSON in the system prompt" to a forced
+    // tool call (see callClaudeAPIWithTool above) - three rounds of
+    // "maybe it's a token-limit truncation issue" (900 -> 2200 -> 2800)
+    // never conclusively fixed the client's "fails for every opportunity"
+    // report, which pointed at the JSON-in-prose approach itself (stray
+    // prose, code fences, or mid-string truncation defeating
+    // cleanJsonResponse's brace-matching) rather than at length alone.
+    // Anthropic validates tool_use input against input_schema before it
+    // comes back, so a malformed response is no longer a possible outcome
+    // of this call - only a genuine API-level failure (auth/quota/model)
+    // can fail it now, which the catch block below already logs with the
+    // real status + response body.
+    const sections = await callClaudeAPIWithTool(
+      [{ role: 'user', content: userMessage }],
+      systemPrompt,
+      'submit_analysis_sections',
+      'Submit the 3 analysis sections (presentation, conditions, entreprises) for this opportunity.',
+      {
+        type: 'object',
+        properties: {
+          presentation: { type: 'string', description: 'Présentation du marché : objet, prestations, périmètre (2-5 phrases, texte brut).' },
+          conditions: { type: 'string', description: 'Conditions et points à vérifier : calendrier, exigences, critères, contraintes (2-5 phrases, texte brut).' },
+          entreprises: { type: 'string', description: 'Entreprises concernées : métiers/profils concernés (2-5 phrases, texte brut).' },
+        },
+        required: ['presentation', 'conditions', 'entreprises'],
+      },
+      2800
+    );
     // Same defensive coercion as extractOpportunityFacts - never let a
     // malformed field (wrong type, missing key) crash the fiche page.
     const safeSections = {
