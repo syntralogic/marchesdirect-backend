@@ -885,6 +885,13 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // find rows that still need it.
   await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS ai_analysis_sections JSONB`);
   await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS ai_analysis_sections_status VARCHAR(50)`);
+  // Diagnostic-only: the real Claude API error (status + body) for the last
+  // failed attempt. Added 11 Sep because the only other way to see this
+  // (the admin analysis-sections-debug endpoint) needs an authenticated
+  // admin session, and every failure otherwise only reaches server logs -
+  // no shell/log access on Render's free tier. Read via the already-public
+  // GET /api/opportunities/:id response (opportunity.ai_analysis_sections_error).
+  await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS ai_analysis_sections_error TEXT`);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old
