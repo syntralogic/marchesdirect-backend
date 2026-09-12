@@ -1063,9 +1063,13 @@ Règles de formatage strictes :
 - Pas de titre du type "Résumé de l'opportunité" - va directement au contenu.
 - Un seul paragraphe court (2 à 4 phrases, 120 mots maximum) - jamais plusieurs paragraphes, jamais plusieurs sections.`;
 
+    // Same GMT/English-Date.toString() leak as generateOpportunityFacts
+    // above (opp.deadline is a raw JS Date from pg) - format before
+    // interpolating, not after the model has already echoed it.
+    const deadlineText = opp.deadline ? new Date(opp.deadline).toISOString().slice(0, 10) : 'non communiquée';
     const userMessage = `Title: ${opp.title}
 Description: ${opp.description}
-Deadline: ${opp.deadline}
+Deadline: ${deadlineText}
 Estimated Value: ${opp.estimated_value || 'Not specified'} EUR
 Location: ${opp.location_city}, ${opp.location_region}`;
 
@@ -1286,7 +1290,10 @@ export const chatbot = async (
       );
       if (oppResult.rows.length > 0) {
         const opp = oppResult.rows[0];
-        context = `\n\n<untrusted_reference_data source="opportunity:${opp.id}">\nTitle: ${opp.title}\nDescription: ${opp.description}\nDeadline: ${opp.deadline}\nType: ${opp.opportunity_type}\n</untrusted_reference_data>`;
+        // Same raw-Date-object-in-template-string leak as
+        // generateOpportunityFacts/generateOpportunitySummary above.
+        const deadlineText = opp.deadline ? new Date(opp.deadline).toISOString().slice(0, 10) : 'non communiquée';
+        context = `\n\n<untrusted_reference_data source="opportunity:${opp.id}">\nTitle: ${opp.title}\nDescription: ${opp.description}\nDeadline: ${deadlineText}\nType: ${opp.opportunity_type}\n</untrusted_reference_data>`;
       }
     }
 
