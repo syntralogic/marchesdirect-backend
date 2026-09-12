@@ -922,6 +922,76 @@ router.patch('/subscriptions/:id/cancel', async (req: AuthRequest, res: Response
 // GET /api/admin/opportunity-leads - leads tied to an opportunity (i.e. not
 // the generic contact/appointment/callback leads, which stay in the plain
 // /api/crm/leads list), newest first.
+// GET /api/admin/dossier-requests - "Chargé d'affaires" review queue.
+// Client's dossier-demo spec: reuse the existing admin space rather than
+// build a new "espace interne" - this slots in next to the opportunity-leads
+// list below using the same shape (status filter, pagination).
+router.get('/dossier-requests', async (req: AuthRequest, res: Response) => {
+  try {
+    const { status, page = '1', limit = '50' } = req.query as Record<string, string>;
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let idx = 1;
+    if (status) {
+      conditions.push(`d.status = $${idx++}`);
+      params.push(status);
+    }
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const pageNum = Math.max(parseInt(page) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit) || 50, 1), 200);
+    const offset = (pageNum - 1) * limitNum;
+
+    const result = await db.query(
+      `SELECT d.*, c.name as company_name, c.email as company_email, o.title as opportunity_title
+       FROM dossier_requests d
+       LEFT JOIN companies c ON c.id = d.company_id
+       LEFT JOIN opportunities o ON o.id = d.opportunity_id
+       ${whereClause}
+       ORDER BY d.requested_at DESC LIMIT $${idx++} OFFSET $${idx++}`,
+      [...params, limitNum, offset]
+    );
+    res.json({ results: result.rows });
+  } catch (err: any) {
+    logger.error('Admin dossier-requests list error:', err);
+    res.status(500).json({ error: 'Failed to fetch dossier requests' });
+  }
+});
+
+// PUT /api/admin/dossier-requests/:id - chargé d'affaires moves the request
+// through in_review -> ready -> submitted, optionally leaving admin_notes.
+router.put('/dossier-requests/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const { status, admin_notes } = req.body;
+    const allowed = ['in_review', 'ready', 'submitted'];
+    if (status && !allowed.includes(status)) {
+      return res.status(400).json({ error: `status must be one of ${allowed.join(', ')}` });
+    }
+    const result = await db.query(
+      `UPDATE dossier_requests SET
+         status = COALESCE($1, status),
+         admin_notes = COALESCE($2, admin_notes),
+         ready_at = CASE WHEN $1 = 'ready' THEN NOW() ELSE ready_at END,
+         submitted_at = CASE WHEN $1 = 'submitted' THEN NOW() ELSE submitted_at END,
+         updated_at = NOW()
+       WHERE id = $3
+       RETURNING *`,
+      [status ?? null, admin_notes ?? null, req.params.id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Dossier request not found' });
+    }
+    await db.query(
+      `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_values)
+       VALUES ($1, 'update', 'dossier_request', $2, $3)`,
+      [req.user!.id, req.params.id, JSON.stringify({ status, admin_notes })]
+    );
+    res.json(result.rows[0]);
+  } catch (err: any) {
+    logger.error('Admin dossier-request update error:', err);
+    res.status(500).json({ error: 'Failed to update dossier request' });
+  }
+});
+
 router.get('/opportunity-leads', async (req: AuthRequest, res: Response) => {
   try {
     const { status, page = '1', limit = '50' } = req.query as Record<string, string>;

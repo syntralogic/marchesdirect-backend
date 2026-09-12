@@ -109,6 +109,7 @@ app.use('/api/siret', optionalAuth, require('./routes/siret').default);
 
 // Protected routes (require authentication)
 app.use('/api/companies', authenticate, require('./routes/companies').default);
+app.use('/api/dossiers', authenticate, require('./routes/dossiers').default);
 app.use('/api/uploads', authenticate, require('./routes/uploads').default);
 // Serves files saved by the local-disk storage fallback (storageService.ts).
 // No-op / unused when AWS_S3_BUCKET is configured, since files then live in S3.

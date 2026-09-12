@@ -893,6 +893,41 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // GET /api/opportunities/:id response (opportunity.ai_analysis_sections_error).
   await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS ai_analysis_sections_error TEXT`);
 
+  // "Votre dossier" feature (12 Sep, client's dossier-demo reference,
+  // "01. Identification"/"02. Présentation" cards): companies had no free-text
+  // bio field - structured fields only (industry_sector, employee_count etc).
+  await step(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS description TEXT`);
+
+  // dossier_requests: backs the "3. Dossier" reference screen's "Générer mon
+  // dossier" button. Client's spec (11 Sep, dossier-demo message, step 3-4):
+  // clicking it "ne génère pas instantanément une candidature et ne réalise
+  // aucun dépôt" - it raises a request a chargé d'affaires later reviews and
+  // actions from the existing admin space (client: "tu n'as pas besoin de
+  // créer un nouvel espace"). Modeled after crm_leads' shape (status
+  // progression + timestamps) rather than a new bespoke pattern, since that's
+  // the admin list/detail UI already built and the client explicitly asked to
+  // reuse existing admin functionality rather than add a new one.
+  await step(`
+    CREATE TABLE IF NOT EXISTS dossier_requests (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      company_id UUID NOT NULL REFERENCES companies(id),
+      opportunity_id UUID NOT NULL REFERENCES opportunities(id),
+      status VARCHAR(50) NOT NULL DEFAULT 'requested', -- requested, in_review, ready, submitted
+      response_text TEXT,          -- "Votre réponse au marché" draft, company-authored
+      partners JSONB DEFAULT '[]', -- "Vos partenaires" co-traitance entries: [{name, role}]
+      checklist JSONB DEFAULT '[]',-- "Pièces à assembler": [{label, done}]
+      admin_notes TEXT,            -- chargé d'affaires internal notes
+      requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      ready_at TIMESTAMP,
+      submitted_at TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(company_id, opportunity_id)
+    )
+  `);
+  await step(`CREATE INDEX IF NOT EXISTS dossier_requests_company ON dossier_requests(company_id)`);
+  await step(`CREATE INDEX IF NOT EXISTS dossier_requests_opportunity ON dossier_requests(opportunity_id)`);
+  await step(`CREATE INDEX IF NOT EXISTS dossier_requests_status ON dossier_requests(status)`);
+
   // Dossier hub progress bar (client's 10 Sep card spec): "DCE consulté" /
   // "Analyse du DCE consultée" steps were tracked in plain React state only
   // (OpportunityDetailPage.tsx) - reset on every refresh/re-login, so the
