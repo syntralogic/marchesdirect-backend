@@ -99,7 +99,17 @@ export const deduplicateOpportunities = async (): Promise<number> => {
         similarity(o1.title, o2.title) > 0.5 AND  -- wide candidate net - final decision is the composite score below
         (o1.deadline IS NULL OR o2.deadline IS NULL OR ABS(EXTRACT(EPOCH FROM (o1.deadline - o2.deadline))) < 172800) AND  -- within 48h, or either side has no deadline (DECP has none - see collectDecpData)
         o1.deleted_at IS NULL AND o2.deleted_at IS NULL AND
-        o1.status NOT IN ('cancelled', 'expired') AND o2.status NOT IN ('cancelled', 'expired')
+        -- BUG (found from repeating "duplicate key" errors in prod logs,
+        -- 12 Sep): was NOT IN ('cancelled', 'expired') only, unlike
+        -- mergeExactDuplicates' grouping query above which already excludes
+        -- 'merged' too. A row just merged (by either pass, in this run or
+        -- a previous one) kept qualifying as a fresh candidate here, so the
+        -- same already-recorded (primary, duplicate) pair got re-attempted
+        -- forever - the resulting unique-constraint violation rolled back
+        -- the whole mergeDuplicates transaction, including the
+        -- status='merged' update, so the row never stopped being a
+        -- candidate. Excluding 'merged' here too breaks that loop.
+        o1.status NOT IN ('cancelled', 'expired', 'merged') AND o2.status NOT IN ('cancelled', 'expired', 'merged')
       WHERE NOT EXISTS (
         SELECT 1 FROM opportunity_duplicates 
         WHERE (primary_opportunity_id = o1.id AND duplicate_opportunity_id = o2.id)
@@ -196,10 +206,17 @@ const mergeDuplicates = async (
   try {
     await db.transaction(async (client) => {
       // Record the duplicate relationship
+      // ON CONFLICT DO NOTHING as a second line of defense on top of the
+      // 'merged' exclusion above: if some other edge case still produces an
+      // already-recorded pair, this makes it a no-op instead of throwing
+      // and rolling back the status='merged' update below - the exact
+      // failure mode that caused the pair to keep coming back in the first
+      // place.
       await client.query(
         `INSERT INTO opportunity_duplicates 
           (primary_opportunity_id, duplicate_opportunity_id, similarity_score, matching_fields)
-         VALUES ($1, $2, $3, $4)`,
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (primary_opportunity_id, duplicate_opportunity_id) DO NOTHING`,
         [
           primaryId,
           secondaryId,
