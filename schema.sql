@@ -282,6 +282,11 @@ CREATE INDEX companies_email ON companies(email);
 CREATE INDEX companies_siret ON companies(siret);
 CREATE INDEX companies_status ON companies(status);
 
+-- Client's 12 Sep "Mon entreprise" card spec: an "Interlocuteur" field
+-- (contact person name, shown editable alongside the company name) - no
+-- column existed for this at all.
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS contact_name VARCHAR(255);
+
 -- ============================================================================
 -- 6. USER ACCOUNTS & AUTHENTICATION (Milestone 8)
 -- ============================================================================
