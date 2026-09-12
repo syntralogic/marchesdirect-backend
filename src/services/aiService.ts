@@ -329,11 +329,15 @@ Return ONLY valid JSON in this exact shape, no markdown, no extra text:
           .join('\n\n')
       : 'None downloaded yet - analysis below is based on notice metadata only.';
 
+    // Same raw-Date-object-in-template-string pattern already fixed
+    // elsewhere in this file (generateOpportunityFacts/Summary, chatbot) -
+    // tender.deadline is a raw pg Date here too.
+    const deadlineText = tender.deadline ? new Date(tender.deadline).toISOString().slice(0, 10) : 'Not specified';
     const userMessage = `Title: ${tender.title}
 Description: ${tender.description || 'Not provided by source'}
 Contract type: ${tender.contract_type || 'Not specified'}
 Estimated value: ${tender.estimated_value ? `${tender.estimated_value} ${tender.currency || 'EUR'}` : 'Not specified'}
-Deadline: ${tender.deadline || 'Not specified'}
+Deadline: ${deadlineText}
 Additional source data: ${tender.raw_data ? JSON.stringify(tender.raw_data).substring(0, 1500) : 'None'}
 
 Consultation file (DCE) documents actually downloaded and text-extracted for this tender:
