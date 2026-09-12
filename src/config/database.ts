@@ -892,6 +892,16 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // no shell/log access on Render's free tier. Read via the already-public
   // GET /api/opportunities/:id response (opportunity.ai_analysis_sections_error).
   await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS ai_analysis_sections_error TEXT`);
+
+  // Dossier hub progress bar (client's 10 Sep card spec): "DCE consulté" /
+  // "Analyse du DCE consultée" steps were tracked in plain React state only
+  // (OpportunityDetailPage.tsx) - reset on every refresh/re-login, so the
+  // progress bar could regress even though the company genuinely had
+  // already viewed those. Persisting per-bid so it survives across
+  // sessions, same as the other 3 steps which already read real DB fields
+  // (technical_memo_text, status/submitted_at).
+  await step(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS dce_viewed_at TIMESTAMP`);
+  await step(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS dce_analysis_viewed_at TIMESTAMP`);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old

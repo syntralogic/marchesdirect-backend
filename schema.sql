@@ -623,6 +623,12 @@ CREATE TABLE bid_responses (
   
   submission_deadline TIMESTAMP,
   submitted_at TIMESTAMP,
+
+  -- Dossier hub progress bar (client's 10 Sep card spec): persisted so
+  -- "DCE consulté" / "Analyse du DCE consultée" survive a refresh/re-login,
+  -- same as the other 3 steps which already read real fields above.
+  dce_viewed_at TIMESTAMP,
+  dce_analysis_viewed_at TIMESTAMP,
   
   -- Audit
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

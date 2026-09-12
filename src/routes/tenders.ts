@@ -145,6 +145,48 @@ router.get('/:tenderId/bid', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// POST /api/tenders/:tenderId/dce-viewed - persist "DCE consulté" /
+// "Analyse du DCE consultée" dossier-progress steps (client's 10 Sep card
+// spec). Was plain React state on the frontend only, resetting on every
+// refresh/re-login. body: { step: 'dce' | 'analysis' }.
+router.post('/:tenderId/dce-viewed', async (req: AuthRequest, res: Response) => {
+  try {
+    const { step } = req.body as { step?: string };
+    if (step !== 'dce' && step !== 'analysis') {
+      return res.status(400).json({ error: "step must be 'dce' or 'analysis'" });
+    }
+    const column = step === 'dce' ? 'dce_viewed_at' : 'dce_analysis_viewed_at';
+
+    let result = await db.query(
+      'SELECT * FROM bid_responses WHERE tender_id = $1 AND company_id = $2',
+      [req.params.tenderId, req.user!.companyId]
+    );
+
+    if (result.rows.length === 0) {
+      // Same get-or-create shape as GET /:tenderId/bid above - a company
+      // can view the DCE before ever opening the full bid workspace.
+      result = await db.query(
+        `INSERT INTO bid_responses (tender_id, company_id, status, submission_deadline, ${column})
+         SELECT $1, $2, 'draft', o.deadline, NOW()
+         FROM tenders t JOIN opportunities o ON t.opportunity_id = o.id
+         WHERE t.id = $1
+         RETURNING *`,
+        [req.params.tenderId, req.user!.companyId]
+      );
+    } else if (!result.rows[0][column]) {
+      result = await db.query(
+        `UPDATE bid_responses SET ${column} = NOW() WHERE id = $1 RETURNING *`,
+        [result.rows[0].id]
+      );
+    }
+
+    res.json(result.rows[0]);
+  } catch (err: any) {
+    logger.error('DCE-viewed tracking error:', err);
+    res.status(500).json({ error: 'Failed to record dossier step' });
+  }
+});
+
 // PUT /api/tenders/bid/:bidId - update bid response (pricing, engagement act, memo edits)
 // PUT /api/tenders/bid/:bidId - save/validate the candidature workspace
 // (mémoire technique, pricing schedule, engagement act, submission status).
