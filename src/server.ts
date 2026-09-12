@@ -202,6 +202,28 @@ const startServer = async () => {
       });
     }
 
+    // Client's 12 Sep report: fiche text showed a raw English/GMT date
+    // ("Wed Sep 23 2026 08:27:02 GMT+0000") instead of a plain French one -
+    // fixed at the prompt source (deadline is formatted before reaching any
+    // prompt now), but rows that already generated content with the bug
+    // baked in are status='generated', not 'failed', so the normal
+    // on-demand-regenerate-on-failure path never revisits them. Same
+    // "no shell on Render free tier" boot-time pattern as the region
+    // backfill above - finds and clears any row whose stored content still
+    // contains "GMT", which then regenerates cleanly next time it's
+    // opened. Naturally a no-op after the first successful run (nothing
+    // left to find), so no separate skip flag needed.
+    if (process.env.SKIP_GMT_CONTENT_RESET !== 'true') {
+      const { execFile } = require('child_process');
+      const gmtResetScriptPath = require('path').resolve(process.cwd(), 'scripts', 'resetGmtDateContent.js');
+      execFile('node', [gmtResetScriptPath], (err: any, stdout: string, stderr: string) => {
+        if (stdout) logger.info(`[gmt content reset] ${stdout.trim()}`);
+        if (err) {
+          logger.error('[gmt content reset] failed (non-fatal):', stderr || err.message);
+        }
+      });
+    }
+
     // Start background jobs
     require('./jobs/dataCollection').startScheduledJobs();
     require('./jobs/documentIngestion').startDocumentIngestion();
