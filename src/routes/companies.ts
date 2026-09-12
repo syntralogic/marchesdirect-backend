@@ -30,7 +30,7 @@ router.put('/me', async (req: AuthRequest, res: Response) => {
       'name', 'contact_name', 'kbis_number', 'legal_form', 'siret', 'phone', 'website_url',
       'address_street', 'address_city', 'address_postal_code',
       'industry_sector', 'employee_count', 'annual_revenue', 'founding_year',
-      'working_radius_km', 'location_latitude', 'location_longitude',
+      'working_radius_km', 'location_latitude', 'location_longitude', 'description',
     ];
 
     const updates: string[] = [];

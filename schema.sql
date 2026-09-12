@@ -152,6 +152,7 @@ CREATE TABLE opportunities (
   ai_summary_status VARCHAR(50),            -- 'not_generated', 'processing', 'generated', 'failed'
   ai_summary TEXT,                          -- Auto-generated summary
   ai_analysis_sections_status VARCHAR(50),  -- 'not_generated', 'processing', 'generated', 'failed'
+  ai_analysis_sections_error TEXT,          -- real Claude API error for the last failed attempt
   ai_analysis_sections JSONB,               -- {presentation, conditions, entreprises} - the 3 fixed
                                              -- accordions on the opportunity page (client's 10 Sep
                                              -- spec). Separate from ai_summary above, which stays a
@@ -249,6 +250,7 @@ CREATE TABLE companies (
   employee_count INTEGER,
   annual_revenue DECIMAL(15, 2),
   founding_year INTEGER,
+  description TEXT,                         -- free-text bio, "Présentation de l'Entreprise" (dossier feature)
   
   -- Subscriptions (Milestone 8)
   subscription_status VARCHAR(50),          -- 'active', 'trial', 'expired', 'cancelled'
@@ -848,6 +850,27 @@ CREATE INDEX crm_leads_email ON crm_leads(email);
 CREATE INDEX crm_leads_status ON crm_leads(status);
 CREATE INDEX crm_leads_crm ON crm_leads(crm_sync_status);
 CREATE INDEX crm_leads_session ON crm_leads(session_id);
+
+-- "Votre dossier" feature (12 Sep, client's dossier-demo reference) - see
+-- applyIncrementalMigrations() for the full rationale, kept in sync here.
+CREATE TABLE dossier_requests (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  company_id UUID NOT NULL REFERENCES companies(id),
+  opportunity_id UUID NOT NULL REFERENCES opportunities(id),
+  status VARCHAR(50) NOT NULL DEFAULT 'requested',
+  response_text TEXT,
+  partners JSONB DEFAULT '[]',
+  checklist JSONB DEFAULT '[]',
+  admin_notes TEXT,
+  requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  ready_at TIMESTAMP,
+  submitted_at TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(company_id, opportunity_id)
+);
+CREATE INDEX dossier_requests_company ON dossier_requests(company_id);
+CREATE INDEX dossier_requests_opportunity ON dossier_requests(opportunity_id);
+CREATE INDEX dossier_requests_status ON dossier_requests(status);
 
 -- Anonymous visitor journey tracking (searches, fiches viewed, SEO landing
 -- pages) - see applyIncrementalMigrations() in config/database.ts for the
