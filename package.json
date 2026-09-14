@@ -15,6 +15,7 @@
     "db:migrate": "node scripts/migrate.js",
     "db:seed": "node scripts/seed.js",
     "backfill:opportunity-facts": "ts-node --files scripts/backfillOpportunityFacts.ts",
+    "backfill:exact-duplicates": "ts-node --files scripts/backfillExactDuplicates.ts",
     "loadtest:generate": "node scripts/generateSyntheticListings.js",
     "loadtest:run": "node scripts/loadTest.js"
   },
