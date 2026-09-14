@@ -203,6 +203,9 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       min_value,
       max_value,
       status,        // 'active' | 'expired' | 'awarded' | 'cancelled' (comma-separated for multiple)
+      recent_days,   // client's filter list ("marchés nouveaux") - publication_date within N days,
+                      // independent of status: a just-published notice can still be 'active' whether
+                      // or not it's "new", so this has to be its own filter, not folded into status.
       page = '1',
       limit = '20',
     } = req.query as Record<string, string>;
@@ -356,6 +359,17 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       if (statuses.length > 0) {
         conditions.push(`o.status = ANY($${idx++}::text[])`);
         params.push(statuses);
+      }
+    }
+    if (recent_days) {
+      // "Nouveau" is a temporary badge on recently-published notices, not a
+      // real status (client's 8 Sep audit) - so it has to be filterable on
+      // its own, on top of whatever status filter (if any) is also applied,
+      // rather than being one of the status values above.
+      const days = Math.max(parseInt(recent_days, 10) || 0, 0);
+      if (days > 0) {
+        conditions.push(`o.publication_date >= NOW() - ($${idx++}::text || ' days')::interval`);
+        params.push(String(days));
       }
     }
 
