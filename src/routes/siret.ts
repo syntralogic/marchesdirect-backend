@@ -433,7 +433,10 @@ router.post(
   '/lead',
   [
     body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
-    body('phone').matches(/^\d{10}$/).withMessage('Le téléphone doit contenir 10 chiffres.'),
+    // Was matching any 10 digits, so "0000000000" passed straight through
+    // (client's 15 Sep audit) - require a real French line: leading 0
+    // then 1-9, never a second 0.
+    body('phone').matches(/^0[1-9]\d{8}$/).withMessage('Le téléphone doit contenir 10 chiffres.'),
     body('email').isEmail().withMessage("L'e-mail n'est pas valide.").normalizeEmail(),
     body('opportunityId').optional({ checkFalsy: true }).isUUID(),
   ],
