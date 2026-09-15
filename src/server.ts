@@ -37,8 +37,57 @@ app.set('trust proxy', 1);
 
 // Security
 app.use(helmet());
+
+// CORS - was a single hardcoded origin (FRONTEND_URL), which only ever
+// allowed one domain. That was already wrong the moment the second brand
+// (Milestone 10 - multi-brand duplication, see brandResolution.ts) went
+// live on its own domain: any browser request from that second domain
+// would fail CORS before ever reaching the app, breaking the whole site
+// for that brand while the primary brand's domain kept working fine (so
+// this would not have shown up testing against the main domain alone).
+// Now allowed origins are FRONTEND_URL + every domain configured in the
+// brands table (same table brandResolution.ts already treats as the
+// single source of truth for "which domains this backend serves"), so a
+// new brand's domain, once added via the admin CRUD, is automatically
+// allowed here too - no separate env var to remember to update.
+// Cached for 5 minutes rather than querying brands on every single
+// request/preflight; a newly-added domain becomes valid within that window.
+let cachedBrandDomains: string[] = [];
+let brandDomainsCacheExpiresAt = 0;
+const BRAND_DOMAINS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+const getAllowedBrandDomains = async (): Promise<string[]> => {
+  if (Date.now() < brandDomainsCacheExpiresAt) return cachedBrandDomains;
+  try {
+    const result = await db.query('SELECT domain FROM brands WHERE domain IS NOT NULL');
+    cachedBrandDomains = result.rows.map((r: { domain: string }) => r.domain).filter(Boolean);
+  } catch (err) {
+    // DB hiccup: keep serving the last known-good list rather than an
+    // empty one, which would lock every brand out of CORS at once.
+    logger.error('Failed to refresh CORS-allowed brand domains, keeping previous list:', err);
+  }
+  brandDomainsCacheExpiresAt = Date.now() + BRAND_DOMAINS_CACHE_TTL_MS;
+  return cachedBrandDomains;
+};
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin: async (origin, callback) => {
+    // No Origin header at all = same-origin navigation, curl, server-to-
+    // server calls, or the mobile app - never a cross-origin browser
+    // request, so there's nothing to check against.
+    if (!origin) return callback(null, true);
+
+    const brandDomains = await getAllowedBrandDomains();
+    const allowed = new Set<string>([process.env.FRONTEND_URL || 'http://localhost:3000']);
+    for (const domain of brandDomains) {
+      allowed.add(`https://${domain}`);
+      allowed.add(`https://www.${domain}`);
+    }
+
+    if (allowed.has(origin)) return callback(null, true);
+    logger.warn(`CORS rejected origin: ${origin}`);
+    callback(null, false);
+  },
   credentials: true,
   optionsSuccessStatus: 200,
 }));
