@@ -165,7 +165,13 @@ export const computeMatchScore = async (
     // through to the flat isPublic ? 60 : 40 default below on most listings.
     if (opp.deadline) positiveFactors.push({ label: 'Calendrier de réponse identifié', points: 15 });
     if (opp.trade_name) positiveFactors.push({ label: 'Lot / métier identifié', points: 10 });
-    score = positiveFactors.reduce((sum, f) => sum + f.points, 0);
+    // These factors can total up to 110 when every condition is true (a
+    // complete listing with both budget and deadline set) - was never
+    // capped here (only the personalized branch below was), so the score
+    // could actually show over 100%, or land at a misleading 100% off
+    // partial data if points changed later. Cap it like the personalized
+    // branch does.
+    score = Math.min(100, positiveFactors.reduce((sum, f) => sum + f.points, 0));
   } else {
     scoreTitle = 'Indice de correspondance';
     scoreNote = 'Calculée à partir de votre profil et de cette opportunité.'; // overwritten below with the real tiered note once `score` is final
