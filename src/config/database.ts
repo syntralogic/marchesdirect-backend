@@ -945,6 +945,22 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // (technical_memo_text, status/submitted_at).
   await step(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS dce_viewed_at TIMESTAMP`);
   await step(`ALTER TABLE bid_responses ADD COLUMN IF NOT EXISTS dce_analysis_viewed_at TIMESTAMP`);
+
+  // Contre-audit 15 Sep 2026, ticket N06: chatbot widget threw "Failed to
+  // fetch conversations" and stayed disabled for every visitor. Root cause:
+  // routes/chatbot.ts was rewritten to support anonymous sessionId-based
+  // conversations (company_id nullable + a session_id column), and that
+  // ALTER already exists near the bottom of schema.sql - but schema.sql
+  // only runs in full on a brand-new database (see ensureSchema() above);
+  // on an already-provisioned one like production, only the statements
+  // mirrored here as step() calls ever get applied. This one was never
+  // mirrored, so company_id stayed NOT NULL and session_id never existed on
+  // the live DB - every anonymous SELECT/INSERT against
+  // chatbot_conversations threw, caught by the route's generic 500 handler.
+  await step(`ALTER TABLE chatbot_conversations ALTER COLUMN company_id DROP NOT NULL`);
+  await step(`ALTER TABLE chatbot_conversations ADD COLUMN IF NOT EXISTS session_id VARCHAR(100)`);
+  await step(`ALTER TABLE chatbot_conversations ADD COLUMN IF NOT EXISTS lead_captured_at TIMESTAMP`);
+  await step(`CREATE INDEX IF NOT EXISTS chatbot_conversations_session ON chatbot_conversations(session_id) WHERE session_id IS NOT NULL`);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old
