@@ -242,6 +242,24 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     // so sort=match can rank by the same relevance expression instead of
     // rebuilding (and re-binding) it a second time.
     let tsRankParamIdx: number | null = null;
+    // R03/R04 (client audit): homonyms and cross-category mixing ("fenêtre"
+    // matching prestressing-cable "fenêtres", "couverture" matching fleece
+    // blankets; travaux mixed with fournitures/études across several
+    // métiers) - "classer selon le métier et le lot, pas seulement selon le
+    // mot". A keyword blacklist for the couple of documented examples would
+    // be exactly "selon le mot" again and wouldn't generalize to the other
+    // reported métiers. classifyOpportunity (aiService.ts) already tags
+    // each opportunity with an AI-reviewed trade_id/ai_matched_trades - the
+    // gap is that this search never used it as a signal, so an
+    // AI-classified match and an incidental text-only match (wrong métier,
+    // wrong nature of prestation) ranked identically. Reuses the same
+    // trade-name/ai_matched_trades condition already built for the q filter
+    // below (same params, no extra binding) as a ranking boost applied
+    // ahead of whichever sort the visitor picked, in every branch - not a
+    // full fix for every case in the audit's 15-search annex (that needs
+    // reviewing against live data this environment can't query), but a
+    // real, general lever rather than a per-word patch.
+    let tradeMatchExpr: string | null = null;
 
     if (journey) {
       // Client's journey step lets several opportunity types be selected
@@ -328,6 +346,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
           `(to_tsvector('french', unaccent(COALESCE(o.title, '') || ' ' || COALESCE(o.description, ''))) @@ to_tsquery('french', unaccent($${tsIdx}))
             OR (${tradeConds.join(' AND ')}))`
         );
+        tradeMatchExpr = tradeConds.join(' AND ');
         params.push(qWords.map(w => `${w}:*`).join(' & '));
         for (const w of qWords) {
           params.push(`%${w}%`);
@@ -433,6 +452,11 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       orderClause = tsRankParamIdx !== null
         ? `ts_rank(to_tsvector('french', unaccent(COALESCE(o.title, '') || ' ' || COALESCE(o.description, ''))), to_tsquery('french', unaccent($${tsRankParamIdx}))) DESC, ${DEFAULT_ORDER}`
         : DEFAULT_ORDER;
+    }
+    // R03/R04 boost: an AI-classified trade match outranks a same-word,
+    // wrong-métier text match, regardless of which sort the visitor chose.
+    if (tradeMatchExpr) {
+      orderClause = `(CASE WHEN (${tradeMatchExpr}) THEN 0 ELSE 1 END) ASC, ${orderClause}`;
     }
 
     const listResult = await db.query(
