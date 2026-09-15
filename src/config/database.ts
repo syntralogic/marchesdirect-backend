@@ -168,6 +168,14 @@ const step = async (sql: string): Promise<void> => {
 };
 
 const applyIncrementalMigrations = async (): Promise<void> => {
+  // Client audit (15 Sep counter-audit, R11): "renovation" (unaccented) found
+  // the private listing "Renovation complete de 18 logements", but
+  // "rénovation" (accented) returned zero on the exact same filters. Postgres's
+  // built-in 'french' text search config does not fold accents on its own -
+  // needs the unaccent extension chained in. Created here (not just
+  // schema.sql) so it's picked up on already-provisioned databases too.
+  await step(`CREATE EXTENSION IF NOT EXISTS unaccent`);
+
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
 
   // BUG (found live on Render, 2026-09-03): documentExpiry.ts's daily sweep
