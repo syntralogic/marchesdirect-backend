@@ -527,7 +527,13 @@ router.get('/bid/:bidId/package', async (req: AuthRequest, res: Response) => {
 
     if (!bid.technical_memo_text || !bid.engagement_act_text) {
       return res.status(400).json({
-        error: 'Documents not generated yet - call POST /bid/:bidId/generate first',
+        error: 'documents_not_generated',
+        // Contre-audit 15 Sep 2026, D03: this was a raw dev-facing string
+        // ("call POST /bid/:bidId/generate first") shown verbatim to
+        // visitors via toast on the frontend - added a human `message`
+        // alongside the machine `error` code, same pattern as
+        // requireActiveSubscription's 403 below it in this file.
+        message: 'Ce dossier n\'est pas encore prêt au téléchargement.',
       });
     }
 
