@@ -280,20 +280,49 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       // ai_matched_trades::text ILIKE pattern already used by
       // matchOpportunitiesToCompany in aiService.ts), so a profession typed
       // as free text finds the same results a trade-chip search would.
-      const qWords = q
+      // Client audit (15 Sep): "Clim" correctly suggests "Climatisation"
+      // (one word - matches fine) but also "Installation et maintenance de
+      // climatisation" (multi-word), and picking that second one returned
+      // thousands of unrelated results - fire-extinguisher servicing,
+      // security-gate installs, photovoltaic installs. Cause: this OR'd
+      // every word together, so a listing matching only "installation" OR
+      // only "maintenance" (both extremely common generic words across
+      // totally unrelated trades) counted as a match, even with zero
+      // mention of climatisation. Filler words ("de", "et", "du"...) carry
+      // no discriminating value and are dropped before matching; the
+      // remaining meaningful words are now AND'd - a multi-word "métier"
+      // phrase or lot has to be recognized as a whole, not as a bag of
+      // independently-broadening words. Single-word queries (still the
+      // common case for direct typing, e.g. "peintre") are completely
+      // unaffected: AND of one term is identical to OR of one term, so the
+      // earlier fix for under-matching short/typed-while-typing queries is
+      // unchanged. Same AND logic applied to the trade-name / AI
+      // matched-trades fallback so it can't reintroduce the same
+      // broadening through that path instead.
+      const FR_STOPWORDS = new Set(['de', 'du', 'des', 'la', 'le', 'les', 'et', 'en', 'au', 'aux', 'pour', 'avec', 'un', 'une', 'sur', 'dans', 'd', 'l']);
+      const qWordsRaw = q
         .split(/\s+/)
         .map(w => w.replace(/[^\p{L}\p{N}-]/gu, '').trim())
         .filter(Boolean);
+      const qWordsMeaningful = qWordsRaw.filter(w => !FR_STOPWORDS.has(w.toLowerCase()));
+      const qWords = qWordsMeaningful.length > 0 ? qWordsMeaningful : qWordsRaw;
       if (qWords.length > 0) {
         const tsIdx = idx++;
-        const tradeIdx = idx++;
+        const tradeConds: string[] = [];
+        for (const _w of qWords) {
+          const nameIdx = idx++;
+          const matchedIdx = idx++;
+          tradeConds.push(`(t.name ILIKE $${nameIdx} OR o.ai_matched_trades::text ILIKE $${matchedIdx})`);
+        }
         conditions.push(
           `(to_tsvector('french', COALESCE(o.title, '') || ' ' || COALESCE(o.description, '')) @@ to_tsquery('french', $${tsIdx})
-            OR t.name ILIKE ANY($${tradeIdx}::text[])
-            OR o.ai_matched_trades::text ILIKE ANY($${tradeIdx}::text[]))`
+            OR (${tradeConds.join(' AND ')}))`
         );
-        params.push(qWords.map(w => `${w}:*`).join(' | '));
-        params.push(qWords.map(w => `%${w}%`));
+        params.push(qWords.map(w => `${w}:*`).join(' & '));
+        for (const w of qWords) {
+          params.push(`%${w}%`);
+          params.push(`%${w}%`);
+        }
       }
     }
     if (trade_id) {
