@@ -38,7 +38,10 @@ const DECP_MAX_RECORDS_PER_RUN = 50000;
 // docs.ted.europa.eu/reuse/search-api.html. Well under that ceiling.
 const TED_MAX_RECORDS_PER_RUN = 250;
 
-async function fetchAllPages(endpoint: string, baseParams: Record<string, unknown>, label: string): Promise<any[]> {
+// Exported for scripts/backfillMissingDeadlines.ts - re-fetches specific
+// known BOAMP notices by idweb to backfill deadline on rows ingested before
+// the datelimitereponse-based query filter above existed (see that comment).
+export async function fetchAllPages(endpoint: string, baseParams: Record<string, unknown>, label: string): Promise<any[]> {
   const all: any[] = [];
   let offset = 0;
   while (all.length < MAX_RECORDS_PER_RUN) {
@@ -184,7 +187,8 @@ export const collectBoampData = async (sourceId: number) => {
 // to a generic "Acheteur public" label despite the law requiring the real
 // name be shown. Public-transparency correctness matters more here than
 // on private sources, so this tries harder before giving up.
-const normalizeBoampRecord = (record: any) => {
+// Exported for scripts/backfillMissingDeadlines.ts (see there for why).
+export const normalizeBoampRecord = (record: any) => {
   const f = record.fields ? record.fields : record; // tolerate either shape
   const buyerName = firstDefined(f, ['nomacheteur', 'denominationacheteur', 'acheteur_nom', 'nom_acheteur']);
   const sourceReference = f.idweb || f.id || record.recordid;
@@ -924,7 +928,8 @@ const insertOpportunity = async (sourceId: number, data: any) => {
   return result.rows[0];
 };
 
-const updateOpportunity = async (opportunityId: string, data: any) => {
+// Exported for scripts/backfillMissingDeadlines.ts (see there for why).
+export const updateOpportunity = async (opportunityId: string, data: any) => {
   // Only touch fields that legitimately change between runs (deadline extensions, cancellations,
   // corrected values); title/publication_date/source_reference stay immutable once ingested.
   // official_url uses COALESCE(EXCLUDED, existing) rather than a plain
