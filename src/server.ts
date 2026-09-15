@@ -59,6 +59,25 @@ const authLimiter = rateLimit({
 app.use('/api/', limiter);
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
+// Same secret-guessing shape as /login (a code or password checked against
+// a stored value) - these were only covered by the general 100/15min '/api/'
+// limiter above, which is nowhere near tight enough for something an
+// attacker can script attempts against:
+// - change-password / password-reset/confirm: guessing the current
+//   password (change-password) or brute-forcing while holding a stolen
+//   reset/access token.
+// - mfa/verify-login / mfa/confirm: a 6-digit TOTP code has only 1,000,000
+//   possible values - far too small a space to leave at 100 attempts/15min.
+app.use('/api/auth/change-password', authLimiter);
+app.use('/api/auth/password-reset/confirm', authLimiter);
+app.use('/api/auth/mfa/verify-login', authLimiter);
+app.use('/api/auth/mfa/confirm', authLimiter);
+// password-reset/request and magic-link don't guess a secret, but each
+// call sends a real email to whatever address is given - unlimited calls
+// is a spam/abuse vector (and a mild email-enumeration timing one) even
+// though skipSuccessfulRequests doesn't apply the same way here.
+app.use('/api/auth/password-reset/request', authLimiter);
+app.use('/api/auth/magic-link', authLimiter);
 
 // Logging
 app.use(morgan('combined', { stream: { write: msg => logger.info(msg.trim()) } }));
