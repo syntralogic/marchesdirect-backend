@@ -315,7 +315,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
           tradeConds.push(`(t.name ILIKE $${nameIdx} OR o.ai_matched_trades::text ILIKE $${matchedIdx})`);
         }
         conditions.push(
-          `(to_tsvector('french', COALESCE(o.title, '') || ' ' || COALESCE(o.description, '')) @@ to_tsquery('french', $${tsIdx})
+          `(to_tsvector('french', unaccent(COALESCE(o.title, '') || ' ' || COALESCE(o.description, ''))) @@ to_tsquery('french', unaccent($${tsIdx}))
             OR (${tradeConds.join(' AND ')}))`
         );
         params.push(qWords.map(w => `${w}:*`).join(' & '));
