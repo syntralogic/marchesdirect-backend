@@ -16,6 +16,7 @@
     "db:seed": "node scripts/seed.js",
     "backfill:opportunity-facts": "ts-node --files scripts/backfillOpportunityFacts.ts",
     "backfill:exact-duplicates": "ts-node --files scripts/backfillExactDuplicates.ts",
+    "backfill:missing-deadlines": "ts-node --files scripts/backfillMissingDeadlines.ts",
     "loadtest:generate": "node scripts/generateSyntheticListings.js",
     "loadtest:run": "node scripts/loadTest.js"
   },
