@@ -458,6 +458,21 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     if (tradeMatchExpr) {
       orderClause = `(CASE WHEN (${tradeMatchExpr}) THEN 0 ELSE 1 END) ASC, ${orderClause}`;
     }
+    // R04 (deeper fix, needs nature_prestation - see database.ts migration
+    // and classifyOpportunity in aiService.ts): audit's own examples are
+    // all métier/trade searches (chauffage, peinture, plomberie,
+    // maçonnerie, électricité, carrelage, menuiserie) where "travaux mixed
+    // with fournitures et études" was the complaint, so this only applies
+    // as a secondary tiebreaker alongside the trade-match boost above, not
+    // globally - a query with no métier signal has no basis to prefer one
+    // nature over another. Rows not yet reclassified (nature_prestation
+    // still NULL - existing 47k backlog until the batch job above catches
+    // up) rank alongside travaux/mixte rather than being pushed down, so
+    // this only demotes rows the AI has positively tagged as fournitures
+    // or études, not everything unclassified.
+    if (tradeMatchExpr) {
+      orderClause = `(CASE WHEN o.nature_prestation IN ('fournitures', 'etudes') THEN 1 ELSE 0 END) ASC, ${orderClause}`;
+    }
 
     const listResult = await db.query(
       `SELECT o.id, o.title, o.description, o.deadline, o.publication_date,

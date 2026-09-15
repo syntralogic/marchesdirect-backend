@@ -828,13 +828,23 @@ export const classifyOpportunity = async (
 1. Trade/Industry (construction, IT, consulting, etc.)
 2. CPV codes (EU procurement classification)
 3. Complexity level (low, medium, high)
-4. Confidence scores
+4. Nature of the prestation itself - not the trade, the *kind* of work within it:
+   - "travaux": on-site installation, construction, repair or maintenance work
+   - "fournitures": supply/purchase of materials, equipment or goods, no on-site work
+   - "etudes": design, AMO, diagnostic, audit or other study/advisory missions
+   - "mixte": genuinely combines more than one of the above (e.g. a lot that includes both supply and installation)
+   Pick this from what the notice actually asks a bidder to deliver, not from
+   keywords in the title alone - a "fenêtres" notice about prestressing-cable
+   hardware or a "couverture" notice about fleece blankets is a different
+   trade/CPV entirely, not a fournitures-vs-travaux question.
+5. Confidence scores
 
 Return ONLY valid JSON, no markdown, no extra text:
 {
   "trades": [{"name": "...", "confidence": 0.95}],
   "cpv_codes": [{"code": "45200000", "name": "...", "confidence": 0.90}],
   "complexity": "medium",
+  "nature_prestation": "travaux",
   "reasoning": "..."
 }`;
 
@@ -873,6 +883,13 @@ Estimated Value: ${opp.estimated_value || 'Not specified'}`;
     if (!classification.complexity) {
       classification.complexity = 'medium';
     }
+    // R04: guard against the model returning something outside the 4
+    // allowed values (free-text drift, wrong casing, etc.) - store NULL
+    // rather than a bogus value the search boost below wouldn't recognize.
+    const VALID_NATURE = ['travaux', 'fournitures', 'etudes', 'mixte'];
+    const naturePrestation = VALID_NATURE.includes(classification.nature_prestation)
+      ? classification.nature_prestation
+      : null;
 
     // Find and link trades
     const tradeIds: any[] = [];
@@ -919,14 +936,16 @@ Estimated Value: ${opp.estimated_value || 'Not specified'}`;
         trade_id = $3,
         cpv_code_id = $4,
         complexity_level = $5,
+        nature_prestation = $6,
         updated_at = NOW()
-       WHERE id = $6`,
+       WHERE id = $7`,
       [
         'classified',
         JSON.stringify(tradeIds),
         primaryTradeId,
         cpvCodeId,
         classification.complexity || 'medium',
+        naturePrestation,
         opportunityId,
       ]
     );
