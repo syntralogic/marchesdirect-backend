@@ -961,6 +961,20 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   await step(`ALTER TABLE chatbot_conversations ADD COLUMN IF NOT EXISTS session_id VARCHAR(100)`);
   await step(`ALTER TABLE chatbot_conversations ADD COLUMN IF NOT EXISTS lead_captured_at TIMESTAMP`);
   await step(`CREATE INDEX IF NOT EXISTS chatbot_conversations_session ON chatbot_conversations(session_id) WHERE session_id IS NOT NULL`);
+
+  // Contre-audit 15 Sep 2026, ticket R04 (the deeper fix behind R03/R04,
+  // see commit 1651837): "travaux, fournitures et études mélangés" -
+  // chauffage/peinture/plomberie/maçonnerie/électricité/carrelage/
+  // menuiserie searches mix installation/repair work with pure-material
+  // sales and AMO/design missions. 1651837 only had a métier signal
+  // (trade_id/ai_matched_trades) to rank with; it explicitly flagged that
+  // a "nature of prestation" signal didn't exist anywhere in the schema or
+  // classification prompt yet. This column is that signal.
+  // Nullable/no default on purpose: existing rows stay NULL (not 'inconnu')
+  // until classifyOpportunity() below re-tags them, so the search boost
+  // below can tell "classified as X" apart from "not yet reclassified".
+  await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS nature_prestation VARCHAR(20)`);
+  await step(`CREATE INDEX IF NOT EXISTS opportunities_nature_prestation ON opportunities(nature_prestation) WHERE nature_prestation IS NOT NULL`);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old
