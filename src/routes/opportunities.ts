@@ -441,10 +441,20 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     // expired opportunities first, then soonest deadline. Kept as the
     // fallback for sort=deadline, no sort param, or an unrecognized value -
     // so existing callers see no behavior change.
-    const DEFAULT_ORDER = `(o.status = 'active' AND (o.deadline IS NULL OR o.deadline >= NOW())) DESC, o.deadline ASC NULLS LAST`;
+    // Root cause of the client's pagination glitch (counter said 306,
+    // list stopped at 305 with no way to continue): neither DEFAULT_ORDER
+    // nor sort=recent had a stable final tiebreaker, so rows sharing the
+    // same deadline (or both NULL) or the same publication_date could be
+    // ordered differently between the page-1 query and the page-2 query if
+    // anything in the table changed between the two requests (or even just
+    // from query-plan nondeterminism on ties) - a row could land on both
+    // pages (duplicate id -> React only renders one, so the list looks one
+    // short) or be skipped by both. Appending o.id ASC makes the order
+    // fully deterministic across pages regardless of ties.
+    const DEFAULT_ORDER = `(o.status = 'active' AND (o.deadline IS NULL OR o.deadline >= NOW())) DESC, o.deadline ASC NULLS LAST, o.id ASC`;
     let orderClause = DEFAULT_ORDER;
     if (sort === 'recent') {
-      orderClause = `o.publication_date DESC NULLS LAST`;
+      orderClause = `o.publication_date DESC NULLS LAST, o.id ASC`;
     } else if (sort === 'match') {
       // Relevance only means something with a text query to rank against;
       // with no q, there's nothing to score, so this falls back to the
