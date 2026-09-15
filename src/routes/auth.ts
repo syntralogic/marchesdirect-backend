@@ -7,6 +7,7 @@ import {
   refreshAccessToken,
   requestPasswordReset,
   resetPassword,
+  changePassword,
   requestMagicLink,
   verifyMagicLink,
   enableMFA,
@@ -185,6 +186,32 @@ router.post('/password-reset/confirm', authenticate, async (req: AuthRequest, re
     res.status(400).json({ error: err.message || 'Password reset failed' });
   }
 });
+
+// POST /api/auth/change-password - Sécurité tab on ProfilPage (logged-in
+// user changing their own password). Requires and verifies currentPassword
+// server-side, unlike password-reset/confirm above - see changePassword's
+// comment in authService.ts for why the two flows can't share one endpoint.
+router.post(
+  '/change-password',
+  authenticate,
+  [
+    body('currentPassword').notEmpty().withMessage('Le mot de passe actuel est requis.'),
+    body('newPassword').isLength({ min: 8 }).withMessage('Le mot de passe doit contenir au moins 8 caractères.'),
+  ],
+  async (req: AuthRequest, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
+    try {
+      const result = await changePassword(req.user!.id, req.body.currentPassword, req.body.newPassword);
+      res.json(result);
+    } catch (err: any) {
+      // Wrong current password is a 400 (client error), same as any other
+      // invalid-input rejection here - not a 401/403, since the session
+      // itself is genuinely authenticated, it's just the wrong password.
+      res.status(400).json({ error: err.message || 'Le changement de mot de passe a échoué.' });
+    }
+  }
+);
 
 // POST /api/auth/magic-link - client's 6 Sep brief: "il saisit son adresse
 // e-mail → il reçoit un lien de connexion sécurisé". Always returns success

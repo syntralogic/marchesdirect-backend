@@ -522,6 +522,37 @@ export const requestPasswordReset = async (email: string) => {
   }
 };
 
+// changePassword — logged-in user changing their own password from the
+// Sécurité tab (ProfilPage). Distinct from resetPassword above: resetPassword
+// is reached via the forgot-password email link, where possession of the
+// one-time reset token already proves account ownership, so no current
+// password is needed there. This flow instead reuses a live session token,
+// which a visitor could have without knowing the actual password (a leaked/
+// stolen JWT, a shared device left logged in), so it has to independently
+// verify the current password before accepting a new one - previously the
+// frontend collected a "mot de passe actuel" field but silently never sent
+// it, and the endpoint it called (password-reset/confirm) never checked one
+// either, so anyone holding a valid access token could overwrite the
+// password with no proof they knew the old one.
+export const changePassword = async (userId: string, currentPassword: string, newPassword: string) => {
+  const userResult = await db.query('SELECT password_hash FROM users WHERE id = $1', [userId]);
+  if (userResult.rows.length === 0) {
+    throw new Error('Utilisateur introuvable.');
+  }
+
+  const { password_hash } = userResult.rows[0];
+  // A passwordless account (magic-link only, password_hash NULL - see
+  // registerCompanyAndUser above) has no current password to verify against;
+  // treat that the same as a wrong password rather than crashing bcrypt.compare
+  // on a null hash or, worse, silently accepting any "current password" value.
+  const currentMatches = password_hash ? await bcrypt.compare(currentPassword, password_hash) : false;
+  if (!currentMatches) {
+    throw new Error('Mot de passe actuel incorrect.');
+  }
+
+  return resetPassword(userId, newPassword);
+};
+
 export const resetPassword = async (userId: string, newPassword: string) => {
   try {
     const salt = await bcrypt.genSalt(parseInt(process.env.PASSWORD_SALT_ROUNDS || '10'));
