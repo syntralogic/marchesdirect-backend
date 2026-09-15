@@ -137,6 +137,24 @@ export const ensureSchema = async (): Promise<void> => {
     const schemaSql = fs.readFileSync(schemaPath, 'utf-8');
     await pool.query(schemaSql);
     logger.info('✅ Schema loaded successfully from schema.sql');
+
+    // BUG: this early-return path never called applyIncrementalMigrations(),
+    // only the "schema already present" branch above did. Every change that
+    // only ever landed as an incremental migration (added here rather than
+    // also updating schema.sql's CREATE TABLE - e.g. nature_prestation,
+    // added straight to applyIncrementalMigrations only) would be silently
+    // missing on any brand-new database: a fresh Supabase/Render Postgres
+    // instance, a disaster-recovery restore, a new staging environment -
+    // anything that takes the "no schema detected" branch instead of the
+    // "already present" one. Every statement in applyIncrementalMigrations
+    // is IF-NOT-EXISTS-guarded and individually fault-isolated (see step()
+    // above), so running it here too is safe and just fills in whatever
+    // schema.sql itself doesn't yet have.
+    try {
+      await applyIncrementalMigrations();
+    } catch (migrationErr) {
+      logger.error('⚠️ Incremental migration step failed after fresh schema.sql load — server will still start. Check manually.', migrationErr);
+    }
   } catch (err) {
     logger.error('❌ Auto-migration failed — schema may be partially applied. Check manually.', err);
     throw err;
