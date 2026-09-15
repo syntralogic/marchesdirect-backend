@@ -206,6 +206,11 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       recent_days,   // client's filter list ("marchés nouveaux") - publication_date within N days,
                       // independent of status: a just-published notice can still be 'active' whether
                       // or not it's "new", so this has to be its own filter, not folded into status.
+      sort,          // client audit (R08): explicit sort was missing entirely - only a fixed
+                      // active-first/soonest-deadline order existed, with no control and no
+                      // stated default. 'recent' | 'match' | 'deadline' (falls back to the
+                      // existing default order for any other/absent value, so old callers with
+                      // no sort param keep today's behavior unchanged).
       page = '1',
       limit = '20',
     } = req.query as Record<string, string>;
@@ -233,6 +238,10 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     const conditions: string[] = ["o.deleted_at IS NULL", "o.status != 'merged'"];
     const params: any[] = [];
     let idx = 1;
+    // Captured when the q filter below builds its tsvector/tsquery match,
+    // so sort=match can rank by the same relevance expression instead of
+    // rebuilding (and re-binding) it a second time.
+    let tsRankParamIdx: number | null = null;
 
     if (journey) {
       // Client's journey step lets several opportunity types be selected
@@ -308,6 +317,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       const qWords = qWordsMeaningful.length > 0 ? qWordsMeaningful : qWordsRaw;
       if (qWords.length > 0) {
         const tsIdx = idx++;
+        tsRankParamIdx = tsIdx;
         const tradeConds: string[] = [];
         for (const _w of qWords) {
           const nameIdx = idx++;
@@ -408,6 +418,23 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
 
     const whereClause = conditions.join(' AND ');
 
+    // Default order (unchanged from before this ticket): active-and-not-yet-
+    // expired opportunities first, then soonest deadline. Kept as the
+    // fallback for sort=deadline, no sort param, or an unrecognized value -
+    // so existing callers see no behavior change.
+    const DEFAULT_ORDER = `(o.status = 'active' AND (o.deadline IS NULL OR o.deadline >= NOW())) DESC, o.deadline ASC NULLS LAST`;
+    let orderClause = DEFAULT_ORDER;
+    if (sort === 'recent') {
+      orderClause = `o.publication_date DESC NULLS LAST`;
+    } else if (sort === 'match') {
+      // Relevance only means something with a text query to rank against;
+      // with no q, there's nothing to score, so this falls back to the
+      // default order rather than an arbitrary/meaningless ranking.
+      orderClause = tsRankParamIdx !== null
+        ? `ts_rank(to_tsvector('french', unaccent(COALESCE(o.title, '') || ' ' || COALESCE(o.description, ''))), to_tsquery('french', unaccent($${tsRankParamIdx}))) DESC, ${DEFAULT_ORDER}`
+        : DEFAULT_ORDER;
+    }
+
     const listResult = await db.query(
       `SELECT o.id, o.title, o.description, o.deadline, o.publication_date,
               o.estimated_value, o.currency, o.location_city, o.location_region,
@@ -418,7 +445,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
        LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
        LEFT JOIN trades t ON o.trade_id = t.id
        WHERE ${whereClause}
-       ORDER BY (o.status = 'active' AND (o.deadline IS NULL OR o.deadline >= NOW())) DESC, o.deadline ASC NULLS LAST
+       ORDER BY ${orderClause}
        LIMIT $${idx++} OFFSET $${idx++}`,
       [...params, limitNum, offset]
     );
