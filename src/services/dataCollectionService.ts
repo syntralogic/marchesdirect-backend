@@ -10,6 +10,7 @@ import { deduplicateOpportunities } from './deduplicationService';
 import { v4 as uuid } from 'uuid';
 import { regionForDepartmentCode, normalizeDepartmentCode, normalizeRegionName } from '../utils/departmentRegion';
 import { buildOfficialUrl } from '../utils/officialUrl';
+import { decodeHtmlEntities } from '../utils/textSanitize';
 
 // v2.1 caps each request at 100 records - a real collection run needs to
 // page through `offset` to get anywhere near the "several thousand, even
@@ -195,8 +196,11 @@ export const normalizeBoampRecord = (record: any) => {
   return {
     source_reference: sourceReference,
     official_url: buildOfficialUrl('boamp', sourceReference, record),
-    title: f.objet || f.titulaire || 'Sans titre',
-    description: f.objet || f.resume || '',
+    // decodeHtmlEntities: contre-audit R07 - BOAMP's `objet` field
+    // sometimes carries raw HTML character references (client's example:
+    // "&#8211;" showing up as literal text instead of "–").
+    title: decodeHtmlEntities(f.objet || f.titulaire || 'Sans titre'),
+    description: decodeHtmlEntities(f.objet || f.resume || ''),
     publication_date: f.dateparution || record.record_timestamp,
     deadline: f.datelimitereponse || null,
     estimated_value: f.montant ? parseFloat(f.montant) : null,
@@ -600,8 +604,8 @@ const normalizeDecpRecord = (record: any) => {
 
   return {
     source_reference: record.uid || record.id,
-    title: record.objet || 'Marché public (DECP)',
-    description: record.objet || '',
+    title: decodeHtmlEntities(record.objet) || 'Marché public (DECP)',
+    description: decodeHtmlEntities(record.objet) || '',
     publication_date: record.datePublicationDonnees || record.dateNotification || null,
     deadline: null, // DECP is post-award data - there is no submission deadline to capture, unlike BOAMP/PLACE
     estimated_value: record.montant != null ? parseFloat(record.montant) : null,
@@ -676,8 +680,8 @@ export const collectBatiwebData = async (sourceId: number) => {
 
         const opportunity = {
           source_reference: ref,
-          title: item.title || '',
-          description: item.contentSnippet || item.content || '',
+          title: decodeHtmlEntities(item.title) || '',
+          description: decodeHtmlEntities(item.contentSnippet || item.content) || '',
           publication_date: item.isoDate ? new Date(item.isoDate) : new Date(),
           deadline: null,
           // A news article almost never states a structured buyer/amount -
@@ -820,8 +824,8 @@ export const collectTedData = async (sourceId: number) => {
         const parsedDeadline = deadlineRaw ? new Date(deadlineRaw) : null;
         const deadline = parsedDeadline && !isNaN(parsedDeadline.getTime()) ? parsedDeadline : null;
         const opportunity = {
-          title: firstText(item['notice-title']) || firstText(item.title) || `TED ${tedId}`,
-          description: firstText(item['description-proc']) || firstText(item.description) || '',
+          title: decodeHtmlEntities(firstText(item['notice-title']) || firstText(item.title)) || `TED ${tedId}`,
+          description: decodeHtmlEntities(firstText(item['description-proc']) || firstText(item.description)) || '',
           deadline,
           source_reference: tedId,
           opportunity_type: 'public_procurement',
