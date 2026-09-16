@@ -44,7 +44,7 @@ export interface MatchScoreResult {
   // Short qualitative tier for card badges ("Très pertinent" etc.) -
   // derived from score, not a separate computation, so it can never
   // disagree with the percentage shown next to it.
-  matchLabel: string;
+  matchLabel: string | null;
   positiveFactors: ScoreFactor[];
   warning: string | null;
   criteria: CriterionWeight[];
@@ -201,10 +201,21 @@ export const computeMatchScore = async (
     // the opportunity's own listing is - this is what every visitor sees
     // before they're identified (anonymous, or a public-market listing which
     // never personalizes since it's open to everyone anyway).
-    scoreTitle = 'Indice de correspondance';
+    // C04 (contre-audit 15 Sep): a CVC company with statut "Cessée" and 0
+    // salariés was shown 92% for "rénovation générale" and 100% for
+    // "sous-traitance peinture". None of the factors below look at the
+    // company at all - they score how complete and workable the *listing*
+    // is. Calling that an "Indice de correspondance" makes it read as a
+    // company-compatibility verdict, which is exactly the claim it cannot
+    // support: the same listing shows the same number to every visitor,
+    // whatever their trade or status. Renamed to say what it actually
+    // measures. matchLabel is also suppressed further down for this branch
+    // for the same reason ("Très pertinent" is a relevance claim about a
+    // company we know nothing about).
+    scoreTitle = 'Indice de complétude du dossier';
     scoreNote = isPublic
-      ? 'Score du dossier public, non personnalisé.'
-      : 'Calculée à partir du profil renseigné après transmission de vos coordonnées.';
+      ? "Mesure les informations disponibles dans cet avis, pas la compatibilité avec votre entreprise."
+      : "Mesure les informations disponibles dans cette annonce. La correspondance avec votre entreprise est calculée après transmission de vos coordonnées.";
 
     if (opp.description && opp.description.length > 80) positiveFactors.push({ label: 'Dossier complet et structuré', points: 32 });
     if (opp.estimated_value && opp.deadline) positiveFactors.push({ label: 'Budget et calendrier clairement définis', points: 25 });
@@ -346,7 +357,11 @@ export const computeMatchScore = async (
   // keeps its own explanatory note since there's no company profile yet for
   // a correspondence claim to be about.
   if (company) scoreNote = correspondenceNoteFor(score);
-  const matchLabel = matchLabelFor(score);
+  // C04: "Très pertinent" / "Pertinent" are relevance claims about a
+  // company. In the anonymous branch there is no company profile behind
+  // the number (see the scoreTitle comment above), so the label is left
+  // null rather than asserting a fit that was never evaluated.
+  const matchLabel = company ? matchLabelFor(score) : null;
 
   // Eligibility checklist - if we know the company, actually check its
   // documents/certifications on file; otherwise every line is just shown as
