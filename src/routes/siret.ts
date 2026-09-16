@@ -5,6 +5,13 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { AuthRequest } from '../middleware/auth';
+import {
+  requestVerificationCode,
+  confirmVerificationCode,
+  isPhoneVerified,
+  isVerificationRequired,
+  FR_PHONE_RE,
+} from '../services/phoneVerificationService';
 
 const router = Router();
 
@@ -416,6 +423,76 @@ router.get('/status', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// C08 - phone verification (one-time code)
+// ---------------------------------------------------------------------------
+// The audit's point was that format validation can't tell a real line from a
+// well-formed invented one, and the chargé d'affaires is the one who pays for
+// that. These two endpoints send a code to the number and check it back; the
+// /lead endpoint below then refuses a number that hasn't been proved.
+//
+// GET-able state (`required`) so the frontend knows whether to render the code
+// step at all - with no SMS provider configured the gate stays off and the
+// flow behaves exactly as it does today, rather than dead-ending every visitor
+// behind a code that can't be delivered.
+router.get('/phone/verification/config', (_req: AuthRequest, res: Response) => {
+  res.json({ required: isVerificationRequired() });
+});
+
+router.post(
+  '/phone/verification/request',
+  [
+    body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
+    body('phone').matches(FR_PHONE_RE).withMessage('Le téléphone doit contenir 10 chiffres.'),
+  ],
+  async (req: AuthRequest, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ error: errors.array()[0].msg });
+    }
+    const { sessionId, phone } = req.body;
+    try {
+      const result = await requestVerificationCode(sessionId, phone);
+      if (!result.ok) {
+        const status = result.error === 'too_many_requests' ? 429 : result.error === 'send_failed' ? 502 : 400;
+        return res.status(status).json({ error: result.message, retryAfterSeconds: result.retryAfterSeconds });
+      }
+      // `delivered` tells the UI whether an SMS actually left the building;
+      // the code itself is never in this response (see the service).
+      res.json({ sent: true, delivered: result.delivered, expiresInSeconds: result.expiresInSeconds });
+    } catch (err) {
+      logger.error('Phone verification request error:', err);
+      res.status(500).json({ error: 'Impossible d’envoyer le code pour le moment.' });
+    }
+  }
+);
+
+router.post(
+  '/phone/verification/confirm',
+  [
+    body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
+    body('phone').matches(FR_PHONE_RE).withMessage('Le téléphone doit contenir 10 chiffres.'),
+    body('code').isString().trim().isLength({ min: 4, max: 8 }),
+  ],
+  async (req: AuthRequest, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ error: errors.array()[0].msg });
+    }
+    const { sessionId, phone, code } = req.body;
+    try {
+      const result = await confirmVerificationCode(sessionId, phone, code);
+      if (!result.ok) {
+        return res.status(400).json({ error: result.message, attemptsLeft: result.attemptsLeft });
+      }
+      res.json({ verified: true });
+    } catch (err) {
+      logger.error('Phone verification confirm error:', err);
+      res.status(500).json({ error: 'Vérification impossible pour le moment.' });
+    }
+  }
+);
+
 // POST /api/siret/lead - client's newest brief: phone + email are requested
 // once the visitor has already seen value (score + why-it-matches), and
 // gate the fuller breakdown (criteria weighting, eligibility checklist,
@@ -451,6 +528,19 @@ router.post(
     const existing = await db.query('SELECT id, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
     if (existing.rows.length === 0) {
       return res.status(409).json({ error: 'company_not_identified', message: "Identifiez d'abord votre entreprise." });
+    }
+
+    // C08: the regex above only proves the number is *shaped* like a French
+    // line. This is the part that proves it exists and that the visitor holds
+    // it - without it the CRM fills with callbacks that ring nothing, which
+    // is what the audit actually reported. Skipped entirely when no SMS
+    // provider is configured (isVerificationRequired) so the flow degrades to
+    // today's behaviour instead of blocking every visitor.
+    if (isVerificationRequired() && !(await isPhoneVerified(sessionId, phone))) {
+      return res.status(403).json({
+        error: 'phone_not_verified',
+        message: 'Confirmez d’abord le code reçu par SMS sur ce numéro.',
+      });
     }
 
     await db.query(
