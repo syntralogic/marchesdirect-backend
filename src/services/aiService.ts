@@ -444,58 +444,50 @@ export const generateTechnicalMemo = async (bidId: string): Promise<TechnicalMem
   const fallback = buildFallbackTechnicalMemo(company, references, resources, policies, bid);
 
   try {
-    const systemPrompt = `You are drafting a "memoire technique" (technical memo) for a French company responding to a
-public tender, strictly from the company data and tender description provided below. This is a first draft the
-company will review and edit before submission - it is not the final submission.
+    // ------------------------------------------------------------------
+    // C07 (contre-audit 15 Sep): "le mémoire technique reste générique -
+    // il manque le sommaire complet et un document de 10 à 15 pages".
+    //
+    // The previous version asked for all 6 sections in a single call
+    // capped at 3000 tokens. 3000 tokens is roughly 4 pages, so the model
+    // was structurally unable to produce what the client asked for - it
+    // compressed every section into a paragraph, which is precisely the
+    // "générique" the audit describes. Raising max_tokens alone doesn't
+    // fix it either: one long generation drifts and pads rather than
+    // treating each chapter as its own piece of work.
+    //
+    // So: a real plan first (the sommaire, tailored to this tender's own
+    // criteria and lots), then one focused generation per chapter with its
+    // own budget. Total output lands in the 10-15 page range because each
+    // of the ~10 chapters gets room to say something specific, not because
+    // anything is being padded to hit a page count.
+    //
+    // The no-invention rule still governs every chapter: a chapter with no
+    // real profile data behind it says so, in that chapter. A short honest
+    // memo is a usable first draft; a long invented one is a liability at
+    // submission.
+    // ------------------------------------------------------------------
+    const companyContext = buildCompanyContextBlock(company, references, resources, policies);
+    const tenderContext = buildTenderContextBlock(bid);
 
-RULES (hard requirements):
-- Never invent facts: company data, references, certifications, staff/equipment numbers, or tender requirements
-  that are not present in the input. If something relevant is missing, write "Non renseigne dans le profil
-  entreprise" for that item instead of making it up.
-- From the company's reference list, select and describe only the ones most relevant to this specific tender
-  (by trade/contract type match), not simply the most recent ones.
-- Write in French, professional register, suitable for a public buyer.
+    const chapters = await planMemoChapters(tenderContext, companyContext);
 
-Produce exactly these 6 sections, each with a clear header, in this order:
-1. PRESENTATION DE L'ENTREPRISE ET ORGANISATION - tailored to this contract's purpose, not generic boilerplate.
-2. MOYENS HUMAINS ET MATERIELS AFFECTES AU PROJET - drawn only from the staff/equipment resources given.
-3. METHODOLOGIE D'EXECUTION ET PHASAGE - proposed approach derived from the tender description; if the
-   description doesn't detail technical phases, keep this section proportionate to what's actually known and say
-   so rather than inventing a phasing plan.
-4. PLANNING PREVISIONNEL - a preliminary schedule outline, explicitly marked as indicative, based on any
-   deadline/duration info given; do not invent specific dates that weren't provided.
-5. REFERENCES SIMILAIRES - the selected relevant references only, with project name, client, date and a one-line
-   relevance note.
-6. MESURES QUALITE, SECURITE, ENVIRONNEMENT - drawn only from the company's quality/safety/environmental
-   policy text given; note explicitly if one of the three is not documented in the profile.
+    const bodies: string[] = [];
+    for (const [index, chapter] of chapters.entries()) {
+      const chapterText = await generateMemoChapter(chapter, index + 1, chapters, tenderContext, companyContext);
+      bodies.push(`${MEMO_CHAPTER_MARKER}${index + 1}. ${chapter.title}\n\n${chapterText.trim()}`);
+    }
 
-Return plain text with the 6 numbered section headers as shown above, no markdown formatting, no extra commentary.`;
+    const sommaire = [
+      `${MEMO_CHAPTER_MARKER}SOMMAIRE`,
+      '',
+      ...chapters.map((c, i) => {
+        const subs = c.subsections.map((sub, j) => `    ${i + 1}.${j + 1}  ${sub}`);
+        return [`${i + 1}.  ${c.title}`, ...subs].join('\n');
+      }),
+    ].join('\n');
 
-    const userMessage = `TENDER:
-Title: ${bid.opportunity_title}
-Contract type: ${bid.contract_type || 'Not specified'}
-Description: ${bid.opportunity_description || 'Not provided by source'}
-Complexity (from DCE analysis): ${bid.complexity_assessment || 'not analyzed yet'}
-Selection criteria (from DCE analysis): ${bid.selection_criteria ? JSON.stringify(bid.selection_criteria) : 'not analyzed yet'}
-
-COMPANY PROFILE:
-Name: ${company.name}
-SIRET: ${company.siret || 'non renseigne'}
-Legal form: ${company.legal_form || 'non renseigne'}
-Employee count: ${company.employee_count ?? 'non renseigne'}
-Industry sector: ${company.industry_sector || 'non renseigne'}
-Founded: ${company.founding_year || 'non renseigne'}
-
-STAFF / EQUIPMENT RESOURCES (company_resources):
-${resources.length ? resources.map((r) => `- [${r.resource_type}] ${r.name}${r.quantity ? ` x${r.quantity}` : ''}${r.category ? ` (${r.category})` : ''}${r.description ? ` - ${r.description}` : ''}`).join('\n') : 'Aucune ressource enregistree dans le profil entreprise.'}
-
-REFERENCES (company_references, up to 20, select the most relevant to this tender):
-${references.length ? references.map((r) => `- ${r.project_name} | client: ${r.client_name || 'confidentiel'} | date: ${r.completion_date || 'non renseignee'} | montant: ${r.contract_value || 'non renseigne'} | description: ${r.description || ''}`).join('\n') : 'Aucune reference enregistree dans le profil entreprise.'}
-
-POLICIES (company_policies):
-${policies.length ? policies.map((p) => `- [${p.policy_type}] ${p.policy_text}`).join('\n') : 'Aucune politique enregistree dans le profil entreprise.'}`;
-
-    const memoText = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 3000);
+    const memoText = [sommaire, ...bodies].join('\n\n');
 
     await db.query(
       `UPDATE bid_responses SET
@@ -506,7 +498,7 @@ ${policies.length ? policies.map((p) => `- [${p.policy_type}] ${p.policy_text}`)
       [memoText, bidId]
     );
 
-    logger.info(`✅ AI-generated technical memo for bid ${bidId}`);
+    logger.info(`✅ AI-generated technical memo for bid ${bidId} (${chapters.length} chapters, ${memoText.length} chars)`);
     return { text: memoText, aiGenerated: true };
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
@@ -524,6 +516,181 @@ ${policies.length ? policies.map((p) => `- [${p.policy_type}] ${p.policy_text}`)
     return { text: fallback, aiGenerated: false };
   }
 };
+
+// Chapter headings are marked so documentService.ts can build a real
+// paginated sommaire (with page numbers) instead of guessing at the
+// structure from the prose. Invisible in the PDF - the renderer strips it.
+export const MEMO_CHAPTER_MARKER = '@@CHAPITRE@@';
+
+type MemoChapter = { title: string; subsections: string[]; guidance: string };
+
+// The client's ask is a standard French mémoire technique plan. This is the
+// baseline every memo gets; planMemoChapters() below lets the model adapt
+// the sub-sections (and add at most two chapters) to what this particular
+// DCE actually weights, so a marché with an environmental criterion at 30%
+// gets a real chapter on it rather than one paragraph at the end.
+const BASE_MEMO_CHAPTERS: MemoChapter[] = [
+  {
+    title: "PRESENTATION DE L'ENTREPRISE",
+    subsections: ['Identification et forme juridique', 'Activités et savoir-faire', 'Organisation générale', 'Assurances et qualifications'],
+    guidance: "Identité, ancienneté, effectif, implantation, domaines d'intervention. Relier explicitement l'activité de l'entreprise à l'objet du marché.",
+  },
+  {
+    title: 'ORGANISATION DEDIEE AU MARCHE',
+    subsections: ['Organigramme de l’opération', 'Interlocuteurs et suppléance', 'Circuit de décision et reporting'],
+    guidance: "Qui fait quoi sur CE marché, qui est l'interlocuteur unique de l'acheteur, comment la continuité est assurée en cas d'absence.",
+  },
+  {
+    title: 'MOYENS HUMAINS',
+    subsections: ['Effectif affecté', 'Qualifications et habilitations', 'Formation continue', 'Recours à la sous-traitance'],
+    guidance: 'Uniquement les effectifs et qualifications présents dans le profil entreprise. Ne jamais inventer un nombre ou une habilitation.',
+  },
+  {
+    title: 'MOYENS MATERIELS ET TECHNIQUES',
+    subsections: ['Matériel affecté', 'Installations et logistique', 'Entretien et disponibilité du matériel'],
+    guidance: 'Uniquement le matériel listé dans le profil entreprise.',
+  },
+  {
+    title: "METHODOLOGIE D'EXECUTION",
+    subsections: ['Préparation et installation', "Phases d'exécution", 'Points de contrôle', 'Contraintes du site et coactivité'],
+    guidance:
+      "Déduire la méthodologie du CCTP/description fournie. Si la description ingérée ne détaille pas les phases techniques, le dire explicitement et rester au niveau réellement connu plutôt que d'inventer un phasage.",
+  },
+  {
+    title: 'PLANNING PREVISIONNEL',
+    subsections: ['Jalons principaux', 'Délais partiels', 'Gestion des aléas'],
+    guidance: "Planning indicatif, explicitement présenté comme tel, basé uniquement sur les délais fournis. Aucune date inventée.",
+  },
+  {
+    title: 'DEMARCHE QUALITE',
+    subsections: ['Organisation qualité', 'Contrôles et autocontrôles', 'Traitement des non-conformités'],
+    guidance: "Uniquement à partir de la politique qualité du profil. Signaler explicitement si elle n'est pas documentée.",
+  },
+  {
+    title: 'PREVENTION, HYGIENE ET SECURITE',
+    subsections: ['Organisation sécurité', 'Analyse des risques', 'Equipements de protection', 'Accueil et formation au poste'],
+    guidance: "Uniquement à partir de la politique sécurité du profil. Signaler explicitement si elle n'est pas documentée.",
+  },
+  {
+    title: 'ENGAGEMENTS ENVIRONNEMENTAUX',
+    subsections: ['Gestion des déchets', 'Nuisances et riverains', 'Ressources et énergie'],
+    guidance: "Uniquement à partir de la politique environnementale du profil. Signaler explicitement si elle n'est pas documentée.",
+  },
+  {
+    title: 'REFERENCES SIMILAIRES',
+    subsections: ['Sélection des références pertinentes', 'Enseignements transposables au présent marché'],
+    guidance:
+      "Sélectionner parmi les références du profil celles qui sont réellement proches de CE marché (métier, nature, ordre de grandeur), pas les plus récentes. Pour chacune: intitulé, client, date, montant, et en quoi elle est transposable.",
+  },
+];
+
+function buildCompanyContextBlock(company: any, references: any[], resources: any[], policies: any[]): string {
+  return `PROFIL ENTREPRISE:
+Nom: ${company.name}
+SIRET: ${company.siret || 'non renseigne'}
+Forme juridique: ${company.legal_form || 'non renseigne'}
+Effectif: ${company.employee_count ?? 'non renseigne'}
+Secteur: ${company.industry_sector || 'non renseigne'}
+Annee de creation: ${company.founding_year || 'non renseigne'}
+
+RESSOURCES (personnel / materiel / installations):
+${resources.length ? resources.map((r) => `- [${r.resource_type}] ${r.name}${r.quantity ? ` x${r.quantity}` : ''}${r.category ? ` (${r.category})` : ''}${r.description ? ` - ${r.description}` : ''}`).join('\n') : 'Aucune ressource enregistree dans le profil entreprise.'}
+
+REFERENCES (jusqu'a 20):
+${references.length ? references.map((r) => `- ${r.project_name} | client: ${r.client_name || 'confidentiel'} | date: ${r.completion_date || 'non renseignee'} | montant: ${r.contract_value || 'non renseigne'} | description: ${r.description || ''}`).join('\n') : 'Aucune reference enregistree dans le profil entreprise.'}
+
+POLITIQUES INTERNES:
+${policies.length ? policies.map((p) => `- [${p.policy_type}] ${p.policy_text}`).join('\n') : 'Aucune politique enregistree dans le profil entreprise.'}`;
+}
+
+function buildTenderContextBlock(bid: any): string {
+  return `MARCHE:
+Objet: ${bid.opportunity_title}
+Type de contrat: ${bid.contract_type || 'non precise'}
+Description: ${bid.opportunity_description || 'non fournie par la source'}
+Complexite (analyse DCE): ${bid.complexity_assessment || 'non analysee'}
+Criteres de selection (analyse DCE): ${bid.selection_criteria ? JSON.stringify(bid.selection_criteria) : 'non analyses'}`;
+}
+
+/**
+ * Adapts the standard plan to this specific tender. Falls back to the
+ * baseline plan on any parsing trouble - a memo with the standard plan is
+ * still a correct memo, so this must never be able to fail the whole
+ * generation.
+ */
+async function planMemoChapters(tenderContext: string, companyContext: string): Promise<MemoChapter[]> {
+  const systemPrompt = `Tu prépares le SOMMAIRE d'un mémoire technique pour une réponse à un marché public français.
+
+Un plan standard t'est fourni. Ta tâche: l'adapter à CE marché.
+- Conserve les chapitres du plan standard (ils sont attendus par les acheteurs publics).
+- Adapte les sous-sections pour refléter les critères de jugement et les contraintes réellement présents dans le marché ci-dessous.
+- Tu peux ajouter au maximum 2 chapitres si le marché l'exige clairement (ex: un critère d'insertion sociale fortement pondéré).
+- N'invente pas de contrainte qui ne figure pas dans les informations fournies.
+
+Réponds UNIQUEMENT en JSON valide, sans markdown:
+{"chapters":[{"title":"...","subsections":["...","..."],"guidance":"..."}]}`;
+
+  try {
+    const response = await callClaudeAPI(
+      [{ role: 'user', content: `PLAN STANDARD:\n${JSON.stringify(BASE_MEMO_CHAPTERS)}\n\n${tenderContext}\n\n${companyContext}` }],
+      systemPrompt,
+      2000
+    );
+    const parsed = JSON.parse(cleanJsonResponse(response));
+    const chapters: MemoChapter[] = (parsed.chapters || [])
+      .filter((c: any) => c && typeof c.title === 'string' && c.title.trim())
+      .map((c: any) => ({
+        title: String(c.title).trim(),
+        subsections: Array.isArray(c.subsections) ? c.subsections.map((x: any) => String(x)).slice(0, 8) : [],
+        guidance: typeof c.guidance === 'string' ? c.guidance : '',
+      }))
+      .slice(0, 12);
+    // Below ~8 chapters the plan can't carry the document length the client
+    // asked for - treat a short/garbled plan as a planning failure and use
+    // the baseline rather than shipping a thin memo.
+    if (chapters.length >= 8) return chapters;
+    logger.warn(`Memo chapter planning returned ${chapters.length} chapters, using the standard plan instead`);
+  } catch (err) {
+    logger.warn(`Memo chapter planning failed, using the standard plan: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return BASE_MEMO_CHAPTERS;
+}
+
+/**
+ * One chapter, generated on its own so it has the budget to be specific.
+ * ~1200 tokens each x ~10 chapters is what puts the finished document in the
+ * 10-15 page range the client asked for.
+ */
+async function generateMemoChapter(
+  chapter: MemoChapter,
+  position: number,
+  allChapters: MemoChapter[],
+  tenderContext: string,
+  companyContext: string
+): Promise<string> {
+  const systemPrompt = `Tu rédiges UN chapitre d'un mémoire technique pour une réponse à un marché public français.
+
+REGLES IMPERATIVES:
+- N'invente jamais un fait: aucun effectif, matériel, certification, référence, date ou exigence qui ne figure pas dans les informations fournies. Si un élément attendu manque, écris "Non renseigné dans le profil entreprise" pour cet élément et passe au suivant.
+- Rédige en français, registre professionnel, à destination d'un acheteur public.
+- Reste dans le périmètre de CE chapitre: les autres chapitres du sommaire sont traités ailleurs, ne les anticipe pas.
+- Structure le chapitre avec ses sous-sections, numérotées ${position}.1, ${position}.2, etc.
+- Vise 700 à 1100 mots pour ce chapitre, mais jamais au prix d'un remplissage: si les données réelles ne permettent pas cette longueur, écris un chapitre plus court et indique explicitement ce qui manque au profil entreprise pour le compléter.
+- Pas de markdown, pas de commentaire, uniquement le texte du chapitre (sans répéter son titre principal).`;
+
+  const userMessage = `SOMMAIRE COMPLET (pour situer ce chapitre, ne traite que le n°${position}):
+${allChapters.map((c, i) => `${i + 1}. ${c.title}`).join('\n')}
+
+CHAPITRE A REDIGER: ${position}. ${chapter.title}
+Sous-sections attendues: ${chapter.subsections.length ? chapter.subsections.join(' / ') : 'à ta libre appréciation, cohérentes avec le titre'}
+Consigne spécifique: ${chapter.guidance || 'aucune'}
+
+${tenderContext}
+
+${companyContext}`;
+
+  return callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 2000);
+}
 
 // Deterministic, no-AI text covering the same 6 sections from real profile data only.
 function buildFallbackTechnicalMemo(

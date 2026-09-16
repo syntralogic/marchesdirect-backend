@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { naturePrestationLateral, NATURE_VALUES } from '../utils/naturePrestation';
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts, generateOpportunityAnalysisSections } from '../services/aiService';
 import { ingestOpportunityDocuments } from '../services/documentIngestionService';
 import { computeMatchScore } from '../services/matchScoreService';
@@ -203,6 +204,8 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       min_value,
       max_value,
       status,        // 'active' | 'expired' | 'awarded' | 'cancelled' (comma-separated for multiple)
+      nature,        // R02: 'travaux' | 'fournitures' | 'etudes' | 'mixte' (comma-separated).
+                      // Explicit nature-of-prestation filter - see naturePrestation.ts.
       recent_days,   // client's filter list ("marchés nouveaux") - publication_date within N days,
                       // independent of status: a just-published notice can still be 'active' whether
                       // or not it's "new", so this has to be its own filter, not folded into status.
@@ -260,6 +263,10 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     // reviewing against live data this environment can't query), but a
     // real, general lever rather than a per-word patch.
     let tradeMatchExpr: string | null = null;
+    // R02: which natures the visitor explicitly asked for, so the ranking
+    // below can put exact matches ahead of the unknown-nature rows that the
+    // filter deliberately keeps (see the `nature` filter for why).
+    let requestedNatures: string[] = [];
 
     if (journey) {
       // Client's journey step lets several opportunity types be selected
@@ -363,9 +370,26 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       // "Nouvelle-Aquitaine, Bretagne") - was a single ILIKE match, so
       // picking 2+ regions on the map silently searched only the first one
       // once the frontend passed them through (comma-separated below).
+      //
+      // G13 (contre-audit 15 Sep): "carte vs liste count discrepancy (Grand
+      // Est etc.)" - clicking a region on the map and landing on this list
+      // showed a different total than the map's own count for that region.
+      // Root cause was upstream in /stats/regions (unaccented + summed
+      // there now - see that route), but a plain ILIKE here would still
+      // under-match against it: /stats/regions now sums every accent/case
+      // variant of a region name under one number, and hands this filter
+      // whichever raw variant happened to be picked as the label (e.g.
+      // "Île-de-France"). A DB row stored as "Ile-de-France" (no accent)
+      // would count toward the map's total but fail a plain ILIKE '%Île-de-
+      // France%' here, so the list would show fewer than the map promised.
+      // unaccent() on both sides of the comparison keeps the two endpoints
+      // in agreement regardless of which accent/case variant is on either
+      // side.
       const regions = region.split(',').map(r => r.trim()).filter(Boolean);
       if (regions.length > 0) {
-        conditions.push(`o.location_region ILIKE ANY($${idx++}::text[])`);
+        conditions.push(
+          `unaccent(o.location_region) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p))`
+        );
         params.push(regions.map(r => `%${r}%`));
       }
     }
@@ -417,6 +441,36 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       if (statuses.length > 0) {
         conditions.push(`o.status = ANY($${idx++}::text[])`);
         params.push(statuses);
+      }
+    }
+    if (nature) {
+      // R02 (contre-audit 15 Sep): "espaces verts" kept returning
+      // spare-parts-for-mower notices alongside the actual landscaping
+      // contracts. Those aren't homonyms or a wrong métier - they really
+      // are espaces-verts notices - so neither the R03 trade boost nor a
+      // relevance tweak can separate them. What's wrong for the visitor is
+      // the *nature* of the prestation, and until now the only handling of
+      // that was a silent tiebreaker (commit 32a6bd8) that a visitor
+      // couldn't see, couldn't control, and which did nothing at all on the
+      // ~47k rows the classifier hasn't re-tagged yet. This makes it an
+      // explicit, visible filter instead: "je cherche des travaux" actually
+      // removes the fournitures rows rather than pushing them a few places
+      // down.
+      //
+      // Unknown-nature rows (naturePrestationSql returns NULL: neither the
+      // classifier nor the heuristic could read the notice confidently) are
+      // deliberately KEPT when a nature is requested. Dropping them would
+      // silently hide real work from a visitor who asked to narrow, not to
+      // lose results - the same reasoning as the NULL handling in the
+      // ranking below. They just rank last (see orderClause).
+      const natures = nature
+        .split(',')
+        .map((n) => n.trim().toLowerCase())
+        .filter((n) => (NATURE_VALUES as readonly string[]).includes(n));
+      if (natures.length > 0) {
+        conditions.push(`(np.nature = ANY($${idx++}::text[]) OR np.nature IS NULL)`);
+        params.push(natures);
+        requestedNatures = natures;
       }
     }
     if (recent_days) {
@@ -480,8 +534,24 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     // up) rank alongside travaux/mixte rather than being pushed down, so
     // this only demotes rows the AI has positively tagged as fournitures
     // or études, not everything unclassified.
+    // R02 update: this used the raw `o.nature_prestation` column, which is
+    // only ever written by the AI classification pass - so on the ~47k rows
+    // that pass hasn't reached, every row read NULL and the demotion did
+    // nothing. That is why "espaces verts" still showed spare parts after
+    // 32a6bd8 shipped. naturePrestationSql() keeps the AI value whenever
+    // there is one and falls back to a conservative reading of the notice
+    // wording otherwise, so this works on the whole corpus from the first
+    // request instead of waiting on a reclassification backlog. Rows the
+    // fallback still can't read stay NULL and are still not demoted.
     if (tradeMatchExpr) {
-      orderClause = `(CASE WHEN o.nature_prestation IN ('fournitures', 'etudes') THEN 1 ELSE 0 END) ASC, ${orderClause}`;
+      orderClause = `(CASE WHEN np.nature IN ('fournitures', 'etudes') THEN 1 ELSE 0 END) ASC, ${orderClause}`;
+    }
+    // R02: when the visitor picked a nature explicitly, rows that actually
+    // match it come first and the unknown-nature rows kept by the filter
+    // follow - narrowing changes the order of the page, not just its length.
+    if (requestedNatures.length > 0) {
+      const naturesLiteral = requestedNatures.map((n) => `'${n}'`).join(', ');
+      orderClause = `(CASE WHEN np.nature IN (${naturesLiteral}) THEN 0 ELSE 1 END) ASC, ${orderClause}`;
     }
 
     const listResult = await db.query(
@@ -489,10 +559,16 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
               o.estimated_value, o.currency, o.location_city, o.location_region,
               o.location_department, o.estimated_start_date, o.estimated_end_date,
               o.ai_classification_status, o.ai_summary, o.ai_matched_trades, o.status,
-              ot.code as journey, t.name as trade_name, o.buyer_name
+              ot.code as journey, t.name as trade_name, o.buyer_name,
+              -- R02: the resolved nature (AI value when classified, notice-wording
+              -- fallback otherwise, NULL when genuinely unreadable) so the result
+              -- card can say "Fournitures" out loud instead of the visitor having
+              -- to open a spare-parts notice to find out.
+              np.nature AS nature_prestation
        FROM opportunities o
        LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
        LEFT JOIN trades t ON o.trade_id = t.id
+       ${naturePrestationLateral('o')}
        WHERE ${whereClause}
        ORDER BY ${orderClause}
        LIMIT $${idx++} OFFSET $${idx++}`,
@@ -504,6 +580,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
        FROM opportunities o
        LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
        LEFT JOIN trades t ON o.trade_id = t.id
+       ${naturePrestationLateral('o')}
        WHERE ${whereClause}`,
       params
     );
@@ -592,13 +669,28 @@ router.get('/stats/counts', async (req: Request, res: Response) => {
 // meant to bring back already-deduplicated rows.
 router.get('/stats/regions', async (req: Request, res: Response) => {
   try {
+    // G13 (contre-audit 15 Sep): "carte vs liste count discrepancy (Grand
+    // Est etc.)" - the map's per-region number and the list total for the
+    // same region disagreed. This grouped on the raw location_region string,
+    // so "Grand Est", "grand est" and "Grand Est " (connector feeds are not
+    // consistent about case/whitespace/accents) landed as separate rows with
+    // separate counts instead of one. The frontend then folds them together
+    // client-side (normalizeFr in HomePage.tsx) by writing each into the
+    // same map key - which means the LAST variant processed silently
+    // overwrote the earlier ones rather than summing, so the map showed only
+    // one variant's count while the list search (a single ILIKE '%region%'
+    // that matches all of them at once, now case/accent-insensitive too -
+    // see the region filter above) showed the true total. Grouping by the
+    // normalized key here means there is exactly one row per region to begin
+    // with, so summing happens once, in SQL, instead of depending on every
+    // caller to fold duplicates correctly.
     const result = await db.query(
-      `SELECT location_region AS region, COUNT(*)::int AS count
+      `SELECT MAX(location_region) AS region, COUNT(*)::int AS count
        FROM opportunities
        WHERE location_region IS NOT NULL AND location_region != ''
          AND deleted_at IS NULL
          AND status != 'merged'
-       GROUP BY location_region
+       GROUP BY lower(unaccent(trim(location_region)))
        ORDER BY count DESC`
     );
     res.json({ regions: result.rows });
@@ -613,13 +705,23 @@ router.get('/stats/regions', async (req: Request, res: Response) => {
 // except merged duplicates" rule as /stats/regions above.
 router.get('/stats/departments', async (req: Request, res: Response) => {
   try {
+    // Same fix as /stats/regions just above, for the same reason: raw
+    // location_department carries whatever the source sent - "5" and "05"
+    // for the same département (see the department filter's own padding
+    // comment a few hundred lines up), so grouping on the raw value split
+    // one département's count across two rows, which the frontend's map
+    // (keyed by code, no normalization applied there) then only picked one
+    // of. Grouping on the padded/trimmed code sums them into one row.
     const result = await db.query(
-      `SELECT location_department AS department, COUNT(*)::int AS count
+      `SELECT MAX(TRIM(location_department)) AS department, COUNT(*)::int AS count
        FROM opportunities
        WHERE location_department IS NOT NULL AND location_department != ''
          AND deleted_at IS NULL
          AND status != 'merged'
-       GROUP BY location_department
+       GROUP BY CASE
+         WHEN TRIM(location_department) ~ '^[0-9]+$' THEN LPAD(TRIM(location_department), 2, '0')
+         ELSE UPPER(TRIM(location_department))
+       END
        ORDER BY count DESC`
     );
     res.json({ departments: result.rows });

@@ -993,6 +993,36 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // below can tell "classified as X" apart from "not yet reclassified".
   await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS nature_prestation VARCHAR(20)`);
   await step(`CREATE INDEX IF NOT EXISTS opportunities_nature_prestation ON opportunities(nature_prestation) WHERE nature_prestation IS NOT NULL`);
+
+  // Contre-audit 15 Sep 2026, ticket C08: the lead gate's phone field was
+  // format-checked only (commit babbb9b stopped "0000000000"), so any
+  // well-formed invented number still produced a CRM lead and a wasted
+  // callback. This backs the one-time-code flow in
+  // phoneVerificationService.ts.
+  // code_hash/code_salt rather than the code itself: short-lived 6-digit
+  // codes are trivially rainbow-tabled, the per-row salt makes a dump
+  // useless for the codes still live at that moment.
+  // UNIQUE(session_id, phone) is what lets a re-request replace the live
+  // code instead of leaving several valid at once (ON CONFLICT DO UPDATE).
+  await step(`
+    CREATE TABLE IF NOT EXISTS phone_verifications (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      session_id VARCHAR(100) NOT NULL,
+      phone VARCHAR(20) NOT NULL,
+      code_hash VARCHAR(64) NOT NULL,
+      code_salt VARCHAR(32) NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      expires_at TIMESTAMP NOT NULL,
+      verified_at TIMESTAMP,
+      last_sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(session_id, phone)
+    )
+  `);
+  // Powers the per-number hourly resend throttle, which queries by phone
+  // across sessions (the throttle has to survive someone clearing their
+  // session id, otherwise it's not a throttle).
+  await step(`CREATE INDEX IF NOT EXISTS phone_verifications_phone_sent ON phone_verifications(phone, last_sent_at)`);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old
