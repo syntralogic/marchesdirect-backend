@@ -52,6 +52,11 @@ export interface MatchScoreResult {
   whyRespond: string;
 }
 
+// C04: ceiling for a score computed with no company profile behind it.
+// 55 keeps it inside "À examiner" (40-59) - below the "Pertinent" band at
+// 60 - so an unpersonalized number can never be announced as a good match.
+const MAX_NON_PERSONALIZED_SCORE = 55;
+
 const SCORE_DISCLAIMER = "Cet indice mesure la correspondance entre les caractéristiques connues de votre entreprise et les exigences détectées dans le marché. Il ne constitue pas une estimation des chances d'attribution.";
 
 const matchLabelFor = (s: number): string =>
@@ -107,6 +112,53 @@ function baseRequiredDocs(journey: string, tradeName: string | null): { label: s
   });
   docs.push({ label: 'Référence récente sur un chantier comparable', note: 'Un projet similaire réalisé dans les 3 dernières années.', documentType: 'reference' });
   return docs;
+}
+
+
+// Whole-word overlap between the company's declared sector and the trade the
+// opportunity is classified under. Replaces a 5-character prefix comparison
+// that matched unrelated activities (see C04 note below).
+// Short words are dropped: "de", "et", "bois" alone shouldn't establish a
+// métier match, and generic procurement filler would otherwise match almost
+// anything.
+const STOP_TOKENS = new Set(['de', 'du', 'des', 'la', 'le', 'les', 'et', 'en', 'aux', 'au', 'autres', 'divers', 'general', 'generale', 'travaux', 'services', 'activites']);
+
+function tokenize(text: string): Set<string> {
+  return new Set(
+    String(text || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length >= 4 && !STOP_TOKENS.has(w))
+  );
+}
+
+export function tradeMatchStrength(
+  industrySector: string | null | undefined,
+  tradeName: string | null | undefined,
+  aiMatchedTrades?: unknown
+): 'strong' | 'partial' | 'none' {
+  const sectorTokens = tokenize(industrySector || '');
+  if (sectorTokens.size === 0) return 'none';
+
+  const tradeTokens = tokenize(tradeName || '');
+  const overlap = [...tradeTokens].filter((t) => sectorTokens.has(t));
+  if (overlap.length > 0) return 'strong';
+
+  // Secondary signal: the AI may have matched this notice to several trades,
+  // one of which can line up with the company's sector even when the primary
+  // trade_id doesn't.
+  let matchedText = '';
+  try {
+    matchedText = typeof aiMatchedTrades === 'string' ? aiMatchedTrades : JSON.stringify(aiMatchedTrades ?? '');
+  } catch {
+    matchedText = '';
+  }
+  const aiTokens = tokenize(matchedText);
+  if ([...aiTokens].some((t) => sectorTokens.has(t))) return 'partial';
+
+  return 'none';
 }
 
 export const computeMatchScore = async (
@@ -171,17 +223,60 @@ export const computeMatchScore = async (
     // could actually show over 100%, or land at a misleading 100% off
     // partial data if points changed later. Cap it like the personalized
     // branch does.
-    score = Math.min(100, positiveFactors.reduce((sum, f) => sum + f.points, 0));
+    // C04 (contre-audit 15 Sep): "score de correspondance excessif sur des
+    // activités sans rapport - 92%, 100%". This is where those numbers came
+    // from. Every factor above measures how complete the *listing* is -
+    // description length, budget present, deadline present, city present -
+    // and not one of them looks at the company at all, because in this
+    // branch there is no company to look at. 32+25+10+15+10 is exactly 92,
+    // and a listing that also has a sub-300k budget reached 100.
+    //
+    // Capping was not enough on its own: the number is labelled "Indice de
+    // correspondance" and sits next to "Très pertinent" (>=80), so a
+    // well-written notice for a completely unrelated trade was being
+    // announced as a strong match for a visitor the system knows nothing
+    // about. A correspondence index computed without a single company trait
+    // cannot honestly enter that band.
+    //
+    // So the non-personalized score is rescaled into a 0-55 band, which
+    // tops out at "À examiner" and never reaches "Pertinent"/"Très
+    // pertinent". The factors themselves are unchanged and still shown -
+    // they are real and explainable, they just aren't correspondence - and
+    // the note now says out loud that no company trait was compared.
+    // Proportional rather than a hard clamp so listings still rank against
+    // each other instead of all flattening onto the same ceiling.
+    const listingQuality = positiveFactors.reduce((sum, f) => sum + f.points, 0);
+    score = Math.round(Math.min(100, listingQuality) * (MAX_NON_PERSONALIZED_SCORE / 100));
+    scoreNote = isPublic
+      ? 'Score du dossier public, non personnalisé : aucune caractéristique de votre entreprise n’a encore été comparée.'
+      : 'Non personnalisé pour l’instant : aucune caractéristique de votre entreprise n’a encore été comparée. Renseignez votre profil pour obtenir un indice de correspondance réel.';
   } else {
     scoreTitle = 'Indice de correspondance';
     scoreNote = 'Calculée à partir de votre profil et de cette opportunité.'; // overwritten below with the real tiered note once `score` is final
 
-    // Trade match
-    if (opp.trade_id && company.industry_sector && opp.trade_name &&
-        String(company.industry_sector).toLowerCase().includes(String(opp.trade_name).toLowerCase().slice(0, 5))) {
+    // Trade match.
+    // C04: this compared the company's sector against the first 5
+    // characters of the trade name. Truncating to 5 characters makes
+    // unrelated activities collide on a shared prefix - "Électricité" vs
+    // "Électroménager" both reduce to "elect", so an appliance retailer
+    // scored "Métier parfaitement compatible" (50 points, half the index)
+    // on an electrical-works notice. That is the excessive score on an
+    // unrelated activity the audit reported, in the personalized branch.
+    // Compares whole words instead, accent- and case-folded, against both
+    // the trade name and the AI's own matched-trades list (the same signal
+    // the search ranking uses - see opportunities.ts), so a genuine match
+    // still scores and a shared prefix no longer does.
+    const tradeMatch = tradeMatchStrength(company.industry_sector, opp.trade_name, opp.ai_matched_trades);
+    if (tradeMatch === 'strong') {
       positiveFactors.push({ label: 'Métier parfaitement compatible', points: 50 });
+    } else if (tradeMatch === 'partial') {
+      positiveFactors.push({ label: 'Métier proche de votre activité', points: 25 });
     } else if (opp.trade_id) {
-      positiveFactors.push({ label: 'Métier à vérifier avec votre profil', points: 15 });
+      // Unchanged in spirit (an identified lot is still worth something)
+      // but it must not read as evidence of fit: the previous label said
+      // "à vérifier" while silently contributing the same points whether
+      // the sector was related or not.
+      positiveFactors.push({ label: 'Lot identifié, compatibilité métier non confirmée', points: 8 });
     }
 
     // Location / working radius match (Haversine, same approach as
@@ -238,7 +333,13 @@ export const computeMatchScore = async (
   // (no description, no deadline, no trade, no location) - not expected to
   // fire often now that deadline/trade_name are scored above, since those
   // two are populated on nearly every ingested listing.
-  score = Math.max(0, Math.min(100, score || (isPublic ? 60 : 40)));
+  // C04: the fallback floor (60 for public) sat above the non-personalized
+  // ceiling, so a listing with none of the factors above jumped straight
+  // back to "Pertinent" - undoing the cap for exactly the emptiest listings.
+  // Floored within the band that applies to this branch.
+  const scoreCeiling = company ? 100 : MAX_NON_PERSONALIZED_SCORE;
+  const scoreFloor = score || (company ? 40 : Math.min(isPublic ? 45 : 30, MAX_NON_PERSONALIZED_SCORE));
+  score = Math.max(0, Math.min(scoreCeiling, scoreFloor));
 
   // Now that score is final: personalized case gets the tiered
   // "correspond fortement/bien/..." note: the generic/anonymous case above
