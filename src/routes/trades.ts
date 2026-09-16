@@ -4,13 +4,30 @@ import { logger } from '../utils/logger';
 
 const router = Router();
 
-// GET /api/trades - list all trades (for filter dropdowns)
+// GET /api/trades - list all trades (for filter dropdowns, and the
+// "Secteurs" homepage/page cards - see below for why that matters).
+//
+// A04/Q04 (contre-audit 15 Sep): the homepage and /secteurs page were
+// showing 16 hand-written marketing "sector families" (mockData.ts:
+// "Travaux & construction", "Énergie & environnement"...) instead of the
+// real métiers the classification/search/match-score already use
+// everywhere else in this codebase. N02's own fix comment on the sector
+// cards already flagged this mismatch explicitly ("these 16 marketing
+// sectors don't map 1:1 onto the real 15-trade taxonomy") and worked around
+// it with a free-text search rather than a real filter - which is the
+// generic-tabs-instead-of-concrete-métiers gap the audit is pointing at.
+// Adding the count here (rather than a second round trip) is what lets the
+// frontend show a real "X opportunités" badge per trade instead of another
+// hand-typed number.
 router.get('/', async (req: Request, res: Response) => {
   try {
     const result = await db.query(
-      `SELECT t.id, t.name, t.slug, t.description, c.code as cpv_code
+      `SELECT t.id, t.name, t.slug, t.description, c.code as cpv_code,
+              COUNT(o.id) FILTER (WHERE o.deleted_at IS NULL AND o.status != 'merged')::int AS opportunity_count
        FROM trades t
        LEFT JOIN cpv_codes c ON t.cpv_code_id = c.id
+       LEFT JOIN opportunities o ON o.trade_id = t.id
+       GROUP BY t.id, t.name, t.slug, t.description, c.code
        ORDER BY t.name ASC`
     );
     res.json(result.rows);
