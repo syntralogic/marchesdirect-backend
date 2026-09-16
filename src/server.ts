@@ -105,6 +105,22 @@ const authLimiter = rateLimit({
   skipSuccessfulRequests: true,
 });
 
+// FIX: password-reset/request and magic-link were put under authLimiter
+// below, but both always return 200/{success:true} even for a non-existent
+// email (correct, deliberate email-enumeration protection - see
+// requestPasswordReset/requestMagicLink in authService.ts) - there is no
+// "failed attempt" for either endpoint the way a wrong password is a
+// failed login. authLimiter's skipSuccessfulRequests: true means a 200
+// never counts against the limit, so those two were effectively
+// unlimited despite being "rate-limited" - the opposite of what putting
+// them under authLimiter was for (spam/abuse: unlimited real emails sent
+// to any address someone types in). Every call has to count here, success
+// included, so this is its own limiter rather than reusing authLimiter.
+const emailSendLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+});
+
 app.use('/api/', limiter);
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
@@ -123,10 +139,12 @@ app.use('/api/auth/mfa/verify-login', authLimiter);
 app.use('/api/auth/mfa/confirm', authLimiter);
 // password-reset/request and magic-link don't guess a secret, but each
 // call sends a real email to whatever address is given - unlimited calls
-// is a spam/abuse vector (and a mild email-enumeration timing one) even
-// though skipSuccessfulRequests doesn't apply the same way here.
-app.use('/api/auth/password-reset/request', authLimiter);
-app.use('/api/auth/magic-link', authLimiter);
+// is a spam/abuse vector. Both always return 200 (enumeration protection -
+// see the FIX note above), so this has to be emailSendLimiter, not
+// authLimiter: authLimiter's skipSuccessfulRequests would exempt every
+// single one of these calls.
+app.use('/api/auth/password-reset/request', emailSendLimiter);
+app.use('/api/auth/magic-link', emailSendLimiter);
 
 // Logging
 app.use(morgan('combined', { stream: { write: msg => logger.info(msg.trim()) } }));
