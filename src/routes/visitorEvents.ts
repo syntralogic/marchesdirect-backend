@@ -45,4 +45,30 @@ router.post(
   }
 );
 
+// C06 (contre-audit 15 Sep): the fiche's "X entreprises ont consulté cette
+// annonce aujourd'hui" was a seeded-random number labelled "Exemple
+// illustratif - compteur à vérifier" - client's ask was real data or
+// removing the claim entirely. Real per-fiche view events already exist
+// (POST above, event_type='view_opportunity', event_data.opportunityId) -
+// this counts real distinct visitor sessions instead of inventing one.
+// 24h rolling window rather than calendar-day, to sidestep server/visitor
+// timezone mismatches for a "today" claim.
+router.get('/consultations/:opportunityId', async (req: Request, res: Response) => {
+  try {
+    const { opportunityId } = req.params;
+    const result = await db.query(
+      `SELECT COUNT(DISTINCT session_id)::int AS count
+       FROM visitor_events
+       WHERE event_type = 'view_opportunity'
+         AND event_data->>'opportunityId' = $1
+         AND created_at >= NOW() - INTERVAL '24 hours'`,
+      [opportunityId]
+    );
+    res.json({ count: result.rows[0]?.count || 0 });
+  } catch (err: any) {
+    logger.error('Consultations count error:', err);
+    res.status(500).json({ error: 'Failed to fetch consultations count' });
+  }
+});
+
 export default router;
