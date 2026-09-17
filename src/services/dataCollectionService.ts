@@ -10,7 +10,7 @@ import { deduplicateOpportunities } from './deduplicationService';
 import { v4 as uuid } from 'uuid';
 import { regionForDepartmentCode, normalizeDepartmentCode, normalizeRegionName } from '../utils/departmentRegion';
 import { buildOfficialUrl } from '../utils/officialUrl';
-import { decodeHtmlEntities } from '../utils/textSanitize';
+import { decodeHtmlEntities, truncateForColumn } from '../utils/textSanitize';
 
 // v2.1 caps each request at 100 records - a real collection run needs to
 // page through `offset` to get anywhere near the "several thousand, even
@@ -912,18 +912,23 @@ const insertOpportunity = async (sourceId: number, data: any) => {
       data.publication_date || new Date(),
       data.deadline,
       data.estimated_value,
-      data.location_city,
+      // truncateForColumn: location_city/location_region are VARCHAR(255) but
+      // can be fed from a buyer/institution name (VARCHAR(1000)) as a
+      // fallback - see normalizeBoampRecord's location_city comment. An
+      // oversized value used to fail this whole INSERT (see
+      // src/utils/textSanitize.ts for the full story).
+      truncateForColumn(data.location_city, 255),
       // Centralized here too (not just in normalizeBoampRecord) so PLACE/TED,
       // which pass a region string straight through without their own
       // normalization pass, get the same old-name/accent handling. Falls
       // back to the raw value only if normalizeRegionName doesn't recognize
       // it, since a source-specific string PLACE (undocumented shape) sends
       // is still better shown as-is than dropped to null outright.
-      normalizeRegionName(data.location_region || data.region) || data.location_region || data.region || null,
-      data.location_department || null,
+      truncateForColumn(normalizeRegionName(data.location_region || data.region) || data.location_region || data.region || null, 255),
+      truncateForColumn(data.location_department || null, 100),
       // PLACE/TED feeds don't reliably expose a distinct buyer field the
       // way BOAMP's `nomacheteur` does - null there rather than a guess.
-      data.buyer_name || data.organism || null,
+      truncateForColumn(data.buyer_name || data.organism || null, 1000),
       JSON.stringify(data.raw || data), // raw_data - keep original source payload for audit
       data.official_url || null,
     ]
@@ -993,9 +998,13 @@ async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: stri
         data.publication_date || new Date(),
         data.deadline,
         data.estimated_value,
-        data.location_city,
-        data.location_region || null,
-        data.buyer_name || null,
+        // See truncateForColumn's comment in utils/textSanitize.ts - this is
+        // a multi-row INSERT (BULK_UPSERT_CHUNK rows per statement), so one
+        // oversized value here used to fail the entire chunk, not just its
+        // own row.
+        truncateForColumn(data.location_city, 255),
+        truncateForColumn(data.location_region || null, 255),
+        truncateForColumn(data.buyer_name || null, 1000),
         opportunityTypeId,
         JSON.stringify(data.raw || data),
         'not_analyzed',

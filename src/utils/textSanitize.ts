@@ -42,3 +42,23 @@ export const decodeHtmlEntities = (text: string | null | undefined): string | nu
     return NAMED_ENTITIES[ref] ?? match;
   });
 };
+
+// A single oversized field (e.g. a BOAMP `location_city` falling back to a
+// long buyer/institution name - "Communauté de Communes du Pays de la
+// Vallée de ... - Service de la Commande Publique" easily clears 255
+// chars) was throwing "value too long for type character varying(255)" on
+// the INSERT - and since opportunities are inserted one row per statement
+// here, that error killed the ENTIRE notice, not just the long field, so a
+// real, legitimate public-procurement opportunity silently never made it
+// onto the site. Truncating defensively at the DB boundary means a messy
+// source value shortens instead of discarding the whole opportunity - used
+// wherever a VARCHAR-limited column gets a value from source data that
+// isn't already guaranteed to fit (see insertOpportunity/
+// bulkUpsertOpportunities in dataCollectionService.ts).
+export const truncateForColumn = (
+  value: string | null | undefined,
+  maxLen: number
+): string | null | undefined => {
+  if (!value || typeof value !== 'string') return value;
+  return value.length > maxLen ? value.slice(0, maxLen) : value;
+};
