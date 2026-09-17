@@ -119,7 +119,16 @@ export const syncLeadToCrm = async (leadId: string): Promise<void> => {
     );
     logger.info(`[CRM] Lead ${leadId} synced to ${system} as contact ${contactId}`);
   } catch (err: any) {
-    logger.error(`[CRM] Sync failed for lead ${leadId}:`, err.message || err);
+    // Was passing err.message (a plain string) as the second arg here -
+    // logger.ts's whole Error-sanitizing pipeline (toSafeMeta, see the
+    // comment block at the top of that file) only kicks in for an actual
+    // Error object; a bare string in that slot doesn't get merged into the
+    // logged output the same way, so this line has been printing
+    // "[CRM] Sync failed for lead <id>:" with nothing after it - exactly
+    // the empty-looking log lines seen on Render. Every other catch block
+    // in this codebase logs the raw `err`, not `err.message`; matching
+    // that convention here is what actually gets the reason logged.
+    logger.error(`[CRM] Sync failed for lead ${leadId}:`, err);
     try {
       await db.query(
         `UPDATE crm_leads SET crm_sync_status = 'failed', crm_last_sync = NOW() WHERE id = $1`,
