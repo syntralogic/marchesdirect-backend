@@ -923,6 +923,11 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // "01. Identification"/"02. Présentation" cards): companies had no free-text
   // bio field - structured fields only (industry_sector, employee_count etc).
   await step(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS description TEXT`);
+  // Client's 12 Sep "Mon entreprise" card spec: an "Interlocuteur" field
+  // (contact person name). Column added to schema.sql but never mirrored
+  // here, so it never existed on an already-provisioned DB - every save of
+  // that field via PUT /companies/me would 500 on production.
+  await step(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS contact_name VARCHAR(255)`);
 
   // dossier_requests: backs the "3. Dossier" reference screen's "Générer mon
   // dossier" button. Client's spec (11 Sep, dossier-demo message, step 3-4):
