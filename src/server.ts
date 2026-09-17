@@ -11,6 +11,8 @@ import { logger } from './utils/logger';
 import { errorHandler } from './middleware/errorHandler';
 import { drainActiveJobs } from './utils/jobTracker';
 import { authenticate, optionalAuth } from './middleware/auth';
+import { isVerificationRequired } from './services/phoneVerificationService';
+import { isSmsConfigured } from './services/smsService';
 
 // Load environment variables
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
@@ -332,6 +334,33 @@ const startServer = async () => {
       logger.info(`🚀 Server running on http://localhost:${PORT}`);
       logger.info(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
       logger.info(`🎨 Frontend URL: ${process.env.FRONTEND_URL}`);
+
+      // C08 (contre-audit 15 Sep, correction partielle): the OTP gate on
+      // POST /siret/lead (phoneVerificationService.ts) is fully built, but
+      // isVerificationRequired() quietly defaults to *off* whenever no SMS
+      // provider is configured - by design, so staging/local dev isn't
+      // blocked. The failure mode the audit actually hit was this same
+      // silent default reaching a real deployment: nothing crashes, nothing
+      // errors, leads just go through unverified with no signal anywhere
+      // that the gate is bypassed. A code fix can't supply Twilio/SMS
+      // credentials this environment doesn't have - only surface the gap
+      // loudly enough that whoever deploys this notices it before a client
+      // audit does. Doesn't touch behavior; PHONE_VERIFICATION_REQUIRED
+      // still overrides in either direction exactly as before.
+      if (process.env.NODE_ENV === 'production' && !isVerificationRequired()) {
+        logger.warn(
+          '⚠️  Phone verification (C08) is NOT enforced in production: no SMS provider is configured ' +
+            '(TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN/TWILIO_FROM_NUMBER or SMS_WEBHOOK_URL) and ' +
+            'PHONE_VERIFICATION_REQUIRED is not set to "true". Leads are being accepted with unverified ' +
+            'phone numbers. Set SMS credentials (or PHONE_VERIFICATION_REQUIRED=true once a provider is ' +
+            'in place) to close this.'
+        );
+      } else if (process.env.NODE_ENV === 'production' && !isSmsConfigured() && process.env.PHONE_VERIFICATION_REQUIRED === 'true') {
+        logger.warn(
+          '⚠️  PHONE_VERIFICATION_REQUIRED=true but no SMS provider is configured - every phone ' +
+            'verification request will fail to send, blocking every visitor at the lead gate.'
+        );
+      }
     });
 
     // Graceful shutdown - was previously registered outside startServer()
