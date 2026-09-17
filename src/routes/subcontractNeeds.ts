@@ -81,13 +81,24 @@ router.get('/mine', authenticate, async (req: AuthRequest, res: Response) => {
 
 // GET /api/subcontract-needs/:id - detail (public) + a match-score breakdown
 // for the same "Analyse stratégique" style tab used on regular opportunities.
-router.get('/:id', optionalAuth, async (req: Request, res: Response) => {
+router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
   try {
     const result = await db.query('SELECT * FROM subcontract_needs WHERE id = $1', [req.params.id]);
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Need not found' });
     }
     const need = result.rows[0];
+    // Was returning any row unconditionally - a draft (or withdrawn/
+    // fulfilled) need, including the poster's raw contact_email/
+    // contact_phone, was readable by anyone who had or guessed the UUID,
+    // with no status or ownership check (the list route above, /mine,
+    // publish and delete all correctly gate on this; this one didn't).
+    // Same rule as everywhere else in this file: visible if published, or
+    // if the requester is the owning company.
+    const isOwner = !!req.user && req.user.companyId === need.company_id;
+    if (need.status !== 'published' && !isOwner) {
+      return res.status(404).json({ error: 'Need not found' });
+    }
     res.json({ ...need, matchScore: computeSubcontractNeedMatchScore(need) });
   } catch (err: any) {
     logger.error('Subcontract need detail error:', err);
