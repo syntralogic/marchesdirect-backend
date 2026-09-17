@@ -28,12 +28,26 @@ Vercel.
    | `REFRESH_TOKEN_SECRET` | a *different* random string |
    | `ENCRYPTION_KEY` | `openssl rand -hex 32` |
    | `FRONTEND_URL` | your deployed Vercel URL, e.g. `https://marchesdirect.vercel.app` |
+   | `ANTHROPIC_API_KEY` | your Anthropic API key (console.anthropic.com) |
 
    `PORT` is set automatically by Render — don't override it.
 
+   `ANTHROPIC_API_KEY` isn't optional the way the rest of this list is: it's
+   what `aiService.ts` uses for every opportunity's AI classification and,
+   critically, for the 3 description accordions on the opportunity detail
+   page (Présentation du marché / Conditions et points à vérifier /
+   Entreprises concernées - see `generateOpportunityAnalysisSections`).
+   Without it, every generation attempt gets a 401 from the Claude API and
+   silently fails - the fiche falls back to the old flat summary with no
+   accordions at all, which reads as "the feature is broken" rather than
+   "a required key is missing" since nothing in the UI surfaces the error.
+   Optionally set `LLM_MODEL` too if you want a model other than the
+   default (`claude-haiku-4-5-20251001`).
+
    Everything else in `.env.example` (AWS S3, Stripe, BOAMP/PLACE, SMTP,
-   Redis) is optional: the server boots fine without them, only the specific
-   feature that depends on a given key will error until it's set.
+   Redis) is genuinely optional: the server boots fine without them, only
+   the specific feature that depends on a given key will error until it's
+   set.
 
 5. Deploy, then sanity-check `https://<your-service>.onrender.com/health`
    returns `{"status":"ok"}`.
