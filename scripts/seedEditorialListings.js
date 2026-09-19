@@ -8,14 +8,14 @@
  * a real private listing - this script only ever leaves buyer_name NULL,
  * it never invents a company name to reveal later.
  *
- * Explicitly a curated batch for ongoing review, not a literal every-
- * city/every-scenario exhaustive catalog (that would be unbounded) - but
- * scaled up from the original 48-row first batch (16 scenarios × 3
- * cities) to 23 scenarios × 9 cities across ~65 cities spanning every
- * mainland region, once that first batch was validated against the
- * client's brief. Safe to re-run (idempotent on source_reference) and
- * safe to extend further (more cities, more scenarios per trade) the same
- * way this round extended the first one.
+ * Scaled progressively per client review: 48 rows (16 scenarios × 3
+ * cities) -> 207 rows (23 scenarios × 9 cities) -> now 24 scenarios ×
+ * every one of the 67 cities (~1,600 rows), covering every mainland
+ * region, per the client's explicit 19 Sep instruction for "une
+ * couverture géographique nationale... une couverture nationale
+ * importante". Safe to re-run (idempotent on source_reference) and safe
+ * to extend further (more cities, more scenarios per trade) the same way
+ * this round extended the previous one.
  *
  * Content design (client's specific SEO warning: no "same ad, city
  * swapped" duplication):
@@ -35,8 +35,10 @@
  *   - Budget and response-deadline-in-N-days are varied deterministically
  *     per row within the scenario's realistic range, not fixed constants.
  * This is templated, not hand-written-per-city prose - a genuine step up
- * from name-swapping, but the client should still review this first batch
- * before it's scaled to the full "couverture nationale" they described.
+ * from name-swapping, but the client should still review this batch -
+ * templated content at ~1,600 rows, not hand-written per city - and say
+ * whether more scenario variety per trade (currently 2 each, one trade
+ * had only 1 until this pass) is worth the extra writing effort next.
  *
  * Plain JS (not TypeScript) and its own Pool, same as
  * scripts/generateSyntheticListings.js and scripts/seed.js - on Render's
@@ -219,6 +221,18 @@ const SCENARIOS = [
       `Immeuble ancien à ${city} : appel à devis privé pour le remplacement des colonnes montantes, intervention en site occupé avec coordination des accès logements requise.`,
     ],
     valueRange: [15000, 55000], deadlineDaysRange: [20, 35],
+  },
+  {
+    tradeSlug: "plomberie", journey: "subcontracting",
+    titlePattern: (city) => [
+      `Sous-traitance sanitaire - programme neuf à ${city}`,
+      `${city} : lot plomberie/sanitaire à sous-traiter`,
+    ],
+    paragraphs: (city) => [
+      `Entreprise générale sur un programme de logements neufs à ${city} recherche un sous-traitant plombier pour la pose des réseaux sanitaires et le raccordement des équipements sur plusieurs lots livrés par tranches.`,
+      `Programme immobilier neuf à ${city} : lot plomberie/sanitaire (réseaux, raccordements) à sous-traiter sur plusieurs logements, livraison par tranches successives.`,
+    ],
+    valueRange: [10000, 35000], deadlineDaysRange: [10, 25],
   },
   // --- Isolation ---
   {
@@ -489,22 +503,45 @@ async function run() {
 
   // Spread: N cities per scenario, picked deterministically per scenario
   // (not the same N every time) so coverage spreads across the city list
-  // rather than clustering on Paris/Bordeaux for every trade. Bumped from
-  // an initial 3 (48-row first batch) to 9 once that batch was reviewed -
-  // with 23 scenarios now across the client's full trade list, 9 cities
-  // each spreads to several hundred rows across ~65 cities/all mainland
-  // regions, genuinely closer to the "couverture nationale importante"
-  // asked for while every row still traces back to one of the real,
-  // distinct paragraph variants above (never a bare find/replace of a
-  // single template - see the file header for why that matters for SEO).
-  const CITIES_PER_SCENARIO = 9;
+  // rather than clustering on Paris/Bordeaux for every trade. Step 7 below
+  // and CITIES.length=67 are coprime (67 is prime), so stepping through the
+  // list visits all 67 cities exactly once before it would ever repeat -
+  // CITIES_PER_SCENARIO can safely go all the way to CITIES.length with no
+  // collisions. Bumped 3 -> 9 -> now the full city list per client
+  // instruction (19 Sep: "on n'a pas encore de fichiers exploitables...
+  // il faudra assurer une couverture géographique nationale... l'objectif
+  // est une couverture nationale importante") - 24 scenarios x 67 cities
+  // covering every mainland region, each row still tracing back to one of
+  // the real, distinct title/paragraph variants above (never a bare
+  // find/replace of a single template - see the file header for why that
+  // matters for SEO).
+  const CITIES_PER_SCENARIO = CITIES.length;
 
   const rows = [];
+  // Two trades (espaces-verts, nettoyage) have 2 scenarios that are both
+  // "tender" (no subcontracting split for those) - same (tradeSlug,journey)
+  // pair. With CITIES_PER_SCENARIO now covering every city, both scenarios
+  // in each pair select the exact same 67 cities, which would make their
+  // `key`/source_reference identical city-for-city - the second scenario's
+  // rows would silently vanish via ON CONFLICT DO NOTHING below, with
+  // nothing logging that it happened. Suffix every repeat occurrence of a
+  // (tradeSlug,journey) pair with its 1-based index among that pair so keys
+  // stay unique; the *first* occurrence keeps its original, unsuffixed key
+  // so it still matches whatever's already live under that source_reference
+  // (this pattern existed at smaller CITIES_PER_SCENARIO too, just as a
+  // partial-overlap risk instead of a guaranteed one - worth having this
+  // safety net regardless of the current constant).
+  const scenarioOccurrence = new Map();
   for (const scenario of SCENARIOS) {
+    const pairKey = `${scenario.tradeSlug}-${scenario.journey}`;
+    const occurrence = (scenarioOccurrence.get(pairKey) || 0) + 1;
+    scenarioOccurrence.set(pairKey, occurrence);
+    const scenarioSuffix = occurrence > 1 ? `-v${occurrence}` : '';
+
     const offset = hash(scenario.tradeSlug + scenario.journey + scenario.titlePattern("x")[0]) % CITIES.length;
     for (let i = 0; i < CITIES_PER_SCENARIO; i++) {
       const city = CITIES[(offset + i * 7) % CITIES.length]; // step 7: spreads picks instead of walking sequentially
-      const key = `${scenario.tradeSlug}-${scenario.journey}-${slugify(city.name)}`;
+      const key = `${scenario.tradeSlug}-${scenario.journey}${scenarioSuffix}-${slugify(city.name)}`;
       const h = hash(key);
       // Title variant picked from its own hash (salted differently from h),
       // deliberately decorrelated from the paragraph variant below - so a
