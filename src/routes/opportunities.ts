@@ -347,7 +347,21 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         for (const _w of qWords) {
           const nameIdx = idx++;
           const matchedIdx = idx++;
-          tradeConds.push(`(t.name ILIKE $${nameIdx} OR o.ai_matched_trades::text ILIKE $${matchedIdx})`);
+          // BUG (found 19 Sep, client report "har search mein kam/koi result
+          // nahi hota"): this compared the DB's accented trade name/matched-
+          // trades text (e.g. "Électricité", "Étanchéité") straight against
+          // an un-unaccented typed pattern - 'Électricité' ILIKE
+          // '%electricite%' is FALSE in Postgres, ILIKE only folds case, not
+          // accents. Since the whole point of this fallback (see the q
+          // filter's comment above) is to let a profession typed without
+          // any special characters ("electricien", "peintre") reach an
+          // AI-classified opportunity even when the raw notice text never
+          // says that word, an unaccented, keyboard-typed search silently
+          // failed for almost every accented trade name in the taxonomy -
+          // most of it. unaccent() on both sides (the pattern can carry
+          // accents too, e.g. a copy-pasted "électricité") makes the match
+          // accent-insensitive like the rest of the q filter already is.
+          tradeConds.push(`(unaccent(t.name) ILIKE unaccent($${nameIdx}) OR unaccent(o.ai_matched_trades::text) ILIKE unaccent($${matchedIdx}))`);
         }
         conditions.push(
           `(to_tsvector('french', unaccent(COALESCE(o.title, '') || ' ' || COALESCE(o.description, ''))) @@ to_tsquery('french', unaccent($${tsIdx}))
