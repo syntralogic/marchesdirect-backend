@@ -238,7 +238,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     // chahiye" ask was about not hiding cancelled/expired/awarded - not
     // about undoing deduplication. Without this, merged duplicates that
     // were already fixed once (see dedup commit) silently reappear here.
-    const conditions: string[] = ["o.deleted_at IS NULL", "o.status != 'merged'"];
+    const conditions: string[] = ["o.deleted_at IS NULL", "COALESCE(o.status, '') != 'merged'"];
     const params: any[] = [];
     let idx = 1;
     // Captured when the q filter below builds its tsvector/tsquery match,
@@ -334,12 +334,37 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       // matched-trades fallback so it can't reintroduce the same
       // broadening through that path instead.
       const FR_STOPWORDS = new Set(['de', 'du', 'des', 'la', 'le', 'les', 'et', 'en', 'au', 'aux', 'pour', 'avec', 'un', 'une', 'sur', 'dans', 'd', 'l']);
+      // Apostrophes/typographic quotes used to be deleted outright by the
+      // sanitizer below, gluing "l'eau" into the single non-word "leau"
+      // (matches nothing). Treat them as word separators instead.
+      // Leading/trailing hyphens are stripped and hyphen-only tokens dropped:
+      // a bare "-" reaching to_tsquery is a syntax error -> HTTP 500 -> the
+      // page showed no results at all.
+      const foldAccents = (v: string) => v.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
       const qWordsRaw = q
+        .replace(/['\u2019`]/g, ' ')
         .split(/\s+/)
-        .map(w => w.replace(/[^\p{L}\p{N}-]/gu, '').trim())
+        .map(w => w.replace(/[^\p{L}\p{N}-]/gu, '').replace(/^-+|-+$/g, '').trim())
         .filter(Boolean);
       const qWordsMeaningful = qWordsRaw.filter(w => !FR_STOPWORDS.has(w.toLowerCase()));
       const qWords = qWordsMeaningful.length > 0 ? qWordsMeaningful : qWordsRaw;
+      // A profession typed the way people say it ("peintre", "electricien",
+      // "plombier", "carreleur") never shares a stem with the trade/notice
+      // wording ("Peinture", "Electricite", "Plomberie", "Carrelage"): French
+      // stemming keeps peintre->peintr but peinture->peintur, so the exact
+      // word matched only the few notices that literally contain it. Each
+      // word therefore also gets a shorter stem (agent suffix removed, at
+      // least 4 letters kept) that is OR'd with the original word - a fiche
+      // matches a word if it matches either form, while different words are
+      // still AND'd with each other as before.
+      const AGENT_SUFFIXES = ['ienne', 'ien', 'iere', 'ier', 'euse', 'eur', 'iste', 're'];
+      const stemOf = (w: string): string | null => {
+        const f = foldAccents(w);
+        for (const suf of AGENT_SUFFIXES) {
+          if (f.endsWith(suf) && f.length - suf.length >= 4) return f.slice(0, f.length - suf.length);
+        }
+        return null;
+      };
       if (qWords.length > 0) {
         const tsIdx = idx++;
         tsRankParamIdx = tsIdx;
@@ -348,30 +373,32 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
           const nameIdx = idx++;
           const matchedIdx = idx++;
           // BUG (found 19 Sep, client report "har search mein kam/koi result
-          // nahi hota"): this compared the DB's accented trade name/matched-
-          // trades text (e.g. "Électricité", "Étanchéité") straight against
-          // an un-unaccented typed pattern - 'Électricité' ILIKE
-          // '%electricite%' is FALSE in Postgres, ILIKE only folds case, not
-          // accents. Since the whole point of this fallback (see the q
-          // filter's comment above) is to let a profession typed without
-          // any special characters ("electricien", "peintre") reach an
-          // AI-classified opportunity even when the raw notice text never
-          // says that word, an unaccented, keyboard-typed search silently
-          // failed for almost every accented trade name in the taxonomy -
-          // most of it. unaccent() on both sides (the pattern can carry
-          // accents too, e.g. a copy-pasted "électricité") makes the match
-          // accent-insensitive like the rest of the q filter already is.
-          tradeConds.push(`(unaccent(t.name) ILIKE unaccent($${nameIdx}) OR unaccent(o.ai_matched_trades::text) ILIKE unaccent($${matchedIdx}))`);
+          // nahi hota"): the DB's accented trade name / matched-trades text
+          // ("Electricite" with accent) was compared straight against an
+          // unaccented typed pattern - ILIKE folds case, not accents.
+          // unaccent() on the column side + pre-folded patterns on the
+          // parameter side make the match accent-insensitive.
+          tradeConds.push(`(unaccent(t.name) ILIKE ANY($${nameIdx}::text[]) OR unaccent(o.ai_matched_trades::text) ILIKE ANY($${matchedIdx}::text[]))`);
         }
         conditions.push(
           `(to_tsvector('french', unaccent(COALESCE(o.title, '') || ' ' || COALESCE(o.description, ''))) @@ to_tsquery('french', unaccent($${tsIdx}))
             OR (${tradeConds.join(' AND ')}))`
         );
         tradeMatchExpr = tradeConds.join(' AND ');
-        params.push(qWords.map(w => `${w}:*`).join(' & '));
+        params.push(
+          qWords
+            .map(w => {
+              const stem = stemOf(w);
+              return stem ? `(${w}:* | ${stem}:*)` : `${w}:*`;
+            })
+            .join(' & ')
+        );
         for (const w of qWords) {
-          params.push(`%${w}%`);
-          params.push(`%${w}%`);
+          const patterns = [`%${foldAccents(w)}%`];
+          const stem = stemOf(w);
+          if (stem) patterns.push(`%${stem}%`);
+          params.push(patterns);
+          params.push(patterns);
         }
       }
     }
@@ -410,7 +437,11 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     if (city) {
       const cities = city.split(',').map(c => c.trim()).filter(Boolean);
       if (cities.length > 0) {
-        conditions.push(`o.location_city ILIKE ANY($${idx++}::text[])`);
+        // BOAMP/DECP store city names inconsistently ("BORDEAUX",
+        // "Angouleme", "Angoulême") - ILIKE folds case but not accents, so a
+        // city picked with its accent missed unaccented rows and vice versa.
+        // Same unaccent() treatment the region filter already has.
+        conditions.push(`unaccent(o.location_city) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p))`);
         params.push(cities.map(c => `%${c}%`));
       }
     }
