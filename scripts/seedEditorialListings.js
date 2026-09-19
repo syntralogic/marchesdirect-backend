@@ -21,11 +21,17 @@
  * swapped" duplication):
  *   - Each trade has 2-3 distinct SCENARIOS (a real different kind of job,
  *     not a reworded synonym of the same one) with their own title
- *     pattern, description paragraph, budget range and typical timeline.
- *   - Each (trade, scenario, city) combination additionally picks from 2
- *     phrasing variants (deterministically, by hashing the combination) so
- *     even the same scenario in two different cities isn't the same
- *     sentence with one word changed.
+ *     patterns, description paragraphs, budget range and typical timeline.
+ *   - Each (trade, scenario, city) combination independently picks from 2
+ *     title phrasings AND 2 description phrasings (deterministically, by
+ *     hashing the combination, with the two picks decorrelated from each
+ *     other) - up to 4 distinct title/paragraph combinations per scenario,
+ *     not just the paragraph varying while every page for that scenario
+ *     shares one identical <title>. Fixed until 19 Sep: the title itself
+ *     was a single pattern with only the city name substituted, which is
+ *     exactly the "same ad, city swapped" pattern this section warns
+ *     against - a duplicate-<title>-tag pattern search engines flag
+ *     specifically, arguably a bigger SEO problem than duplicate body text.
  *   - Budget and response-deadline-in-N-days are varied deterministically
  *     per row within the scenario's realistic range, not fixed constants.
  * This is templated, not hand-written-per-city prose - a genuine step up
@@ -154,7 +160,10 @@ const SCENARIOS = [
   // --- Climatisation / chauffage (trade: cvc) ---
   {
     tradeSlug: "cvc", journey: "tender",
-    titlePattern: (city) => `Installation climatisation multi-split - copropriété à ${city}`,
+    titlePattern: (city) => [
+      `Installation climatisation multi-split - copropriété à ${city}`,
+      `${city} : devis climatisation réversible pour une copropriété`,
+    ],
     paragraphs: (city) => [
       `Copropriété privée à ${city} recherchant une entreprise pour l'installation de climatisation réversible multi-split sur l'ensemble des parties communes et un lot de logements pilotes avant généralisation. Le syndic souhaite comparer plusieurs devis avant lancement.`,
       `Consultation privée lancée par une copropriété de ${city} pour équiper en climatisation réversible multi-split un premier lot de logements et les parties communes, avant extension au reste de l'immeuble selon le retour d'expérience.`,
@@ -163,7 +172,10 @@ const SCENARIOS = [
   },
   {
     tradeSlug: "cvc", journey: "subcontracting",
-    titlePattern: (city) => `Sous-traitance chaufferie collective - résidence ${city}`,
+    titlePattern: (city) => [
+      `Sous-traitance chaufferie collective - résidence ${city}`,
+      `${city} : lot chaufferie collective à sous-traiter`,
+    ],
     paragraphs: (city) => [
       `Entreprise générale intervenant sur la rénovation d'une chaufferie collective à ${city} recherche un sous-traitant CVC qualifié pour la dépose de l'ancienne installation et la pose d'une chaudière collective à condensation.`,
       `Lot chauffage à sous-traiter dans le cadre d'une rénovation de résidence à ${city} : remplacement d'une chaufferie collective par une chaudière à condensation, dépose comprise. Recherche d'un sous-traitant disponible sous délai court.`,
@@ -173,7 +185,10 @@ const SCENARIOS = [
   // --- Électricité ---
   {
     tradeSlug: "electricite", journey: "tender",
-    titlePattern: (city) => `Mise aux normes électriques - immeuble tertiaire à ${city}`,
+    titlePattern: (city) => [
+      `Mise aux normes électriques - immeuble tertiaire à ${city}`,
+      `${city} : consultation privée pour une mise en conformité électrique`,
+    ],
     paragraphs: (city) => [
       `Propriétaire d'un immeuble de bureaux à ${city} lance une consultation privée pour la mise aux normes du tableau électrique général et le remplacement du câblage vétuste sur trois étages.`,
       `Immeuble tertiaire à ${city} : consultation restreinte pour une mise en conformité électrique complète (tableau général, câblage) sur plusieurs niveaux, hors intervention sur les parties déjà rénovées.`,
@@ -182,7 +197,10 @@ const SCENARIOS = [
   },
   {
     tradeSlug: "electricite", journey: "subcontracting",
-    titlePattern: (city) => `Sous-traitance IRVE - parking résidentiel ${city}`,
+    titlePattern: (city) => [
+      `Sous-traitance IRVE - parking résidentiel ${city}`,
+      `${city} : lot bornes de recharge à sous-traiter`,
+    ],
     paragraphs: (city) => [
       `Entreprise générale recherche un sous-traitant électricien qualifié IRVE pour l'installation de bornes de recharge sur un parking résidentiel à ${city}, raccordement compris.`,
       `Chantier de résidence à ${city} : lot bornes de recharge véhicules électriques (IRVE) à sous-traiter, raccordement au tableau général et mise en service comprises.`,
@@ -192,7 +210,10 @@ const SCENARIOS = [
   // --- Plomberie ---
   {
     tradeSlug: "plomberie", journey: "tender",
-    titlePattern: (city) => `Rénovation colonnes montantes - immeuble ancien à ${city}`,
+    titlePattern: (city) => [
+      `Rénovation colonnes montantes - immeuble ancien à ${city}`,
+      `${city} : appel à devis pour le remplacement de colonnes montantes`,
+    ],
     paragraphs: (city) => [
       `Syndic de copropriété à ${city} lance une consultation pour la rénovation des colonnes montantes eau froide/eau chaude d'un immeuble ancien, travaux à réaliser en site occupé.`,
       `Immeuble ancien à ${city} : appel à devis privé pour le remplacement des colonnes montantes, intervention en site occupé avec coordination des accès logements requise.`,
@@ -202,7 +223,10 @@ const SCENARIOS = [
   // --- Isolation ---
   {
     tradeSlug: "isolation", journey: "tender",
-    titlePattern: (city) => `Isolation thermique par l'extérieur - résidence à ${city}`,
+    titlePattern: (city) => [
+      `Isolation thermique par l'extérieur - résidence à ${city}`,
+      `${city} : consultation ITE dans le cadre d'une rénovation énergétique`,
+    ],
     paragraphs: (city) => [
       `Bailleur privé à ${city} recherche une entreprise pour l'isolation thermique par l'extérieur (ITE) d'une résidence, dans le cadre d'un programme de rénovation énergétique financé en partie par des aides.`,
       `Résidence privée à ${city} : consultation pour travaux d'isolation thermique par l'extérieur (façades), dans le cadre d'une rénovation énergétique globale du bâtiment.`,
@@ -211,7 +235,10 @@ const SCENARIOS = [
   },
   {
     tradeSlug: "isolation", journey: "subcontracting",
-    titlePattern: (city) => `Sous-traitance combles perdus - lotissement ${city}`,
+    titlePattern: (city) => [
+      `Sous-traitance combles perdus - lotissement ${city}`,
+      `${city} : lot isolation par soufflage à sous-traiter`,
+    ],
     paragraphs: (city) => [
       `Entreprise générale de construction recherche un sous-traitant pour l'isolation des combles perdus (soufflage) sur un lotissement de maisons individuelles à ${city}.`,
       `Lotissement en cours de construction à ${city} : lot isolation combles perdus par soufflage à sous-traiter sur plusieurs maisons livrées par phases.`,
@@ -221,7 +248,10 @@ const SCENARIOS = [
   // --- Menuiserie / fenêtres ---
   {
     tradeSlug: "menuiserie", journey: "tender",
-    titlePattern: (city) => `Remplacement menuiseries extérieures - copropriété à ${city}`,
+    titlePattern: (city) => [
+      `Remplacement menuiseries extérieures - copropriété à ${city}`,
+      `${city} : consultation privée pour un passage en double vitrage`,
+    ],
     paragraphs: (city) => [
       `Copropriété à ${city} lance une consultation privée pour le remplacement des fenêtres et portes-fenêtres en simple vitrage par du double vitrage, sur l'ensemble de la façade.`,
       `Consultation privée à ${city} pour le remplacement de menuiseries extérieures vétustes (fenêtres, portes-fenêtres) par du double vitrage, façade complète.`,
@@ -230,7 +260,10 @@ const SCENARIOS = [
   },
   {
     tradeSlug: "menuiserie", journey: "subcontracting",
-    titlePattern: (city) => `Sous-traitance pose de menuiseries - programme neuf ${city}`,
+    titlePattern: (city) => [
+      `Sous-traitance pose de menuiseries - programme neuf ${city}`,
+      `${city} : lot menuiseries extérieures à sous-traiter`,
+    ],
     paragraphs: (city) => [
       `Entreprise générale sur un programme de maisons individuelles à ${city} recherche un sous-traitant menuisier pour la pose de fenêtres et volets sur plusieurs lots livrés par tranches.`,
       `Programme de maisons neuves à ${city} : lot menuiseries extérieures (fenêtres, volets) à sous-traiter, pose sur plusieurs lots selon calendrier de livraison.`,
@@ -240,7 +273,10 @@ const SCENARIOS = [
   // --- Maçonnerie ---
   {
     tradeSlug: "maconnerie", journey: "tender",
-    titlePattern: (city) => `Reprise de fissures et façade - bâtiment privé à ${city}`,
+    titlePattern: (city) => [
+      `Reprise de fissures et façade - bâtiment privé à ${city}`,
+      `${city} : consultation maçonnerie suite à un diagnostic structurel`,
+    ],
     paragraphs: (city) => [
       `Propriétaire d'un bâtiment ancien à ${city} recherche une entreprise de maçonnerie pour la reprise de fissures structurelles et la réfection d'un pan de façade.`,
       `Bâtiment privé à ${city} : consultation pour travaux de maçonnerie (reprise de fissures, réfection de façade) suite à un diagnostic structurel.`,
@@ -249,7 +285,10 @@ const SCENARIOS = [
   },
   {
     tradeSlug: "maconnerie", journey: "subcontracting",
-    titlePattern: (city) => `Sous-traitance gros oeuvre - extension à ${city}`,
+    titlePattern: (city) => [
+      `Sous-traitance gros oeuvre - extension à ${city}`,
+      `${city} : lot fondations et élévation à sous-traiter`,
+    ],
     paragraphs: (city) => [
       `Entreprise générale recherche un sous-traitant maçon pour la réalisation du gros oeuvre d'une extension de maison individuelle à ${city} (fondations, élévation).`,
       `Chantier d'extension à ${city} : lot gros oeuvre (fondations, élévation des murs) à sous-traiter, dans le cadre d'un agrandissement de maison individuelle.`,
@@ -259,7 +298,10 @@ const SCENARIOS = [
   // --- Peinture ---
   {
     tradeSlug: "peinture", journey: "tender",
-    titlePattern: (city) => `Peinture intérieure - résidence de ${city}`,
+    titlePattern: (city) => [
+      `Peinture intérieure - résidence de ${city}`,
+      `${city} : consultation peinture pour des parties communes`,
+    ],
     paragraphs: (city) => [
       `Bailleur privé à ${city} recherche une entreprise de peinture pour la remise en état des parties communes (cages d'escalier, halls) d'une résidence de plusieurs logements.`,
       `Résidence à ${city} : consultation pour travaux de peinture intérieure des parties communes, incluant préparation des supports et finitions.`,
@@ -268,7 +310,10 @@ const SCENARIOS = [
   },
   {
     tradeSlug: "peinture", journey: "subcontracting",
-    titlePattern: (city) => `Sous-traitance peinture - programme neuf à ${city}`,
+    titlePattern: (city) => [
+      `Sous-traitance peinture - programme neuf à ${city}`,
+      `${city} : lot peinture/finitions à sous-traiter`,
+    ],
     paragraphs: (city) => [
       `Entreprise générale sur un programme de logements neufs à ${city} recherche un sous-traitant peintre pour les finitions intérieures sur plusieurs lots livrés par tranches.`,
       `Programme immobilier neuf à ${city} : lot peinture/finitions à sous-traiter sur plusieurs logements, livraison par tranches successives.`,
@@ -278,7 +323,10 @@ const SCENARIOS = [
   // --- Couverture ---
   {
     tradeSlug: "couverture", journey: "tender",
-    titlePattern: (city) => `Réfection de toiture - bâtiment privé à ${city}`,
+    titlePattern: (city) => [
+      `Réfection de toiture - bâtiment privé à ${city}`,
+      `${city} : consultation privée pour une toiture endommagée`,
+    ],
     paragraphs: (city) => [
       `Propriétaire privé à ${city} recherche une entreprise de couverture pour la réfection complète d'une toiture endommagée, avec reprise de la zinguerie.`,
       `Bâtiment privé à ${city} : consultation pour réfection de toiture (couverture et zinguerie) suite à un constat de dégradation.`,
@@ -287,7 +335,10 @@ const SCENARIOS = [
   },
   {
     tradeSlug: "couverture", journey: "subcontracting",
-    titlePattern: (city) => `Sous-traitance charpente-couverture - maisons neuves ${city}`,
+    titlePattern: (city) => [
+      `Sous-traitance charpente-couverture - maisons neuves ${city}`,
+      `${city} : lot charpente-couverture à sous-traiter`,
+    ],
     paragraphs: (city) => [
       `Constructeur de maisons individuelles à ${city} recherche un sous-traitant charpentier-couvreur pour la pose de charpente et couverture sur un lot de plusieurs maisons.`,
       `Programme de maisons individuelles à ${city} : lot charpente-couverture à sous-traiter sur plusieurs constructions, livraison échelonnée.`,
@@ -297,7 +348,10 @@ const SCENARIOS = [
   // --- Rénovation générale (batiment-general) ---
   {
     tradeSlug: "batiment-general", journey: "tender",
-    titlePattern: (city) => `Rénovation complète de logements - ${city}`,
+    titlePattern: (city) => [
+      `Rénovation complète de logements - ${city}`,
+      `${city} : consultation tous corps d'état avant remise en location`,
+    ],
     paragraphs: (city) => [
       `Bailleur privé à ${city} lance une consultation pour la rénovation complète (tous corps d'état) d'un ensemble de logements avant relocation.`,
       `Ensemble de logements à ${city} : consultation privée tous corps d'état pour une rénovation complète avant remise en location.`,
@@ -306,7 +360,10 @@ const SCENARIOS = [
   },
   {
     tradeSlug: "batiment-general", journey: "subcontracting",
-    titlePattern: (city) => `Sous-traitance tous corps d'état - réhabilitation ${city}`,
+    titlePattern: (city) => [
+      `Sous-traitance tous corps d'état - réhabilitation ${city}`,
+      `${city} : plusieurs lots second oeuvre à sous-traiter`,
+    ],
     paragraphs: (city) => [
       `Entreprise générale pilotant une réhabilitation d'immeuble à ${city} recherche des sous-traitants tous corps d'état pour plusieurs lots (cloisons, second oeuvre, finitions).`,
       `Chantier de réhabilitation à ${city} : plusieurs lots second oeuvre et finitions à sous-traiter, dans le cadre d'une rénovation d'immeuble pilotée en entreprise générale.`,
@@ -316,7 +373,10 @@ const SCENARIOS = [
   // --- Espaces verts ---
   {
     tradeSlug: "espaces-verts", journey: "tender",
-    titlePattern: (city) => `Entretien espaces verts - résidence privée à ${city}`,
+    titlePattern: (city) => [
+      `Entretien espaces verts - résidence privée à ${city}`,
+      `${city} : marché annuel d'entretien paysager`,
+    ],
     paragraphs: (city) => [
       `Copropriété à ${city} recherche une entreprise de paysagisme pour un contrat annuel d'entretien des espaces verts (tonte, taille, entretien des massifs).`,
       `Résidence privée à ${city} : consultation pour un marché annuel d'entretien paysager des espaces verts communs.`,
@@ -325,7 +385,10 @@ const SCENARIOS = [
   },
   {
     tradeSlug: "espaces-verts", journey: "tender",
-    titlePattern: (city) => `Aménagement paysager - lotissement neuf à ${city}`,
+    titlePattern: (city) => [
+      `Aménagement paysager - lotissement neuf à ${city}`,
+      `${city} : consultation paysagère avant livraison d'un lotissement`,
+    ],
     paragraphs: (city) => [
       `Promoteur d'un lotissement neuf à ${city} recherche une entreprise de paysagisme pour l'aménagement des espaces verts communs (plantations, engazonnement) avant livraison.`,
       `Lotissement en fin de construction à ${city} : consultation pour l'aménagement paysager des espaces communs (plantations, engazonnement) avant remise aux acquéreurs.`,
@@ -335,7 +398,10 @@ const SCENARIOS = [
   // --- Nettoyage ---
   {
     tradeSlug: "nettoyage", journey: "tender",
-    titlePattern: (city) => `Contrat de nettoyage - immeuble de bureaux à ${city}`,
+    titlePattern: (city) => [
+      `Contrat de nettoyage - immeuble de bureaux à ${city}`,
+      `${city} : marché annuel de nettoyage de locaux tertiaires`,
+    ],
     paragraphs: (city) => [
       `Gestionnaire d'un immeuble de bureaux à ${city} recherche une société de nettoyage pour un contrat annuel d'entretien des parties communes et des bureaux.`,
       `Immeuble tertiaire à ${city} : consultation privée pour un marché annuel de nettoyage des locaux et parties communes.`,
@@ -344,7 +410,10 @@ const SCENARIOS = [
   },
   {
     tradeSlug: "nettoyage", journey: "tender",
-    titlePattern: (city) => `Nettoyage de fin de chantier - programme neuf à ${city}`,
+    titlePattern: (city) => [
+      `Nettoyage de fin de chantier - programme neuf à ${city}`,
+      `${city} : consultation nettoyage avant livraison de logements`,
+    ],
     paragraphs: (city) => [
       `Promoteur immobilier à ${city} recherche une société de nettoyage pour le nettoyage de fin de chantier d'un programme de logements neufs, avant remise aux acquéreurs.`,
       `Programme de logements neufs à ${city} : consultation pour le nettoyage de fin de chantier de l'ensemble des lots avant livraison.`,
@@ -354,7 +423,10 @@ const SCENARIOS = [
   // --- Maintenance ---
   {
     tradeSlug: "maintenance", journey: "tender",
-    titlePattern: (city) => `Contrat de maintenance multi-technique - résidence à ${city}`,
+    titlePattern: (city) => [
+      `Contrat de maintenance multi-technique - résidence à ${city}`,
+      `${city} : marché de maintenance annuel pour une résidence privée`,
+    ],
     paragraphs: (city) => [
       `Syndic à ${city} recherche un prestataire pour un contrat de maintenance multi-technique (ascenseurs, VMC, portails) sur une résidence privée.`,
       `Résidence privée à ${city} : consultation pour un marché de maintenance multi-technique annuel (équipements communs, VMC, portails automatiques).`,
@@ -363,7 +435,10 @@ const SCENARIOS = [
   },
   {
     tradeSlug: "maintenance", journey: "subcontracting",
-    titlePattern: (city) => `Sous-traitance maintenance VMC/désenfumage - tertiaire ${city}`,
+    titlePattern: (city) => [
+      `Sous-traitance maintenance VMC/désenfumage - tertiaire ${city}`,
+      `${city} : lot maintenance VMC/désenfumage à sous-traiter`,
+    ],
     paragraphs: (city) => [
       `Prestataire multi-technique en charge d'un immeuble de bureaux à ${city} recherche un sous-traitant spécialisé pour la maintenance des systèmes de VMC et de désenfumage.`,
       `Immeuble tertiaire à ${city} : lot maintenance VMC/désenfumage à sous-traiter dans le cadre d'un contrat multi-technique existant.`,
@@ -426,17 +501,24 @@ async function run() {
 
   const rows = [];
   for (const scenario of SCENARIOS) {
-    const offset = hash(scenario.tradeSlug + scenario.journey + scenario.titlePattern("x")) % CITIES.length;
+    const offset = hash(scenario.tradeSlug + scenario.journey + scenario.titlePattern("x")[0]) % CITIES.length;
     for (let i = 0; i < CITIES_PER_SCENARIO; i++) {
       const city = CITIES[(offset + i * 7) % CITIES.length]; // step 7: spreads picks instead of walking sequentially
       const key = `${scenario.tradeSlug}-${scenario.journey}-${slugify(city.name)}`;
       const h = hash(key);
+      // Title variant picked from its own hash (salted differently from h),
+      // deliberately decorrelated from the paragraph variant below - so a
+      // city doesn't always land on "title v1 + paragraph v1" together,
+      // which would still just be 2 fixed combinations repeated across the
+      // 9 cities. Independent selection gives up to 4 distinct
+      // title/paragraph combinations per scenario instead of 2.
+      const titleVariantIdx = hash(key + "-title") % 2;
       const variant = scenario.paragraphs(city.name)[h % 2];
       const [vMin, vMax] = scenario.valueRange;
       const value = vMin + (h % (vMax - vMin));
       const [dMin, dMax] = scenario.deadlineDaysRange;
       const deadlineDays = dMin + (h % (dMax - dMin));
-      const title = scenario.titlePattern(city.name);
+      const title = scenario.titlePattern(city.name)[titleVariantIdx];
 
       rows.push({
         sourceRef: `editorial-${key}`,
