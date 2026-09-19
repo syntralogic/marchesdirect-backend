@@ -1028,6 +1028,31 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // across sessions (the throttle has to survive someone clearing their
   // session id, otherwise it's not a throttle).
   await step(`CREATE INDEX IF NOT EXISTS phone_verifications_phone_sent ON phone_verifications(phone, last_sent_at)`);
+
+  // Client's brief (15 Sep, "Appels d'offres privés" / "Sous-traitance"):
+  // these two journeys have no real scraped source yet, so a first
+  // editorial catalog is being built (see scripts/seedEditorialListings.ts)
+  // to serve as an acquisition/SEO product while a real private-listings
+  // feed doesn't exist. Three of the client's target métiers aren't in the
+  // trades table at all yet (espaces verts, nettoyage, maintenance -
+  // schema.sql's seed list only covers construction trades).
+  await step(`
+    INSERT INTO trades (name, slug, description) VALUES
+    ('Espaces verts', 'espaces-verts', 'Landscaping and green-space maintenance'),
+    ('Nettoyage', 'nettoyage', 'Cleaning services (buildings, sites, common areas)'),
+    ('Maintenance', 'maintenance', 'Building maintenance and upkeep contracts')
+    ON CONFLICT (name) DO NOTHING
+  `);
+  // A dedicated source row for this content: it isn't a scraped connector
+  // (active=false, no endpoint), just an identity to attach editorial rows
+  // to so they behave like any other opportunity in search/matching/scoring
+  // and are trivially distinguishable from real BOAMP/DECP/Batiweb data.
+  await step(`
+    INSERT INTO data_sources (code, name, feed_type, active, legal_approval, description) VALUES
+    ('editorial_catalog', 'Catalogue éditorial interne', 'editorial', false, true,
+     'Annonces rédigées en interne (non scrapées) pour les rubriques Appels d''offres privés et Sous-traitance, en attendant un flux réel. Voir scripts/seedEditorialListings.ts.')
+    ON CONFLICT (code) DO NOTHING
+  `);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old
