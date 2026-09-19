@@ -689,6 +689,12 @@ export const collectBatiwebData = async (sourceId: number) => {
           // the article body afterwards, same as any other private-tender
           // source with unstructured source text.
           buyer_name: null,
+          // Batiweb is this app's one connector for private-sector tenders
+          // (BOAMP/PLACE/TED/DECP are all public-procurement only) - this
+          // field is what actually makes that distinction now that
+          // insertOpportunity reads it instead of hardcoding
+          // public_procurement for every source.
+          opportunity_type: 'tender',
           raw: item,
         };
 
@@ -901,7 +907,7 @@ const insertOpportunity = async (sourceId: number, data: any) => {
        estimated_value, location_city, location_region, location_department, buyer_name, opportunity_type_id, 
        raw_data, official_url, ai_classification_status)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-       (SELECT id FROM opportunity_types WHERE code = 'public_procurement'),
+       (SELECT id FROM opportunity_types WHERE code = $14),
        $12, $13, 'not_analyzed')
      RETURNING id`,
     [
@@ -931,6 +937,17 @@ const insertOpportunity = async (sourceId: number, data: any) => {
       truncateForColumn(data.buyer_name || data.organism || null, 1000),
       JSON.stringify(data.raw || data), // raw_data - keep original source payload for audit
       data.official_url || null,
+      // Client (message received while working the counter-audit list, re:
+      // "Opportunités" -> appels d'offres privés et sous-traitance quasi
+      // vides): this was hardcoded to 'public_procurement' for every single
+      // source, Batiweb included, even though Batiweb's own opportunity
+      // object already set `opportunity_type: 'public_procurement'` as a
+      // field that this query never read at all - so the "private tender"
+      // opportunity_types row was structurally guaranteed to have zero
+      // rows no matter how well Batiweb's scraper/feed worked. Now reads
+      // the source-provided type, defaulting to 'public_procurement' for
+      // BOAMP/PLACE/TED/DECP which don't set it explicitly.
+      data.opportunity_type || 'public_procurement',
     ]
   );
 
