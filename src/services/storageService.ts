@@ -78,12 +78,50 @@ const MAX_FILE_SIZE_BYTES = 15 * 1024 * 1024; // 15MB
 
 export class UploadValidationError extends Error {}
 
+// file.mimetype is exactly the Content-Type the client puts on the multipart
+// part - multer passes it straight through, unverified. Nothing stops a
+// caller uploading arbitrary bytes (an HTML file with a <script> tag, say)
+// while claiming "image/jpeg", which would then get stored and later served
+// back to another user (an admin reviewing company_documents, another
+// visitor's avatar) with that same attacker-chosen Content-Type - a stored
+// content-spoofing / potential stored-XSS-via-upload path. Real files of
+// each allowed type start with a fixed, well-documented byte signature;
+// checking that instead of trusting the header is the standard fix.
+function sniffSignature(buffer: Buffer | undefined): string | null {
+  if (!buffer || buffer.length === 0) return null;
+  if (buffer.length >= 5 && buffer.subarray(0, 5).toString('latin1') === '%PDF-') return 'application/pdf';
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString('latin1') === 'RIFF' &&
+    buffer.subarray(8, 12).toString('latin1') === 'WEBP'
+  ) return 'image/webp';
+  // Legacy .doc (OLE compound file) - can't distinguish from .xls/.ppt by
+  // signature alone (same container format), which is fine: we only ever
+  // compare this against the caller's own claimed mimetype, never trust it
+  // as proof of being specifically a Word file.
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]))) return 'application/msword';
+  // .docx (and any other Office Open XML / plain zip) - same caveat as
+  // above, a zip signature alone doesn't prove "specifically a .docx".
+  if (buffer.length >= 4 && buffer[0] === 0x50 && buffer[1] === 0x4b && (buffer[2] === 0x03 || buffer[2] === 0x05 || buffer[2] === 0x07)) {
+    return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  }
+  return null;
+}
+
 export function validateUpload(file: Express.Multer.File) {
   if (!ALLOWED_MIME_TYPES.has(file.mimetype)) {
     throw new UploadValidationError(`Type de fichier non autorisé : ${file.mimetype}. Formats acceptés : PDF, JPG, PNG, DOC, DOCX.`);
   }
   if (file.size > MAX_FILE_SIZE_BYTES) {
     throw new UploadValidationError('Fichier trop volumineux (15 Mo maximum).');
+  }
+  const detected = sniffSignature(file.buffer);
+  const claimedFamily = file.mimetype === 'application/msword' || file.mimetype.includes('wordprocessingml') ? 'doc' : file.mimetype;
+  const detectedFamily = detected === 'application/msword' || detected?.includes('wordprocessingml') ? 'doc' : detected;
+  if (!detected || detectedFamily !== claimedFamily) {
+    throw new UploadValidationError("Le contenu du fichier ne correspond pas au type de fichier annoncé. Formats acceptés : PDF, JPG, PNG, DOC, DOCX.");
   }
 }
 
@@ -96,6 +134,9 @@ export function validateAvatarUpload(file: Express.Multer.File) {
   }
   if (file.size > MAX_AVATAR_SIZE_BYTES) {
     throw new UploadValidationError('Image trop volumineuse (5 Mo maximum).');
+  }
+  if (sniffSignature(file.buffer) !== file.mimetype) {
+    throw new UploadValidationError("Le contenu du fichier ne correspond pas au type de fichier annoncé. Formats acceptés : JPG, PNG, WEBP.");
   }
 }
 
