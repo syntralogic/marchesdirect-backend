@@ -8,9 +8,14 @@
  * a real private listing - this script only ever leaves buyer_name NULL,
  * it never invents a company name to reveal later.
  *
- * Explicitly a FIRST BATCH for review, not the full national catalog the
- * client described - safe to re-run (idempotent on source_reference) and
- * safe to extend once the trade/scenario/city lists below are validated.
+ * Explicitly a curated batch for ongoing review, not a literal every-
+ * city/every-scenario exhaustive catalog (that would be unbounded) - but
+ * scaled up from the original 48-row first batch (16 scenarios × 3
+ * cities) to 23 scenarios × 9 cities across ~65 cities spanning every
+ * mainland region, once that first batch was validated against the
+ * client's brief. Safe to re-run (idempotent on source_reference) and
+ * safe to extend further (more cities, more scenarios per trade) the same
+ * way this round extended the first one.
  *
  * Content design (client's specific SEO warning: no "same ad, city
  * swapped" duplication):
@@ -76,30 +81,67 @@ const CITIES = [
   { name: "Bergerac", department: "24", region: "Nouvelle-Aquitaine" },
   { name: "Marmande", department: "47", region: "Nouvelle-Aquitaine" },
   { name: "La Rochelle", department: "17", region: "Nouvelle-Aquitaine" },
+  { name: "Poitiers", department: "86", region: "Nouvelle-Aquitaine" },
+  { name: "Limoges", department: "87", region: "Nouvelle-Aquitaine" },
+  { name: "Pau", department: "64", region: "Nouvelle-Aquitaine" },
+  { name: "Agen", department: "47", region: "Nouvelle-Aquitaine" },
   { name: "Strasbourg", department: "67", region: "Grand Est" },
   { name: "Metz", department: "57", region: "Grand Est" },
   { name: "Reims", department: "51", region: "Grand Est" },
+  { name: "Nancy", department: "54", region: "Grand Est" },
+  { name: "Mulhouse", department: "68", region: "Grand Est" },
+  { name: "Troyes", department: "10", region: "Grand Est" },
   { name: "Paris", department: "75", region: "Île-de-France" },
   { name: "Versailles", department: "78", region: "Île-de-France" },
+  { name: "Boulogne-Billancourt", department: "92", region: "Île-de-France" },
+  { name: "Créteil", department: "94", region: "Île-de-France" },
+  { name: "Saint-Denis", department: "93", region: "Île-de-France" },
+  { name: "Évry-Courcouronnes", department: "91", region: "Île-de-France" },
   { name: "Lyon", department: "69", region: "Auvergne-Rhône-Alpes" },
   { name: "Grenoble", department: "38", region: "Auvergne-Rhône-Alpes" },
   { name: "Clermont-Ferrand", department: "63", region: "Auvergne-Rhône-Alpes" },
+  { name: "Saint-Étienne", department: "42", region: "Auvergne-Rhône-Alpes" },
+  { name: "Annecy", department: "74", region: "Auvergne-Rhône-Alpes" },
+  { name: "Valence", department: "26", region: "Auvergne-Rhône-Alpes" },
+  { name: "Chambéry", department: "73", region: "Auvergne-Rhône-Alpes" },
   { name: "Marseille", department: "13", region: "Provence-Alpes-Côte d'Azur" },
   { name: "Toulon", department: "83", region: "Provence-Alpes-Côte d'Azur" },
   { name: "Nice", department: "06", region: "Provence-Alpes-Côte d'Azur" },
+  { name: "Aix-en-Provence", department: "13", region: "Provence-Alpes-Côte d'Azur" },
+  { name: "Avignon", department: "84", region: "Provence-Alpes-Côte d'Azur" },
+  { name: "Cannes", department: "06", region: "Provence-Alpes-Côte d'Azur" },
   { name: "Toulouse", department: "31", region: "Occitanie" },
   { name: "Montpellier", department: "34", region: "Occitanie" },
   { name: "Nîmes", department: "30", region: "Occitanie" },
+  { name: "Perpignan", department: "66", region: "Occitanie" },
+  { name: "Béziers", department: "34", region: "Occitanie" },
+  { name: "Albi", department: "81", region: "Occitanie" },
   { name: "Nantes", department: "44", region: "Pays de la Loire" },
   { name: "Le Mans", department: "72", region: "Pays de la Loire" },
+  { name: "Angers", department: "49", region: "Pays de la Loire" },
+  { name: "Saint-Nazaire", department: "44", region: "Pays de la Loire" },
+  { name: "Laval", department: "53", region: "Pays de la Loire" },
   { name: "Rennes", department: "35", region: "Bretagne" },
   { name: "Brest", department: "29", region: "Bretagne" },
+  { name: "Quimper", department: "29", region: "Bretagne" },
+  { name: "Vannes", department: "56", region: "Bretagne" },
+  { name: "Saint-Malo", department: "35", region: "Bretagne" },
   { name: "Lille", department: "59", region: "Hauts-de-France" },
   { name: "Amiens", department: "80", region: "Hauts-de-France" },
+  { name: "Roubaix", department: "59", region: "Hauts-de-France" },
+  { name: "Dunkerque", department: "59", region: "Hauts-de-France" },
+  { name: "Saint-Quentin", department: "02", region: "Hauts-de-France" },
   { name: "Rouen", department: "76", region: "Normandie" },
   { name: "Caen", department: "14", region: "Normandie" },
+  { name: "Le Havre", department: "76", region: "Normandie" },
+  { name: "Cherbourg-en-Cotentin", department: "50", region: "Normandie" },
   { name: "Dijon", department: "21", region: "Bourgogne-Franche-Comté" },
+  { name: "Besançon", department: "25", region: "Bourgogne-Franche-Comté" },
+  { name: "Chalon-sur-Saône", department: "71", region: "Bourgogne-Franche-Comté" },
   { name: "Orléans", department: "45", region: "Centre-Val de Loire" },
+  { name: "Tours", department: "37", region: "Centre-Val de Loire" },
+  { name: "Bourges", department: "18", region: "Centre-Val de Loire" },
+  { name: "Ajaccio", department: "2A", region: "Corse" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -113,7 +155,7 @@ const SCENARIOS = [
   {
     tradeSlug: "cvc", journey: "tender",
     titlePattern: (city) => `Installation climatisation multi-split - copropriété à ${city}`,
-    paragraphs: [
+    paragraphs: (city) => [
       `Copropriété privée à ${city} recherchant une entreprise pour l'installation de climatisation réversible multi-split sur l'ensemble des parties communes et un lot de logements pilotes avant généralisation. Le syndic souhaite comparer plusieurs devis avant lancement.`,
       `Consultation privée lancée par une copropriété de ${city} pour équiper en climatisation réversible multi-split un premier lot de logements et les parties communes, avant extension au reste de l'immeuble selon le retour d'expérience.`,
     ],
@@ -122,7 +164,7 @@ const SCENARIOS = [
   {
     tradeSlug: "cvc", journey: "subcontracting",
     titlePattern: (city) => `Sous-traitance chaufferie collective - résidence ${city}`,
-    paragraphs: [
+    paragraphs: (city) => [
       `Entreprise générale intervenant sur la rénovation d'une chaufferie collective à ${city} recherche un sous-traitant CVC qualifié pour la dépose de l'ancienne installation et la pose d'une chaudière collective à condensation.`,
       `Lot chauffage à sous-traiter dans le cadre d'une rénovation de résidence à ${city} : remplacement d'une chaufferie collective par une chaudière à condensation, dépose comprise. Recherche d'un sous-traitant disponible sous délai court.`,
     ],
@@ -132,7 +174,7 @@ const SCENARIOS = [
   {
     tradeSlug: "electricite", journey: "tender",
     titlePattern: (city) => `Mise aux normes électriques - immeuble tertiaire à ${city}`,
-    paragraphs: [
+    paragraphs: (city) => [
       `Propriétaire d'un immeuble de bureaux à ${city} lance une consultation privée pour la mise aux normes du tableau électrique général et le remplacement du câblage vétuste sur trois étages.`,
       `Immeuble tertiaire à ${city} : consultation restreinte pour une mise en conformité électrique complète (tableau général, câblage) sur plusieurs niveaux, hors intervention sur les parties déjà rénovées.`,
     ],
@@ -141,7 +183,7 @@ const SCENARIOS = [
   {
     tradeSlug: "electricite", journey: "subcontracting",
     titlePattern: (city) => `Sous-traitance IRVE - parking résidentiel ${city}`,
-    paragraphs: [
+    paragraphs: (city) => [
       `Entreprise générale recherche un sous-traitant électricien qualifié IRVE pour l'installation de bornes de recharge sur un parking résidentiel à ${city}, raccordement compris.`,
       `Chantier de résidence à ${city} : lot bornes de recharge véhicules électriques (IRVE) à sous-traiter, raccordement au tableau général et mise en service comprises.`,
     ],
@@ -151,7 +193,7 @@ const SCENARIOS = [
   {
     tradeSlug: "plomberie", journey: "tender",
     titlePattern: (city) => `Rénovation colonnes montantes - immeuble ancien à ${city}`,
-    paragraphs: [
+    paragraphs: (city) => [
       `Syndic de copropriété à ${city} lance une consultation pour la rénovation des colonnes montantes eau froide/eau chaude d'un immeuble ancien, travaux à réaliser en site occupé.`,
       `Immeuble ancien à ${city} : appel à devis privé pour le remplacement des colonnes montantes, intervention en site occupé avec coordination des accès logements requise.`,
     ],
@@ -161,7 +203,7 @@ const SCENARIOS = [
   {
     tradeSlug: "isolation", journey: "tender",
     titlePattern: (city) => `Isolation thermique par l'extérieur - résidence à ${city}`,
-    paragraphs: [
+    paragraphs: (city) => [
       `Bailleur privé à ${city} recherche une entreprise pour l'isolation thermique par l'extérieur (ITE) d'une résidence, dans le cadre d'un programme de rénovation énergétique financé en partie par des aides.`,
       `Résidence privée à ${city} : consultation pour travaux d'isolation thermique par l'extérieur (façades), dans le cadre d'une rénovation énergétique globale du bâtiment.`,
     ],
@@ -170,7 +212,7 @@ const SCENARIOS = [
   {
     tradeSlug: "isolation", journey: "subcontracting",
     titlePattern: (city) => `Sous-traitance combles perdus - lotissement ${city}`,
-    paragraphs: [
+    paragraphs: (city) => [
       `Entreprise générale de construction recherche un sous-traitant pour l'isolation des combles perdus (soufflage) sur un lotissement de maisons individuelles à ${city}.`,
       `Lotissement en cours de construction à ${city} : lot isolation combles perdus par soufflage à sous-traiter sur plusieurs maisons livrées par phases.`,
     ],
@@ -180,27 +222,45 @@ const SCENARIOS = [
   {
     tradeSlug: "menuiserie", journey: "tender",
     titlePattern: (city) => `Remplacement menuiseries extérieures - copropriété à ${city}`,
-    paragraphs: [
+    paragraphs: (city) => [
       `Copropriété à ${city} lance une consultation privée pour le remplacement des fenêtres et portes-fenêtres en simple vitrage par du double vitrage, sur l'ensemble de la façade.`,
       `Consultation privée à ${city} pour le remplacement de menuiseries extérieures vétustes (fenêtres, portes-fenêtres) par du double vitrage, façade complète.`,
     ],
     valueRange: [20000, 80000], deadlineDaysRange: [20, 35],
   },
+  {
+    tradeSlug: "menuiserie", journey: "subcontracting",
+    titlePattern: (city) => `Sous-traitance pose de menuiseries - programme neuf ${city}`,
+    paragraphs: (city) => [
+      `Entreprise générale sur un programme de maisons individuelles à ${city} recherche un sous-traitant menuisier pour la pose de fenêtres et volets sur plusieurs lots livrés par tranches.`,
+      `Programme de maisons neuves à ${city} : lot menuiseries extérieures (fenêtres, volets) à sous-traiter, pose sur plusieurs lots selon calendrier de livraison.`,
+    ],
+    valueRange: [10000, 38000], deadlineDaysRange: [12, 28],
+  },
   // --- Maçonnerie ---
   {
     tradeSlug: "maconnerie", journey: "tender",
     titlePattern: (city) => `Reprise de fissures et façade - bâtiment privé à ${city}`,
-    paragraphs: [
+    paragraphs: (city) => [
       `Propriétaire d'un bâtiment ancien à ${city} recherche une entreprise de maçonnerie pour la reprise de fissures structurelles et la réfection d'un pan de façade.`,
       `Bâtiment privé à ${city} : consultation pour travaux de maçonnerie (reprise de fissures, réfection de façade) suite à un diagnostic structurel.`,
     ],
     valueRange: [10000, 45000], deadlineDaysRange: [18, 30],
   },
+  {
+    tradeSlug: "maconnerie", journey: "subcontracting",
+    titlePattern: (city) => `Sous-traitance gros oeuvre - extension à ${city}`,
+    paragraphs: (city) => [
+      `Entreprise générale recherche un sous-traitant maçon pour la réalisation du gros oeuvre d'une extension de maison individuelle à ${city} (fondations, élévation).`,
+      `Chantier d'extension à ${city} : lot gros oeuvre (fondations, élévation des murs) à sous-traiter, dans le cadre d'un agrandissement de maison individuelle.`,
+    ],
+    valueRange: [18000, 55000], deadlineDaysRange: [15, 30],
+  },
   // --- Peinture ---
   {
     tradeSlug: "peinture", journey: "tender",
     titlePattern: (city) => `Peinture intérieure - résidence de ${city}`,
-    paragraphs: [
+    paragraphs: (city) => [
       `Bailleur privé à ${city} recherche une entreprise de peinture pour la remise en état des parties communes (cages d'escalier, halls) d'une résidence de plusieurs logements.`,
       `Résidence à ${city} : consultation pour travaux de peinture intérieure des parties communes, incluant préparation des supports et finitions.`,
     ],
@@ -209,7 +269,7 @@ const SCENARIOS = [
   {
     tradeSlug: "peinture", journey: "subcontracting",
     titlePattern: (city) => `Sous-traitance peinture - programme neuf à ${city}`,
-    paragraphs: [
+    paragraphs: (city) => [
       `Entreprise générale sur un programme de logements neufs à ${city} recherche un sous-traitant peintre pour les finitions intérieures sur plusieurs lots livrés par tranches.`,
       `Programme immobilier neuf à ${city} : lot peinture/finitions à sous-traiter sur plusieurs logements, livraison par tranches successives.`,
     ],
@@ -219,51 +279,96 @@ const SCENARIOS = [
   {
     tradeSlug: "couverture", journey: "tender",
     titlePattern: (city) => `Réfection de toiture - bâtiment privé à ${city}`,
-    paragraphs: [
+    paragraphs: (city) => [
       `Propriétaire privé à ${city} recherche une entreprise de couverture pour la réfection complète d'une toiture endommagée, avec reprise de la zinguerie.`,
       `Bâtiment privé à ${city} : consultation pour réfection de toiture (couverture et zinguerie) suite à un constat de dégradation.`,
     ],
     valueRange: [15000, 60000], deadlineDaysRange: [15, 30],
   },
+  {
+    tradeSlug: "couverture", journey: "subcontracting",
+    titlePattern: (city) => `Sous-traitance charpente-couverture - maisons neuves ${city}`,
+    paragraphs: (city) => [
+      `Constructeur de maisons individuelles à ${city} recherche un sous-traitant charpentier-couvreur pour la pose de charpente et couverture sur un lot de plusieurs maisons.`,
+      `Programme de maisons individuelles à ${city} : lot charpente-couverture à sous-traiter sur plusieurs constructions, livraison échelonnée.`,
+    ],
+    valueRange: [20000, 65000], deadlineDaysRange: [15, 30],
+  },
   // --- Rénovation générale (batiment-general) ---
   {
     tradeSlug: "batiment-general", journey: "tender",
     titlePattern: (city) => `Rénovation complète de logements - ${city}`,
-    paragraphs: [
+    paragraphs: (city) => [
       `Bailleur privé à ${city} lance une consultation pour la rénovation complète (tous corps d'état) d'un ensemble de logements avant relocation.`,
       `Ensemble de logements à ${city} : consultation privée tous corps d'état pour une rénovation complète avant remise en location.`,
     ],
     valueRange: [60000, 250000], deadlineDaysRange: [25, 45],
   },
+  {
+    tradeSlug: "batiment-general", journey: "subcontracting",
+    titlePattern: (city) => `Sous-traitance tous corps d'état - réhabilitation ${city}`,
+    paragraphs: (city) => [
+      `Entreprise générale pilotant une réhabilitation d'immeuble à ${city} recherche des sous-traitants tous corps d'état pour plusieurs lots (cloisons, second oeuvre, finitions).`,
+      `Chantier de réhabilitation à ${city} : plusieurs lots second oeuvre et finitions à sous-traiter, dans le cadre d'une rénovation d'immeuble pilotée en entreprise générale.`,
+    ],
+    valueRange: [40000, 180000], deadlineDaysRange: [20, 40],
+  },
   // --- Espaces verts ---
   {
     tradeSlug: "espaces-verts", journey: "tender",
     titlePattern: (city) => `Entretien espaces verts - résidence privée à ${city}`,
-    paragraphs: [
+    paragraphs: (city) => [
       `Copropriété à ${city} recherche une entreprise de paysagisme pour un contrat annuel d'entretien des espaces verts (tonte, taille, entretien des massifs).`,
       `Résidence privée à ${city} : consultation pour un marché annuel d'entretien paysager des espaces verts communs.`,
     ],
     valueRange: [6000, 25000], deadlineDaysRange: [15, 30],
   },
+  {
+    tradeSlug: "espaces-verts", journey: "tender",
+    titlePattern: (city) => `Aménagement paysager - lotissement neuf à ${city}`,
+    paragraphs: (city) => [
+      `Promoteur d'un lotissement neuf à ${city} recherche une entreprise de paysagisme pour l'aménagement des espaces verts communs (plantations, engazonnement) avant livraison.`,
+      `Lotissement en fin de construction à ${city} : consultation pour l'aménagement paysager des espaces communs (plantations, engazonnement) avant remise aux acquéreurs.`,
+    ],
+    valueRange: [12000, 45000], deadlineDaysRange: [15, 30],
+  },
   // --- Nettoyage ---
   {
     tradeSlug: "nettoyage", journey: "tender",
     titlePattern: (city) => `Contrat de nettoyage - immeuble de bureaux à ${city}`,
-    paragraphs: [
+    paragraphs: (city) => [
       `Gestionnaire d'un immeuble de bureaux à ${city} recherche une société de nettoyage pour un contrat annuel d'entretien des parties communes et des bureaux.`,
       `Immeuble tertiaire à ${city} : consultation privée pour un marché annuel de nettoyage des locaux et parties communes.`,
     ],
     valueRange: [10000, 40000], deadlineDaysRange: [12, 25],
   },
+  {
+    tradeSlug: "nettoyage", journey: "tender",
+    titlePattern: (city) => `Nettoyage de fin de chantier - programme neuf à ${city}`,
+    paragraphs: (city) => [
+      `Promoteur immobilier à ${city} recherche une société de nettoyage pour le nettoyage de fin de chantier d'un programme de logements neufs, avant remise aux acquéreurs.`,
+      `Programme de logements neufs à ${city} : consultation pour le nettoyage de fin de chantier de l'ensemble des lots avant livraison.`,
+    ],
+    valueRange: [5000, 20000], deadlineDaysRange: [8, 20],
+  },
   // --- Maintenance ---
   {
     tradeSlug: "maintenance", journey: "tender",
     titlePattern: (city) => `Contrat de maintenance multi-technique - résidence à ${city}`,
-    paragraphs: [
+    paragraphs: (city) => [
       `Syndic à ${city} recherche un prestataire pour un contrat de maintenance multi-technique (ascenseurs, VMC, portails) sur une résidence privée.`,
       `Résidence privée à ${city} : consultation pour un marché de maintenance multi-technique annuel (équipements communs, VMC, portails automatiques).`,
     ],
     valueRange: [8000, 35000], deadlineDaysRange: [15, 30],
+  },
+  {
+    tradeSlug: "maintenance", journey: "subcontracting",
+    titlePattern: (city) => `Sous-traitance maintenance VMC/désenfumage - tertiaire ${city}`,
+    paragraphs: (city) => [
+      `Prestataire multi-technique en charge d'un immeuble de bureaux à ${city} recherche un sous-traitant spécialisé pour la maintenance des systèmes de VMC et de désenfumage.`,
+      `Immeuble tertiaire à ${city} : lot maintenance VMC/désenfumage à sous-traiter dans le cadre d'un contrat multi-technique existant.`,
+    ],
+    valueRange: [6000, 22000], deadlineDaysRange: [12, 25],
   },
 ];
 
@@ -307,10 +412,17 @@ async function run() {
     return;
   }
 
-  // First-batch spread: 3 cities per scenario, picked deterministically per
-  // scenario (not the same 3 every time) so coverage spreads across the
-  // city list rather than clustering on Paris/Bordeaux for every trade.
-  const CITIES_PER_SCENARIO = 3;
+  // Spread: N cities per scenario, picked deterministically per scenario
+  // (not the same N every time) so coverage spreads across the city list
+  // rather than clustering on Paris/Bordeaux for every trade. Bumped from
+  // an initial 3 (48-row first batch) to 9 once that batch was reviewed -
+  // with 23 scenarios now across the client's full trade list, 9 cities
+  // each spreads to several hundred rows across ~65 cities/all mainland
+  // regions, genuinely closer to the "couverture nationale importante"
+  // asked for while every row still traces back to one of the real,
+  // distinct paragraph variants above (never a bare find/replace of a
+  // single template - see the file header for why that matters for SEO).
+  const CITIES_PER_SCENARIO = 9;
 
   const rows = [];
   for (const scenario of SCENARIOS) {
@@ -319,7 +431,7 @@ async function run() {
       const city = CITIES[(offset + i * 7) % CITIES.length]; // step 7: spreads picks instead of walking sequentially
       const key = `${scenario.tradeSlug}-${scenario.journey}-${slugify(city.name)}`;
       const h = hash(key);
-      const variant = scenario.paragraphs[h % 2];
+      const variant = scenario.paragraphs(city.name)[h % 2];
       const [vMin, vMax] = scenario.valueRange;
       const value = vMin + (h % (vMax - vMin));
       const [dMin, dMax] = scenario.deadlineDaysRange;
@@ -390,7 +502,7 @@ async function run() {
   );
 
   console.log(`[seedEditorialListings] Inserted ${result.rowCount} new rows (${rows.length - (result.rowCount || 0)} already existed - safe re-run).`);
-  console.log("[seedEditorialListings] This is a first batch for review, not the full national catalog - see the header comment for scaling once validated.");
+  console.log("[seedEditorialListings] Curated national-spread batch, not a literal every-city catalog - see the header comment for how to extend it further.");
 }
 
 module.exports = { run };
