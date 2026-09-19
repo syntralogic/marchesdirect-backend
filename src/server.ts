@@ -313,6 +313,29 @@ const startServer = async () => {
       });
     }
 
+    // Client's brief (15 Sep): "Appels d'offres privés"/"Sous-traitance" had
+    // no real content source at all - scripts/seedEditorialListings.js
+    // seeds a first templated batch. Same "no shell on Render's free tier"
+    // boot-time pattern as the demo seed/region backfill above (own
+    // process, own Pool, own exit - can't call pool.end() on the main
+    // app's connection pool). Fully idempotent (ON CONFLICT DO NOTHING
+    // keyed on source_reference), and it no-ops safely by itself if the
+    // trades/data_sources migration above hasn't landed on this DB yet
+    // (rather than throwing) - so running this right after ensureSchema/
+    // migrations just needs to be "eventually after", not exact-order.
+    // Set SKIP_EDITORIAL_SEED=true to turn this off later once a real
+    // private-listings feed replaces it.
+    if (process.env.SKIP_EDITORIAL_SEED !== 'true') {
+      const { execFile } = require('child_process');
+      const editorialSeedPath = require('path').resolve(process.cwd(), 'scripts', 'seedEditorialListings.js');
+      execFile('node', [editorialSeedPath], (err: any, stdout: string, stderr: string) => {
+        if (stdout) logger.info(`[editorial seed] ${stdout.trim()}`);
+        if (err) {
+          logger.error('[editorial seed] failed (non-fatal):', stderr || err.message);
+        }
+      });
+    }
+
     // Start background jobs
     require('./jobs/dataCollection').startScheduledJobs();
     require('./jobs/documentIngestion').startDocumentIngestion();

@@ -17,7 +17,7 @@
     "backfill:opportunity-facts": "ts-node --files scripts/backfillOpportunityFacts.ts",
     "backfill:exact-duplicates": "ts-node --files scripts/backfillExactDuplicates.ts",
     "backfill:missing-deadlines": "ts-node --files scripts/backfillMissingDeadlines.ts",
-    "seed:editorial-listings": "ts-node --files scripts/seedEditorialListings.ts",
+    "seed:editorial-listings": "node scripts/seedEditorialListings.js",
     "loadtest:generate": "node scripts/generateSyntheticListings.js",
     "loadtest:run": "node scripts/loadTest.js"
   },
