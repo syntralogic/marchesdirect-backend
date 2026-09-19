@@ -94,8 +94,33 @@ async function syncToPipedrive(lead: LeadRow): Promise<{ contactId: string }> {
 // visitor submitting the form) must succeed regardless of whether the CRM
 // push works, so this always resolves and just records the outcome on the
 // crm_leads row itself.
+//
+// "Not configured" is a distinct, deliberately-quiet case from a genuine
+// sync failure: CRM_API_KEY/CRM_BASE_URL simply haven't been set on this
+// deploy (Pipedrive push is optional - leads are already fully usable via
+// this app's own admin panel/crm_leads table without it). Every lead
+// capture calls this once in real time, plus retryPendingCrmSyncs below
+// re-attempts every still-pending/failed row every 30 minutes - with no
+// config, that's every single lead, every 30 minutes, forever, each
+// logged as an [error] and flipped to crm_sync_status='failed' (which
+// reads as "something's broken and needs attention" when actually
+// nothing is - it's just not turned on). Logs once per process instead of
+// once per lead per sweep, and leaves the row 'pending' rather than
+// 'failed' so it picks back up on its own, with no manual re-triggering
+// needed, whenever CRM_API_KEY/CRM_BASE_URL do get set.
+let loggedNotConfiguredOnce = false;
+function isCrmConfigured(): boolean {
+  const configured = !!(process.env.CRM_API_KEY && process.env.CRM_BASE_URL);
+  if (!configured && !loggedNotConfiguredOnce) {
+    loggedNotConfiguredOnce = true;
+    logger.warn('[CRM] CRM_API_KEY / CRM_BASE_URL not set - Pipedrive sync is disabled (leads still save normally and are visible in the admin panel). Set both to enable it; this message only logs once per process.');
+  }
+  return configured;
+}
+
 export const syncLeadToCrm = async (leadId: string): Promise<void> => {
   const system = (process.env.CRM_SYSTEM || 'pipedrive').toLowerCase();
+  if (system === 'pipedrive' && !isCrmConfigured()) return;
 
   try {
     const result = await db.query('SELECT * FROM crm_leads WHERE id = $1', [leadId]);
@@ -144,6 +169,9 @@ export const syncLeadToCrm = async (leadId: string): Promise<void> => {
 // CRM_API_KEY wasn't configured yet, or a transient API outage. Safe to call
 // repeatedly; each attempt just re-tries the same not-yet-synced rows.
 export const retryPendingCrmSyncs = async (limit: number = 50): Promise<number> => {
+  const system = (process.env.CRM_SYSTEM || 'pipedrive').toLowerCase();
+  if (system === 'pipedrive' && !isCrmConfigured()) return 0;
+
   const result = await db.query(
     `SELECT id FROM crm_leads WHERE crm_sync_status IN ('pending', 'failed') ORDER BY created_at ASC LIMIT $1`,
     [limit]
