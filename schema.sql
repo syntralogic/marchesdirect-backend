@@ -200,6 +200,8 @@ CREATE INDEX opportunities_source ON opportunities(source_id, source_reference);
 CREATE INDEX opportunities_location ON opportunities(location_city, location_region);
 CREATE INDEX opportunities_deadline ON opportunities(deadline);
 CREATE INDEX opportunities_created ON opportunities(created_at DESC);
+CREATE INDEX opportunities_trade ON opportunities(trade_id);
+CREATE INDEX opportunities_department ON opportunities(UPPER(TRIM(location_department)));
 
 -- Deduplication tracking (Milestone 3)
 CREATE TABLE opportunity_duplicates (
