@@ -1296,22 +1296,22 @@ INSERT INTO cpv_codes (code, name, sector) VALUES
 ON CONFLICT (code) DO NOTHING;
 
 INSERT INTO trades (name, slug, description, cpv_code_id) VALUES
-('Gros oeuvre', 'gros-oeuvre', 'Structural work, foundations, load-bearing walls', (SELECT id FROM cpv_codes WHERE code = '45223000')),
-('Démolition', 'demolition', 'Demolition, site clearance and preparation', (SELECT id FROM cpv_codes WHERE code = '45111000')),
-('Maçonnerie', 'maconnerie', 'Masonry and bricklaying', (SELECT id FROM cpv_codes WHERE code = '45262500')),
-('Charpente', 'charpente', 'Roof framing and structural carpentry', (SELECT id FROM cpv_codes WHERE code = '45261000')),
-('Couverture', 'couverture', 'Roofing and roof waterproofing', (SELECT id FROM cpv_codes WHERE code = '45261000')),
-('Électricité', 'electricite', 'Electrical installation work', (SELECT id FROM cpv_codes WHERE code = '45310000')),
-('Plomberie', 'plomberie', 'Plumbing and sanitary installation', (SELECT id FROM cpv_codes WHERE code = '45330000')),
-('CVC', 'cvc', 'Heating, ventilation and air conditioning', (SELECT id FROM cpv_codes WHERE code = '45331000')),
-('Isolation', 'isolation', 'Thermal and acoustic insulation', (SELECT id FROM cpv_codes WHERE code = '45320000')),
-('Plâtrerie', 'platrerie', 'Plastering and drywall', (SELECT id FROM cpv_codes WHERE code = '45410000')),
-('Menuiserie', 'menuiserie', 'Joinery, windows and doors', (SELECT id FROM cpv_codes WHERE code = '45420000')),
-('Carrelage', 'carrelage', 'Floor and wall tiling', (SELECT id FROM cpv_codes WHERE code = '45430000')),
-('Peinture', 'peinture', 'Painting and surface finishing', (SELECT id FROM cpv_codes WHERE code = '45440000')),
-('Vitrerie', 'vitrerie', 'Glazing work', (SELECT id FROM cpv_codes WHERE code = '45440000')),
-('Voirie et réseaux (VRD)', 'vrd', 'Road works and utility networks', (SELECT id FROM cpv_codes WHERE code = '45233000')),
-('Bâtiment général', 'batiment-general', 'General building construction', (SELECT id FROM cpv_codes WHERE code = '45210000'))
+('Gros oeuvre', 'gros-oeuvre', 'Gros œuvre, fondations, murs porteurs', (SELECT id FROM cpv_codes WHERE code = '45223000')),
+('Démolition', 'demolition', 'Démolition, déblaiement et préparation de site', (SELECT id FROM cpv_codes WHERE code = '45111000')),
+('Maçonnerie', 'maconnerie', 'Maçonnerie et travaux de briquetage', (SELECT id FROM cpv_codes WHERE code = '45262500')),
+('Charpente', 'charpente', 'Charpente et ossature bois', (SELECT id FROM cpv_codes WHERE code = '45261000')),
+('Couverture', 'couverture', 'Couverture et étanchéité de toiture', (SELECT id FROM cpv_codes WHERE code = '45261000')),
+('Électricité', 'electricite', 'Travaux d''installation électrique', (SELECT id FROM cpv_codes WHERE code = '45310000')),
+('Plomberie', 'plomberie', 'Plomberie et installations sanitaires', (SELECT id FROM cpv_codes WHERE code = '45330000')),
+('CVC', 'cvc', 'Chauffage, ventilation et climatisation', (SELECT id FROM cpv_codes WHERE code = '45331000')),
+('Isolation', 'isolation', 'Isolation thermique et acoustique', (SELECT id FROM cpv_codes WHERE code = '45320000')),
+('Plâtrerie', 'platrerie', 'Plâtrerie et cloisons sèches', (SELECT id FROM cpv_codes WHERE code = '45410000')),
+('Menuiserie', 'menuiserie', 'Menuiserie, fenêtres et portes', (SELECT id FROM cpv_codes WHERE code = '45420000')),
+('Carrelage', 'carrelage', 'Carrelage sols et murs', (SELECT id FROM cpv_codes WHERE code = '45430000')),
+('Peinture', 'peinture', 'Peinture et finitions de surface', (SELECT id FROM cpv_codes WHERE code = '45440000')),
+('Vitrerie', 'vitrerie', 'Travaux de vitrerie', (SELECT id FROM cpv_codes WHERE code = '45440000')),
+('Voirie et réseaux (VRD)', 'vrd', 'Travaux de voirie et réseaux divers', (SELECT id FROM cpv_codes WHERE code = '45233000')),
+('Bâtiment général', 'batiment-general', 'Construction de bâtiments, tous corps d''état', (SELECT id FROM cpv_codes WHERE code = '45210000'))
 ON CONFLICT (name) DO NOTHING;
 
 -- Buyer-history stat on the opportunity detail page (spec: aggregated,
