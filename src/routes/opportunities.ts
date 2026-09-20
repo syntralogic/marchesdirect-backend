@@ -7,6 +7,7 @@ import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFact
 import { ingestOpportunityDocuments } from '../services/documentIngestionService';
 import { computeMatchScore } from '../services/matchScoreService';
 import { syncLeadToCrm } from '../services/crmSyncService';
+import { geocodeCity } from '../services/geocodingService';
 import { optionalAuth, authenticate, requireRole, AuthRequest } from '../middleware/auth';
 
 const router = Router();
@@ -876,6 +877,31 @@ router.get('/stats/departments', async (req: Request, res: Response) => {
   } catch (err: any) {
     logger.error('Department stats error:', err);
     res.status(500).json({ error: 'Failed to load department stats' });
+  }
+});
+
+// GET /api/opportunities/geocode-city?city=&department= - resolves a city
+// name (typed into the location search box) to coordinates, so the
+// frontend can then search by real lat/lng/radius_km instead of a plain
+// city-name text match. Proxied through our own backend rather than
+// called directly from the browser so the frontend never has to depend on
+// api-adresse.data.gouv.fr's CORS policy (undocumented/uncertain - see
+// geocodingService.ts) and so this stays the one place that talks to it.
+router.get('/geocode-city', async (req: Request, res: Response) => {
+  try {
+    const city = (req.query.city as string || '').trim();
+    const department = (req.query.department as string || '').trim() || null;
+    if (!city) {
+      return res.status(400).json({ error: 'city is required' });
+    }
+    const result = await geocodeCity(city, department);
+    if (!result) {
+      return res.status(404).json({ error: 'Could not geocode this city' });
+    }
+    res.json(result);
+  } catch (err: any) {
+    logger.error('Geocode-city error:', err);
+    res.status(500).json({ error: 'Failed to geocode city' });
   }
 });
 
