@@ -601,7 +601,21 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     // short) or be skipped by both. Appending o.id ASC makes the order
     // fully deterministic across pages regardless of ties.
     const DEFAULT_ORDER = `(o.status = 'active' AND (o.deadline IS NULL OR o.deadline >= NOW())) DESC, o.deadline ASC NULLS LAST, o.id ASC`;
-    let orderClause = DEFAULT_ORDER;
+    // Client (19/20 Sep, search overhaul point 5): title match should
+    // outrank a description-only match of the same word, and this needs to
+    // hold for an ordinary search, not just when the visitor manually picks
+    // "Pertinence" from the sort dropdown - most visitors typing a search
+    // never touch that control. search_vector is now weighted (title 'A' >
+    // description 'B' - see database.ts), so ts_rank genuinely reflects
+    // that distinction once used. Applied as a tiebreaker ahead of the
+    // date-based order whenever a real text query was given, for the
+    // default order (below) and kept for sort=match; sort=recent is a
+    // visitor's explicit, deliberate ask for pure chronological order and
+    // isn't touched.
+    const relevanceTiebreak = tsRankParamIdx !== null
+      ? `ts_rank(o.search_vector, to_tsquery('french', unaccent($${tsRankParamIdx}))) DESC, `
+      : '';
+    let orderClause = `${relevanceTiebreak}${DEFAULT_ORDER}`;
     if (sort === 'recent') {
       orderClause = `o.publication_date DESC NULLS LAST, o.id ASC`;
     } else if (sort === 'match') {

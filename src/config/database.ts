@@ -248,6 +248,39 @@ const applyIncrementalMigrations = async (): Promise<void> => {
       END IF;
     END $$`);
 
+  // Client (19/20 Sep, search overhaul point 5): "privilégier l'objet du
+  // marché, le titre du lot et sa prestation. Une mention accessoire dans
+  // une longue description ne doit pas suffire." search_vector above
+  // concatenated title and description with no weighting, so ts_rank (used
+  // by sort=match) couldn't tell "the word is in the title" from "the word
+  // is somewhere in a long description" - exactly the complaint. setweight
+  // marks title 'A' (ts_rank's default weight 1.0) and description 'B'
+  // (default weight 0.4), so a title hit now genuinely outranks a
+  // description-only hit of the same word. Same guard pattern as above,
+  // checking for 'setweight' specifically this time: a DB already on the
+  // unaccent-only version (just migrated by the block above) still needs
+  // this one to run once more, but a DB already on the weighted version
+  // must not have its (expensive, ~47k+ row) GIN index rebuilt on every
+  // single boot.
+  await step(`DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_attrdef ad
+        JOIN pg_attribute a ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+        WHERE a.attrelid = 'opportunities'::regclass
+          AND a.attname = 'search_vector'
+          AND pg_get_expr(ad.adbin, ad.adrelid) LIKE '%setweight%'
+      ) THEN
+        DROP INDEX IF EXISTS opportunities_search;
+        ALTER TABLE opportunities DROP COLUMN IF EXISTS search_vector;
+        ALTER TABLE opportunities ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (
+          setweight(to_tsvector('french', immutable_unaccent(COALESCE(title, ''))), 'A') ||
+          setweight(to_tsvector('french', immutable_unaccent(COALESCE(description, ''))), 'B')
+        ) STORED;
+        CREATE INDEX opportunities_search ON opportunities USING GIN(search_vector);
+      END IF;
+    END $$`);
+
   // Client (19 Sep): trade + department are two of the most heavily-used
   // filters in the search route above (o.trade_id = ... equality plus the
   // trades JOIN; UPPER(TRIM(location_department)) = ANY(...) for the

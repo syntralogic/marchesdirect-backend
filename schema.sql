@@ -463,7 +463,8 @@ ALTER TABLE opportunities DROP COLUMN IF EXISTS search_vector;
 ALTER TABLE opportunities ALTER COLUMN buyer_name TYPE VARCHAR(1000);
 ALTER TABLE opportunities ALTER COLUMN title TYPE VARCHAR(1000);
 ALTER TABLE opportunities ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (
-  to_tsvector('french', immutable_unaccent(COALESCE(title, '') || ' ' || COALESCE(description, '')))
+  setweight(to_tsvector('french', immutable_unaccent(COALESCE(title, ''))), 'A') ||
+  setweight(to_tsvector('french', immutable_unaccent(COALESCE(description, ''))), 'B')
 ) STORED;
 CREATE INDEX IF NOT EXISTS opportunities_search ON opportunities USING GIN(search_vector);
 
