@@ -420,26 +420,44 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         paysagisme: ['espaces', 'verts'],
       };
       const synonymsOf = (w: string): string[] => TRADE_KEYWORD_SYNONYMS[foldAccents(w).toLowerCase()] || [];
+      // Client (19/20 Sep, search overhaul points 2 & 5): "Un lot électricité
+      // ne doit pas ressortir pour « fenêtre » simplement parce que le
+      // descriptif général du chantier mentionne des fenêtres... une mention
+      // accessoire dans une longue description ne doit pas suffire." The
+      // opportunities table has no per-lot structure at all (BOAMP/DECP
+      // notices covering several lots get flattened into one title+
+      // description at ingestion - a real per-lot fix would mean parsing lot
+      // structure out of raw_data, which isn't safely doable without live
+      // access to confirm the actual BOAMP/DECP field shapes first), so this
+      // targets the same symptom the client's example describes without
+      // guessing at that: for a query WORD that names a trade/métier concept
+      // (the same référentiel used for synonym expansion below, e.g. "clim",
+      // "ite", "fenêtre" -> menuiserie, or the trade's own name), an
+      // incidental mention buried in the long description is no longer
+      // enough on its own - it has to be either in the TITLE (short, lot-
+      // specific: "Lot 3 - Menuiseries extérieures", not a page of prose) or
+      // confirmed by the AI's own trade classification for that listing
+      // (trade_id/ai_matched_trades - already computed by classifyOpportunity,
+      // aiService.ts). A non-trade word (a city name, a generic term not in
+      // this référentiel) keeps matching the full title+description as
+      // before - this is specifically about métier words, not a general
+      // tightening of every search.
+      const TRADE_CONCEPT_TOKENS = new Set(
+        Object.values(TRADE_KEYWORD_SYNONYMS).flat().concat(Object.keys(TRADE_KEYWORD_SYNONYMS))
+      );
+      const isTradeWord = (w: string): boolean => {
+        if (synonymsOf(w).length > 0) return true;
+        const folded = foldAccents(w).toLowerCase();
+        if (TRADE_CONCEPT_TOKENS.has(folded)) return true;
+        const stem = stemOf(w);
+        return !!stem && TRADE_CONCEPT_TOKENS.has(stem);
+      };
       if (qWords.length > 0) {
         const tsIdx = idx++;
         tsRankParamIdx = tsIdx;
-        const tradeConds: string[] = [];
-        for (const _w of qWords) {
-          const nameIdx = idx++;
-          const matchedIdx = idx++;
-          // BUG (found 19 Sep, client report "har search mein kam/koi result
-          // nahi hota"): the DB's accented trade name / matched-trades text
-          // ("Electricite" with accent) was compared straight against an
-          // unaccented typed pattern - ILIKE folds case, not accents.
-          // unaccent() on the column side + pre-folded patterns on the
-          // parameter side make the match accent-insensitive.
-          tradeConds.push(`(unaccent(t.name) ILIKE ANY($${nameIdx}::text[]) OR unaccent(o.ai_matched_trades::text) ILIKE ANY($${matchedIdx}::text[]))`);
-        }
-        conditions.push(
-          `(o.search_vector @@ to_tsquery('french', unaccent($${tsIdx}))
-            OR (${tradeConds.join(' AND ')}))`
-        );
-        tradeMatchExpr = tradeConds.join(' AND ');
+        // Pushed immediately (matching tsIdx's allocation order, the first
+        // $N in this block) rather than after the loop below - params must
+        // land in the array in the exact same order their $N was allocated.
         params.push(
           qWords
             .map(w => {
@@ -450,14 +468,39 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
             })
             .join(' & ')
         );
+        const tradeConds: string[] = [];
+        const wordConds: string[] = [];
         for (const w of qWords) {
-          const patterns = [`%${foldAccents(w)}%`];
           const stem = stemOf(w);
-          if (stem) patterns.push(`%${stem}%`);
-          for (const s of synonymsOf(w)) patterns.push(`%${s}%`);
+          const syns = synonymsOf(w);
+          const patterns = [`%${foldAccents(w)}%`, ...(stem ? [`%${stem}%`] : []), ...syns.map(s => `%${s}%`)];
+
+          const nameIdx = idx++;
           params.push(patterns);
+          const matchedIdx = idx++;
           params.push(patterns);
+          // BUG (found 19 Sep, client report "har search mein kam/koi result
+          // nahi hota"): the DB's accented trade name / matched-trades text
+          // ("Electricite" with accent) was compared straight against an
+          // unaccented typed pattern - ILIKE folds case, not accents.
+          // unaccent() on the column side + pre-folded patterns on the
+          // parameter side make the match accent-insensitive.
+          const tradeCond = `(unaccent(t.name) ILIKE ANY($${nameIdx}::text[]) OR unaccent(o.ai_matched_trades::text) ILIKE ANY($${matchedIdx}::text[]))`;
+          tradeConds.push(tradeCond);
+
+          if (isTradeWord(w)) {
+            const titleIdx = idx++;
+            params.push(patterns);
+            wordConds.push(`(unaccent(o.title) ILIKE ANY($${titleIdx}::text[]) OR ${tradeCond})`);
+          } else {
+            const wordTsIdx = idx++;
+            const alts = [`${w}:*`, ...(stem ? [`${stem}:*`] : []), ...syns.map(s => `${s}:*`)];
+            params.push(alts.length > 1 ? `(${alts.join(' | ')})` : alts[0]);
+            wordConds.push(`o.search_vector @@ to_tsquery('french', unaccent($${wordTsIdx}))`);
+          }
         }
+        conditions.push(wordConds.join(' AND '));
+        tradeMatchExpr = tradeConds.join(' AND ');
       }
     }
     if (trade_id) {
