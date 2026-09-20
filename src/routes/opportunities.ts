@@ -468,6 +468,21 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
             })
             .join(' & ')
         );
+        // BUG (found 20 Sep, client report "har search mein 'Failed to search
+        // opportunities' / zero results, only for keyword searches - geo and
+        // trade filters worked fine"): this param ($tsIdx) is only ever
+        // referenced in the ORDER BY relevance tiebreak below, which is built
+        // for the list query but never included in the countResult query
+        // (count has no ORDER BY). Postgres requires every bound parameter to
+        // appear somewhere in a given query's text so it can infer its type -
+        // with no reference at all in the count query, every keyword search
+        // (anything that reaches this branch) failed there with "could not
+        // determine data type of parameter $N" (42P18), caught by the route's
+        // catch-all and reported as "Failed to search opportunities" even
+        // though the geo/trade-only filters (which never set this param)
+        // worked. A harmless always-true, explicitly-cast condition keeps the
+        // param referenced in both queries' text without changing results.
+        conditions.push(`$${tsIdx}::text IS NOT NULL`);
         const tradeConds: string[] = [];
         const wordConds: string[] = [];
         for (const w of qWords) {
@@ -501,6 +516,21 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         }
         conditions.push(wordConds.join(' AND '));
         tradeMatchExpr = tradeConds.join(' AND ');
+        // Same 42P18 "could not determine data type" issue as the tsIdx fix
+        // above, but for every word's nameIdx/matchedIdx (trade-name /
+        // ai_matched_trades) params: tradeMatchExpr is only referenced in the
+        // ORDER BY trade-match boost. For a word that IS a trade word, its
+        // tradeCond also got inlined into wordConds above so its params are
+        // fine - but for a non-trade word (e.g. "thermique" in "isolation
+        // thermique", or a lone "peinture"), tradeCond exists only inside
+        // tradeMatchExpr, never in the WHERE clause the count query runs -
+        // unreferenced there, so Postgres can't infer that param's type and
+        // the count query 500s (caught by the route's catch-all as "Failed
+        // to search opportunities"), even after the tsIdx fix above, for any
+        // query containing at least one non-trade word. An always-true OR
+        // keeps every one of those params referenced in both queries' text
+        // without changing which rows match.
+        conditions.push(`((${tradeMatchExpr}) OR TRUE)`);
       }
     }
     if (trade_id) {
