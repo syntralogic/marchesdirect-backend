@@ -365,6 +365,46 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         }
         return null;
       };
+      // Client (19 Sep): "ITE", "Clim" and "isolation thermique" as examples
+      // of poor matching, point 3/4 of the numbered list - a référentiel of
+      // synonyms/abbreviations per métier. Stemming/prefix matching above
+      // handles word-forms of the SAME word (peintre/peinture,
+      // climat/climatisation), but an acronym like "ITE" (isolation
+      // thermique par l'extérieur) shares no letters with "isolation" at
+      // all - no amount of stemming or prefix matching bridges that; it can
+      // only come from an explicit lookup. Each entry's synonyms are added
+      // as extra OR-alternatives for that one word's slot (still AND'd
+      // against the query's other words as before), on both the tsquery
+      // side and the trade-name/ai_matched_trades ILIKE side.
+      const TRADE_KEYWORD_SYNONYMS: Record<string, string[]> = {
+        ite: ['isolation', 'exterieur'],
+        iti: ['isolation', 'interieur'],
+        clim: ['climatisation'],
+        cvc: ['climatisation', 'chauffage', 'ventilation'],
+        vmc: ['ventilation'],
+        pac: ['pompe', 'chaleur'],
+        couvreur: ['toiture', 'couverture'],
+        toiture: ['couverture'],
+        etancheite: ['etancheur'],
+        macon: ['maconnerie'],
+        elec: ['electricite'],
+        electricien: ['electricite'],
+        plombier: ['plomberie'],
+        chauffagiste: ['chauffage'],
+        menuisier: ['menuiserie'],
+        fenetre: ['menuiserie'],
+        fenetres: ['menuiserie'],
+        carreleur: ['carrelage'],
+        platrier: ['platrerie'],
+        placo: ['platrerie'],
+        placoplatre: ['platrerie'],
+        vrd: ['voirie', 'reseaux'],
+        terrassement: ['vrd'],
+        proprete: ['nettoyage'],
+        paysagiste: ['espaces', 'verts'],
+        paysagisme: ['espaces', 'verts'],
+      };
+      const synonymsOf = (w: string): string[] => TRADE_KEYWORD_SYNONYMS[foldAccents(w).toLowerCase()] || [];
       if (qWords.length > 0) {
         const tsIdx = idx++;
         tsRankParamIdx = tsIdx;
@@ -389,7 +429,9 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
           qWords
             .map(w => {
               const stem = stemOf(w);
-              return stem ? `(${w}:* | ${stem}:*)` : `${w}:*`;
+              const syns = synonymsOf(w);
+              const alts = [`${w}:*`, ...(stem ? [`${stem}:*`] : []), ...syns.map(s => `${s}:*`)];
+              return alts.length > 1 ? `(${alts.join(' | ')})` : alts[0];
             })
             .join(' & ')
         );
@@ -397,6 +439,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
           const patterns = [`%${foldAccents(w)}%`];
           const stem = stemOf(w);
           if (stem) patterns.push(`%${stem}%`);
+          for (const s of synonymsOf(w)) patterns.push(`%${s}%`);
           params.push(patterns);
           params.push(patterns);
         }
