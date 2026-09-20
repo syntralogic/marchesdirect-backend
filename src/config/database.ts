@@ -248,6 +248,17 @@ const applyIncrementalMigrations = async (): Promise<void> => {
       END IF;
     END $$`);
 
+  // Client (19 Sep): trade + department are two of the most heavily-used
+  // filters in the search route above (o.trade_id = ... equality plus the
+  // trades JOIN; UPPER(TRIM(location_department)) = ANY(...) for the
+  // department filter) - neither had an index, so both forced a sequential
+  // scan across the whole opportunities table on every filtered search.
+  // location_department needs a functional index matching the exact
+  // UPPER(TRIM(...)) expression the route filters on - a plain index on
+  // the raw column wouldn't be usable for that comparison.
+  await step(`CREATE INDEX IF NOT EXISTS opportunities_trade ON opportunities(trade_id)`);
+  await step(`CREATE INDEX IF NOT EXISTS opportunities_department ON opportunities(UPPER(TRIM(location_department)))`);
+
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
 
   // BUG (found live on Render, 2026-09-03): documentExpiry.ts's daily sweep
