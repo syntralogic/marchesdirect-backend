@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { findTradeByName, resolveTradeFromText } from './tradeResolver';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { syncLeadToCrm } from './crmSyncService';
@@ -986,8 +987,11 @@ export const classifyOpportunity = async (
 
     const opp = oppResult.rows[0];
 
+    // updated_at is touched here so a row that crashes mid-classification
+    // (leaving 'processing' behind) can be recognised as stale and retried -
+    // see processUnclassifiedOpportunities / the detail route's on-demand path.
     await db.query(
-      'UPDATE opportunities SET ai_classification_status = $1 WHERE id = $2',
+      'UPDATE opportunities SET ai_classification_status = $1, updated_at = NOW() WHERE id = $2',
       ['processing', opportunityId]
     );
 
@@ -1063,18 +1067,25 @@ Estimated Value: ${opp.estimated_value || 'Not specified'}`;
     if (classification.trades && Array.isArray(classification.trades)) {
       for (const trade of classification.trades) {
         if (!trade.name) continue;
-        const tradeResult = await db.query(
-          'SELECT id FROM trades WHERE LOWER(name) LIKE LOWER($1)',
-          [`%${trade.name}%`]
-        );
-        if (tradeResult.rows.length > 0) {
+        // The AI answers with long descriptive phrases ("Isolation thermique
+        // par l'extérieur"), the trades table holds short canonical names
+        // ("Isolation"). The previous `LOWER(name) LIKE '%<ai phrase>%'`
+        // only matched when the canonical name CONTAINED the whole AI phrase,
+        // which is almost never - see tradeResolver.ts.
+        const matched = await findTradeByName(trade.name);
+        if (matched && !tradeIds.some((t) => t.id === matched.id)) {
           tradeIds.push({
-            id: tradeResult.rows[0].id,
+            id: matched.id,
             confidence: trade.confidence || 0.7,
-            name: trade.name,
+            name: matched.name,
           });
         }
       }
+    }
+    // Nothing matched by AI name: fall back to the notice's own title/description.
+    if (tradeIds.length === 0) {
+      const inferred = await resolveTradeFromText(opp.title, opp.description);
+      if (inferred) tradeIds.push({ id: inferred.id, confidence: 0.6, name: inferred.name });
     }
 
     // Find CPV code

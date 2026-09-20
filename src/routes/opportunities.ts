@@ -6,6 +6,7 @@ import { naturePrestationLateral, NATURE_VALUES } from '../utils/naturePrestatio
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts, generateOpportunityAnalysisSections } from '../services/aiService';
 import { ingestOpportunityDocuments } from '../services/documentIngestionService';
 import { computeMatchScore } from '../services/matchScoreService';
+import { resolveTradeFromText } from '../services/tradeResolver';
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { geocodeCity } from '../services/geocodingService';
 import { optionalAuth, authenticate, requireRole, AuthRequest } from '../middleware/auth';
@@ -164,6 +165,82 @@ async function ensureAnalysisSectionsGenerated(
   } catch (err) {
     logger.warn(`On-demand analysis-sections generation failed for ${opportunityId} while serving a detail view: ${err instanceof Error ? err.message : err}`);
     return currentSections;
+  }
+}
+
+// 20 Sep client audit (Romainville fiche still showing "Analyse en cours de
+// génération"): facts and analysis sections were already generated on demand
+// for whatever fiche a visitor opens, but the *classification* (status, métier,
+// nature) and the short summary were only ever produced by the batch job. A
+// fiche that job hadn't reached - or one left behind as 'processing' by a
+// crash/restart, which nothing ever picked up again - kept the pending message
+// indefinitely. Same on-demand + in-process de-dupe pattern as above.
+const inFlightClassifications = new Map<string, Promise<any>>();
+const inFlightSummaries = new Map<string, Promise<any>>();
+
+function classificationNeeded(opp: Record<string, any>): boolean {
+  const status: string | null = opp.ai_classification_status;
+  const updatedAt = opp.updated_at ? new Date(opp.updated_at).getTime() : 0;
+  const ageMs = Date.now() - updatedAt;
+  if (!status || status === 'not_analyzed') return true;
+  // 'failed' is retried, but not on every view (each retry is a paid call).
+  if (status === 'failed') return ageMs > 30 * 60 * 1000;
+  // 'processing' with no run in flight here and no recent stamp = stuck.
+  if (status === 'processing') return !inFlightClassifications.has(opp.id) && ageMs > 5 * 60 * 1000;
+  return false;
+}
+
+async function ensureClassified(opportunity: Record<string, any>) {
+  const id: string = opportunity.id;
+  const running = inFlightClassifications.get(id);
+  if (!running && !classificationNeeded(opportunity)) return;
+  try {
+    let pending = running;
+    if (!pending) {
+      pending = classifyOpportunity(id).finally(() => inFlightClassifications.delete(id));
+      inFlightClassifications.set(id, pending);
+    }
+    await pending;
+    const refreshed = await db.query(
+      `SELECT o.ai_classification_status, o.ai_matched_trades, o.trade_id, o.complexity_level,
+              o.nature_prestation, o.updated_at, t.name as trade_name
+       FROM opportunities o LEFT JOIN trades t ON o.trade_id = t.id
+       WHERE o.id = $1`,
+      [id]
+    );
+    if (refreshed.rows[0]) Object.assign(opportunity, refreshed.rows[0]);
+  } catch (err) {
+    logger.warn(`On-demand classification failed for ${id} while serving a detail view: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+async function ensureSummaryGenerated(opportunity: Record<string, any>) {
+  if (opportunity.ai_summary || !opportunity.description || String(opportunity.description).trim().length < 40) return;
+  try {
+    let pending = inFlightSummaries.get(opportunity.id);
+    if (!pending) {
+      pending = generateOpportunitySummary(opportunity.id).finally(() => inFlightSummaries.delete(opportunity.id));
+      inFlightSummaries.set(opportunity.id, pending);
+    }
+    opportunity.ai_summary = await pending;
+  } catch (err) {
+    logger.warn(`On-demand summary generation failed for ${opportunity.id} while serving a detail view: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+// Last-resort métier for a fiche the classifier never linked to a trade: read
+// it off the notice's own title/description (only ever a trade that exists in
+// the table, ambiguous text resolves to null). Persisted when trade_id is
+// still empty so the métier filter and the match score agree with the fiche.
+async function ensureTradeResolved(opportunity: Record<string, any>) {
+  if (opportunity.trade_name) return;
+  const inferred = await resolveTradeFromText(opportunity.title, opportunity.description);
+  if (!inferred) return;
+  opportunity.trade_name = inferred.name;
+  if (!opportunity.trade_id) {
+    opportunity.trade_id = inferred.id;
+    db.query('UPDATE opportunities SET trade_id = $1 WHERE id = $2 AND trade_id IS NULL', [inferred.id, opportunity.id])
+      .catch(err => logger.warn(`Could not persist inferred trade for ${opportunity.id}: ${err instanceof Error ? err.message : err}`));
   }
 }
 
@@ -1084,9 +1161,12 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     const [extractedFacts, analysisSections] = await Promise.all([
       ensureFactsExtracted(opportunity.id, opportunity.ai_extracted_facts),
       ensureAnalysisSectionsGenerated(opportunity.id, opportunity.ai_analysis_sections, opportunity.ai_analysis_sections_status),
+      ensureClassified(opportunity),
+      ensureSummaryGenerated(opportunity),
     ]);
     opportunity.ai_extracted_facts = extractedFacts;
     opportunity.ai_analysis_sections = analysisSections;
+    await ensureTradeResolved(opportunity);
     kickOffDocumentIngestionIfPending(opportunity.id, opportunity.dce_documents_status);
 
     const sessionId = (req.query.sessionId as string) || '';
