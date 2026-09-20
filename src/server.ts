@@ -387,6 +387,32 @@ const startServer = async () => {
       }
     });
 
+    // Client's 20 Sep audit: "10 à 15 secondes... impression d'un site
+    // vide" on arrival. Render's free tier spins a web service down after
+    // ~15 min with no incoming request, and the next request has to wait
+    // for a full cold start (often 30-50s, not just 10-15) before it's
+    // answered at all - no amount of frontend loading-state polish fixes
+    // that, since nothing can even respond yet. RENDER_EXTERNAL_URL is set
+    // automatically by Render on every web service, so this only self-pings
+    // when actually running there (a no-op locally/in CI). Pinging our own
+    // /health keeps the service classified as "active" so a real visitor
+    // is far less likely to land on a cold start. Doesn't eliminate the
+    // very first deploy's cold start, and won't help at all once the free
+    // tier's own monthly instance-hours run out - the durable fix is a
+    // paid Render plan (no spin-down at all), this just closes the gap
+    // until that's in place. Set DISABLE_KEEP_ALIVE_PING=true to turn off.
+    if (process.env.RENDER_EXTERNAL_URL && process.env.DISABLE_KEEP_ALIVE_PING !== 'true') {
+      const pingUrl = `${process.env.RENDER_EXTERNAL_URL}/health`;
+      setInterval(() => {
+        fetch(pingUrl).catch(() => {
+          // Non-fatal: worst case this particular ping is missed and the
+          // service spins down as it would have anyway - never worth
+          // logging noise for or crashing over.
+        });
+      }, 10 * 60 * 1000); // every 10 min, comfortably inside Render's ~15 min idle window
+      logger.info(`⏰ Keep-alive ping enabled for ${pingUrl} (every 10 min)`);
+    }
+
     // Graceful shutdown - was previously registered outside startServer()
     // and called db.end() (closing the pg pool) immediately on SIGTERM,
     // with no server.close() first. Render sends SIGTERM on every deploy
