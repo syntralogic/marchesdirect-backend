@@ -226,10 +226,17 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     // at the database level - so even removing every condition in this route
     // couldn't have shown those rows, the view itself never carried them.
     // Reading straight off `opportunities` instead removes that ceiling.
-    // Trade-off: search_vector was precomputed + GIN-indexed on the view for
-    // speed; here it's computed on the fly per request. Fine at the current
-    // ~47k row scale, would need a functional index (or reinstating a view
-    // without the status/deadline exclusions) if that becomes a bottleneck.
+    // Trade-off (RESOLVED - 20 Sep, client's "réduire cette attente" /
+    // 10-15s load complaint): search_vector was precomputed + GIN-indexed
+    // on the view for speed; reading straight off `opportunities` meant
+    // recomputing to_tsvector(unaccent(...)) from scratch per row per
+    // request instead, with no index at all - likely the actual cause of
+    // the slow initial load, not just a UI loading-state issue. Fixed by
+    // regenerating opportunities' own search_vector (GENERATED STORED,
+    // GIN-indexed) to include unaccent via an immutable wrapper function -
+    // see config/database.ts's applyIncrementalMigrations for the why. The
+    // @@ / ts_rank below now query that column directly instead of
+    // recomputing the expression.
     //
     // status = 'merged' is the one exception kept hard-excluded below:
     // that's not a real-world tender status the client asked to surface,
@@ -421,7 +428,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
           tradeConds.push(`(unaccent(t.name) ILIKE ANY($${nameIdx}::text[]) OR unaccent(o.ai_matched_trades::text) ILIKE ANY($${matchedIdx}::text[]))`);
         }
         conditions.push(
-          `(to_tsvector('french', unaccent(COALESCE(o.title, '') || ' ' || COALESCE(o.description, ''))) @@ to_tsquery('french', unaccent($${tsIdx}))
+          `(o.search_vector @@ to_tsquery('french', unaccent($${tsIdx}))
             OR (${tradeConds.join(' AND ')}))`
         );
         tradeMatchExpr = tradeConds.join(' AND ');
@@ -602,7 +609,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       // with no q, there's nothing to score, so this falls back to the
       // default order rather than an arbitrary/meaningless ranking.
       orderClause = tsRankParamIdx !== null
-        ? `ts_rank(to_tsvector('french', unaccent(COALESCE(o.title, '') || ' ' || COALESCE(o.description, ''))), to_tsquery('french', unaccent($${tsRankParamIdx}))) DESC, ${DEFAULT_ORDER}`
+        ? `ts_rank(o.search_vector, to_tsquery('french', unaccent($${tsRankParamIdx}))) DESC, ${DEFAULT_ORDER}`
         : DEFAULT_ORDER;
     }
     // R03/R04 boost: an AI-classified trade match outranks a same-word,

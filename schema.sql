@@ -8,6 +8,18 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 CREATE EXTENSION IF NOT EXISTS "unaccent";
 
+-- unaccent(text) is STABLE not IMMUTABLE (looks up the active dictionary at
+-- run time), so it can't be used directly in a GENERATED STORED column or a
+-- functional index. Pinning the dictionary by name makes it deterministic
+-- for a given input, which Postgres accepts as IMMUTABLE - standard
+-- workaround, needed below for opportunities.search_vector to actually be
+-- usable by an index for accent-insensitive search (see
+-- applyIncrementalMigrations() in config/database.ts for the full
+-- rationale, kept in sync here for fresh installs).
+CREATE OR REPLACE FUNCTION immutable_unaccent(text) RETURNS text AS $$
+  SELECT unaccent('unaccent', $1)
+$$ LANGUAGE sql IMMUTABLE PARALLEL SAFE;
+
 -- ============================================================================
 -- 1. BRANDING & CONFIGURATION
 -- ============================================================================
@@ -449,7 +461,7 @@ ALTER TABLE opportunities DROP COLUMN IF EXISTS search_vector;
 ALTER TABLE opportunities ALTER COLUMN buyer_name TYPE VARCHAR(1000);
 ALTER TABLE opportunities ALTER COLUMN title TYPE VARCHAR(1000);
 ALTER TABLE opportunities ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (
-  to_tsvector('french', COALESCE(title, '') || ' ' || COALESCE(description, ''))
+  to_tsvector('french', immutable_unaccent(COALESCE(title, '') || ' ' || COALESCE(description, '')))
 ) STORED;
 CREATE INDEX IF NOT EXISTS opportunities_search ON opportunities USING GIN(search_vector);
 
