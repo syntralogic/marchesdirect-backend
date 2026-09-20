@@ -1127,6 +1127,47 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // session id, otherwise it's not a throttle).
   await step(`CREATE INDEX IF NOT EXISTS phone_verifications_phone_sent ON phone_verifications(phone, last_sent_at)`);
 
+  // Q02/N02 (20 Sep client audit): "Les descriptions des métiers restent
+  // en anglais dans la page « Secteurs d'activité »." Turned out to be
+  // every one of schema.sql's original 16 trades, not just the 3
+  // editorial-catalog additions below - the whole seed list was written
+  // in English (e.g. "Structural work, foundations, load-bearing walls"
+  // for Gros oeuvre). schema.sql itself is corrected for future fresh
+  // databases, but that file only ever runs once against an empty
+  // database (see DEPLOY.md) - an already-seeded database (every real
+  // deployment) needs an explicit UPDATE to fix the rows that already
+  // exist. Matched by name, only touching rows whose description is
+  // still exactly the old English text, so a description anyone has
+  // since edited by hand isn't silently overwritten.
+  const TRADE_DESCRIPTION_FR: Record<string, { old: string; fr: string }> = {
+    'Gros oeuvre': { old: 'Structural work, foundations, load-bearing walls', fr: 'Gros œuvre, fondations, murs porteurs' },
+    'Démolition': { old: 'Demolition, site clearance and preparation', fr: 'Démolition, déblaiement et préparation de site' },
+    'Maçonnerie': { old: 'Masonry and bricklaying', fr: 'Maçonnerie et travaux de briquetage' },
+    'Charpente': { old: 'Roof framing and structural carpentry', fr: 'Charpente et ossature bois' },
+    'Couverture': { old: 'Roofing and roof waterproofing', fr: 'Couverture et étanchéité de toiture' },
+    'Électricité': { old: 'Electrical installation work', fr: 'Travaux d\u2019installation électrique' },
+    'Plomberie': { old: 'Plumbing and sanitary installation', fr: 'Plomberie et installations sanitaires' },
+    'CVC': { old: 'Heating, ventilation and air conditioning', fr: 'Chauffage, ventilation et climatisation' },
+    'Isolation': { old: 'Thermal and acoustic insulation', fr: 'Isolation thermique et acoustique' },
+    'Plâtrerie': { old: 'Plastering and drywall', fr: 'Plâtrerie et cloisons sèches' },
+    'Menuiserie': { old: 'Joinery, windows and doors', fr: 'Menuiserie, fenêtres et portes' },
+    'Carrelage': { old: 'Floor and wall tiling', fr: 'Carrelage sols et murs' },
+    'Peinture': { old: 'Painting and surface finishing', fr: 'Peinture et finitions de surface' },
+    'Vitrerie': { old: 'Glazing work', fr: 'Travaux de vitrerie' },
+    'Voirie et réseaux (VRD)': { old: 'Road works and utility networks', fr: 'Travaux de voirie et réseaux divers' },
+    'Bâtiment général': { old: 'General building construction', fr: 'Construction de bâtiments, tous corps d\u2019état' },
+  };
+  for (const [name, { old, fr }] of Object.entries(TRADE_DESCRIPTION_FR)) {
+    try {
+      await pool.query(
+        `UPDATE trades SET description = $1 WHERE name = $2 AND description = $3`,
+        [fr, name, old]
+      );
+    } catch (err) {
+      logger.error(`⚠️ Trade description FR fix failed for "${name}" (continuing with the rest)`, err);
+    }
+  }
+
   // Client's brief (15 Sep, "Appels d'offres privés" / "Sous-traitance"):
   // these two journeys have no real scraped source yet, so a first
   // editorial catalog is being built (see scripts/seedEditorialListings.ts)
@@ -1134,12 +1175,20 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // feed doesn't exist. Three of the client's target métiers aren't in the
   // trades table at all yet (espaces verts, nettoyage, maintenance -
   // schema.sql's seed list only covers construction trades).
+  // Q02/N02 (20 Sep client audit): "Les descriptions des métiers restent
+  // en anglais dans la page « Secteurs d'activité »." These three rows
+  // (added for the editorial-catalog métiers, see comment above) were
+  // seeded with English description text - the only ones that were, the
+  // rest of the trades table (schema.sql's original seed) is already
+  // French. DO UPDATE instead of DO NOTHING so a database that already
+  // ran this once with the English text gets corrected too, not just new
+  // databases going forward.
   await step(`
     INSERT INTO trades (name, slug, description) VALUES
-    ('Espaces verts', 'espaces-verts', 'Landscaping and green-space maintenance'),
-    ('Nettoyage', 'nettoyage', 'Cleaning services (buildings, sites, common areas)'),
-    ('Maintenance', 'maintenance', 'Building maintenance and upkeep contracts')
-    ON CONFLICT (name) DO NOTHING
+    ('Espaces verts', 'espaces-verts', 'Aménagement paysager et entretien des espaces verts'),
+    ('Nettoyage', 'nettoyage', 'Prestations de nettoyage (bâtiments, sites, parties communes)'),
+    ('Maintenance', 'maintenance', 'Contrats de maintenance et d''entretien de bâtiments')
+    ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description
   `);
   // A dedicated source row for this content: it isn't a scraped connector
   // (active=false, no endpoint), just an identity to attach editorial rows
