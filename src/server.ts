@@ -345,6 +345,7 @@ const startServer = async () => {
     require('./jobs/searchIndexRefresh').startSearchIndexRefresh();
     require('./jobs/factsBackfillJob').startFactsBackfillJob();
     require('./jobs/locationRegionBackfillJob').startLocationRegionBackfillJob();
+    require('./jobs/geocodingBackfillJob').startGeocodingBackfillJob();
     require('./jobs/staleSummaryBackfillJob').startStaleSummaryBackfillJob();
     require('./jobs/analysisSectionsBackfillJob').startAnalysisSectionsBackfillJob();
     require('./jobs/opportunityStatusJob').startOpportunityStatusJob();

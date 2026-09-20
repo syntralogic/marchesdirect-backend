@@ -200,6 +200,13 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       trade_id,
       region,
       city,
+      lat,           // client audit (19 Sep): city-radius search never actually filtered by
+      lng,           // distance ("Angoulême à 25 km puis à 200 km: exactement les mêmes huit
+      radius_km,     // marchés"). See geocodingService.ts/geocodingBackfillJob.ts for why
+                     // opportunities didn't have coordinates until now, and why this needs to
+                     // stay a distinct lat/lng+radius_km filter rather than folding into `city`:
+                     // a visitor picking a city from the map/autocomplete now sends its real
+                     // coordinates, and this filters by actual distance instead of a text match.
       department,
       min_value,
       max_value,
@@ -484,7 +491,39 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         params.push(regions.map(r => `%${r}%`));
       }
     }
-    if (city) {
+    const latNum = parseFloat(lat);
+    const lngNum = parseFloat(lng);
+    const radiusNum = parseFloat(radius_km);
+    const hasRadiusSearch = !isNaN(latNum) && !isNaN(lngNum) && !isNaN(radiusNum) && radiusNum > 0;
+
+    if (hasRadiusSearch) {
+      // Real distance filter, not a text match - a visitor searching
+      // "around Angoulême, 25 km" should see nearby communes too, not just
+      // rows whose location_city literally says "Angoulême". Same
+      // Haversine formula as /stats/near above, so the count shown there
+      // and the results list here always agree (client audit point 10/G14
+      // territory - a count and its destination list disagreeing was
+      // already flagged once for region/department).
+      // location_latitude = 0 AND location_longitude = 0 is the
+      // geocoding-backfill-job sentinel for "couldn't geocode this city" -
+      // excluded explicitly rather than relying on it always failing the
+      // distance check, since a radius large enough to reach off the coast
+      // of Africa is not something to depend on staying true forever.
+      conditions.push(`
+        o.location_latitude IS NOT NULL AND o.location_longitude IS NOT NULL
+        AND NOT (o.location_latitude = 0 AND o.location_longitude = 0)
+        AND (
+          6371 * acos(
+            LEAST(1, GREATEST(-1,
+              cos(radians($${idx++})) * cos(radians(o.location_latitude)) *
+              cos(radians(o.location_longitude) - radians($${idx++})) +
+              sin(radians($${idx++})) * sin(radians(o.location_latitude))
+            ))
+          )
+        ) <= $${idx++}
+      `);
+      params.push(latNum, lngNum, latNum, radiusNum);
+    } else if (city) {
       const cities = city.split(',').map(c => c.trim()).filter(Boolean);
       if (cities.length > 0) {
         // BOAMP/DECP store city names inconsistently ("BORDEAUX",
