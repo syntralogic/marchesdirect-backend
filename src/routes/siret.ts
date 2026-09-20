@@ -4,6 +4,7 @@ import axios from 'axios';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { syncLeadToCrm } from '../services/crmSyncService';
+import { sendPrefilledDossierEmail } from '../services/prefilledDossierService';
 import { AuthRequest } from '../middleware/auth';
 import {
   requestVerificationCode,
@@ -525,7 +526,7 @@ router.post(
 
     const { sessionId, phone, email, opportunityId } = req.body;
 
-    const existing = await db.query('SELECT id, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
+    const existing = await db.query('SELECT id, siret, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
     if (existing.rows.length === 0) {
       return res.status(409).json({ error: 'company_not_identified', message: "Identifiez d'abord votre entreprise." });
     }
@@ -548,9 +549,45 @@ router.post(
       [phone, email, sessionId]
     );
 
+    const companyName = existing.rows[0].company_data?.name || null;
+    const companySiret = existing.rows[0].siret || null;
+
+    // Client's brief (concordance -> dossier flow): once contact details are
+    // validated (and phone OTP-confirmed, when required - the guard above
+    // already enforces that), send the free "dossier pré-rempli" PDF right
+    // away rather than waiting for the visitor to create an account. Kept
+    // out of the opportunityId-scoped try/catch below since it doesn't
+    // depend on CRM linking succeeding.
+    let dossierEmailed = false;
     if (opportunityId) {
       try {
-        const companyName = existing.rows[0].company_data?.name || null;
+        const oppFactsResult = await db.query(
+          `SELECT title, buyer_name, source_reference, location_city, deadline, estimated_value, currency
+           FROM opportunities WHERE id = $1 AND deleted_at IS NULL`,
+          [opportunityId]
+        );
+        if (oppFactsResult.rows.length > 0 && companyName) {
+          const o = oppFactsResult.rows[0];
+          dossierEmailed = await sendPrefilledDossierEmail(email, {
+            companyName,
+            siret: companySiret,
+            opportunityTitle: o.title,
+            buyerName: o.buyer_name,
+            reference: o.source_reference,
+            locationCity: o.location_city,
+            submissionDeadline: o.deadline ? new Date(o.deadline).toLocaleDateString('fr-FR') : null,
+            estimatedValue: o.estimated_value ? Number(o.estimated_value) : null,
+            currency: o.currency,
+          });
+        }
+      } catch (err) {
+        // Non-fatal, same reasoning as the CRM linking block below.
+        logger.error('Prefilled dossier email dispatch error (non-fatal):', err);
+      }
+    }
+
+    if (opportunityId) {
+      try {
         const oppResult = await db.query(
           `SELECT o.id, ot.brand_id FROM opportunities o
            LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
@@ -585,7 +622,7 @@ router.post(
       }
     }
 
-    res.json({ leadCaptured: true });
+    res.json({ leadCaptured: true, dossierEmailed });
   }
 );
 
