@@ -194,6 +194,60 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // schema.sql) so it's picked up on already-provisioned databases too.
   await step(`CREATE EXTENSION IF NOT EXISTS unaccent`);
 
+  // Client (19 Sep), stated top priority: "pendant 10 à 15 secondes, les
+  // opportunités... n'apparaissent pas... il faut réduire cette attente."
+  // Root cause, already flagged in routes/opportunities.ts's own comment:
+  // opportunities already has a STORED + GIN-indexed search_vector column
+  // (below, schema.sql) - but it predates the accent-fold fix (R11) and
+  // doesn't call unaccent(), so the search route couldn't use it once
+  // accent-insensitive matching was required and instead recomputes
+  // to_tsvector('french', unaccent(title || description)) from scratch on
+  // every single row, on every single request, with no index at all - a
+  // full-table scan + text-search parse across the whole (~47k+ and
+  // growing, per the editorial catalog work) opportunities table, twice
+  // per request (once for the page of results, once again for the total
+  // count).
+  //
+  // unaccent(text) alone is STABLE not IMMUTABLE (it looks up the active
+  // search dictionary at run time), so it can't be used directly in a
+  // GENERATED ALWAYS AS STORED column expression or a plain functional
+  // index - Postgres rejects both with "generation expression is not
+  // immutable". The standard fix (well-documented Postgres pattern): wrap
+  // it in a SQL function that pins the dictionary by name, which Postgres
+  // accepts as IMMUTABLE since the output is then deterministic for a
+  // given input.
+  await step(`CREATE OR REPLACE FUNCTION immutable_unaccent(text) RETURNS text AS $$
+    SELECT unaccent('unaccent', $1)
+  $$ LANGUAGE sql IMMUTABLE PARALLEL SAFE`);
+
+  // Regenerate search_vector to match the exact accent-insensitive
+  // expression the search route needs (was to_tsvector('french',
+  // title || description) with no unaccent at all). A GENERATED column
+  // can't be ALTERed in place - has to be dropped and recreated, same
+  // constraint already handled once above the older "search_vector ...
+  // cannot alter type of a column used by a generated column" block. Text
+  // comparison guards against re-running the drop+recreate (and losing/
+  // rebuilding the GIN index) on every boot once a DB already has the
+  // unaccent-aware version - CREATE INDEX on ~47k+ rows isn't free to redo
+  // on every restart for no reason.
+  await step(`DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_attrdef ad
+        JOIN pg_attribute a ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+        WHERE a.attrelid = 'opportunities'::regclass
+          AND a.attname = 'search_vector'
+          AND pg_get_expr(ad.adbin, ad.adrelid) LIKE '%immutable_unaccent%'
+      ) THEN
+        DROP INDEX IF EXISTS opportunities_search;
+        ALTER TABLE opportunities DROP COLUMN IF EXISTS search_vector;
+        ALTER TABLE opportunities ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (
+          to_tsvector('french', immutable_unaccent(COALESCE(title, '') || ' ' || COALESCE(description, '')))
+        ) STORED;
+        CREATE INDEX opportunities_search ON opportunities USING GIN(search_vector);
+      END IF;
+    END $$`);
+
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
 
   // BUG (found live on Render, 2026-09-03): documentExpiry.ts's daily sweep
