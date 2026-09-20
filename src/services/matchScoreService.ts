@@ -1,4 +1,5 @@
 import { db } from '../config/database';
+import { resolveTradeFromText } from './tradeResolver';
 
 // ============================================================================
 // OPPORTUNITY MATCH SCORE
@@ -32,6 +33,26 @@ export interface CriterionWeight {
   weight: number;
 }
 
+// One line of the numerical justification shown under the score: every
+// criterion that COULD contribute (earned or not), with its points, so the
+// visitor can reconcile the percentage with the listed lines instead of
+// being handed a number and a partial list of positives.
+export interface ScoreBreakdownItem {
+  label: string;
+  points: number;      // points actually earned (0 when not earned)
+  maxPoints: number;   // what this criterion is worth when fully met
+  earned: boolean;
+  detail: string;      // why it was / wasn't earned, in plain French
+}
+
+export interface ScoreBreakdown {
+  kind: 'listing' | 'profile';
+  items: ScoreBreakdownItem[];
+  earnedPoints: number;   // sum of earned points
+  cappedPoints: number;   // after the 100-point cap
+  formula: string;        // how cappedPoints becomes the displayed score
+}
+
 export interface MatchScoreResult {
   score: number;
   scoreTitle: string;
@@ -46,6 +67,7 @@ export interface MatchScoreResult {
   // disagree with the percentage shown next to it.
   matchLabel: string | null;
   positiveFactors: ScoreFactor[];
+  scoreBreakdown?: ScoreBreakdown;
   warning: string | null;
   criteria: CriterionWeight[];
   eligibility: EligibilityItem[];
@@ -177,6 +199,17 @@ export const computeMatchScore = async (
     throw new Error('Opportunity not found');
   }
   const opp = oppResult.rows[0];
+  // 20 Sep client audit (Marssac): a fiche whose classifier never linked a
+  // trade read "métier non précisé" although the title says isolation
+  // thermique extérieure. Same read-time inference the detail route uses, so
+  // fiche and score never disagree about the métier.
+  if (!opp.trade_name) {
+    const inferred = await resolveTradeFromText(opp.title, opp.description);
+    if (inferred) {
+      opp.trade_name = inferred.name;
+      if (!opp.trade_id) opp.trade_id = inferred.id;
+    }
+  }
   const journey: string = opp.journey || 'tender';
   const isPublic = journey === 'public_procurement';
 
@@ -189,6 +222,7 @@ export const computeMatchScore = async (
   let score = 0;
   let scoreTitle: string;
   let scoreNote: string;
+  let scoreBreakdown: ScoreBreakdown | undefined;
 
   let company: any = null;
   if (companyId) {
@@ -258,6 +292,37 @@ export const computeMatchScore = async (
     // each other instead of all flattening onto the same ceiling.
     const listingQuality = positiveFactors.reduce((sum, f) => sum + f.points, 0);
     score = Math.round(Math.min(100, listingQuality) * (MAX_NON_PERSONALIZED_SCORE / 100));
+    // Numerical justification (20 Sep audit: "la justification chiffrée du
+    // score initial reste insuffisante"). Only the earned lines were ever
+    // returned, and they summed to a different number than the one shown
+    // (e.g. 57 points listed, 31 % displayed) because of the rescale above -
+    // which was never surfaced. List every criterion with earned/max points
+    // and spell out the conversion.
+    const hasDescription = !!(opp.description && opp.description.length > 80);
+    const hasValue = !!opp.estimated_value;
+    const hasDeadline = !!opp.deadline;
+    const smallBudget = hasValue && Number(opp.estimated_value) < 300000;
+    const item = (label: string, maxPoints: number, earned: boolean, okDetail: string, koDetail: string): ScoreBreakdownItem =>
+      ({ label, maxPoints, earned, points: earned ? maxPoints : 0, detail: earned ? okDetail : koDetail });
+    const items: ScoreBreakdownItem[] = [
+      item('Description complète et structurée', 32, hasDescription, 'La description de l’avis est détaillée.', 'Description absente ou trop courte.'),
+      item('Budget et calendrier définis', 25, hasValue && hasDeadline, 'Montant estimé et date limite renseignés.', hasValue ? 'Date limite non renseignée.' : 'Montant non communiqué.'),
+      item('Montant adapté aux PME', 18, smallBudget, 'Montant estimé inférieur à 300 000 €.', hasValue ? 'Montant estimé supérieur ou égal à 300 000 €.' : 'Montant non communiqué : critère non évaluable.'),
+      item('Localisation précisée', 10, !!opp.location_city, 'Commune d’intervention indiquée.', 'Commune d’intervention non précisée.'),
+      item('Calendrier de réponse identifié', 15, hasDeadline, 'Date limite de remise identifiée.', 'Date limite non communiquée.'),
+      item('Lot / métier identifié', 10, !!opp.trade_name, `Métier retenu : ${opp.trade_name}.`, 'Aucun métier n’a pu être rattaché à cette annonce.'),
+    ];
+    const earnedPoints = items.reduce((sum, i) => sum + i.points, 0);
+    const cappedPoints = Math.min(100, earnedPoints);
+    scoreBreakdown = {
+      kind: 'listing',
+      items,
+      earnedPoints,
+      cappedPoints,
+      formula: earnedPoints === 0
+        ? `Aucun critère rempli : score plancher de ${Math.min(isPublic ? 45 : 30, MAX_NON_PERSONALIZED_SCORE)} %.`
+        : `${earnedPoints} point${earnedPoints > 1 ? 's' : ''} sur 110 possibles${earnedPoints > 100 ? ' (plafonnés à 100)' : ''}. Tant qu’aucune caractéristique de votre entreprise n’est comparée, ce total est ramené à un maximum de ${MAX_NON_PERSONALIZED_SCORE} % : ${cappedPoints} × ${MAX_NON_PERSONALIZED_SCORE} % = ${score} %.`,
+    };
     scoreNote = isPublic
       ? 'Score du dossier public, non personnalisé : aucune caractéristique de votre entreprise n’a encore été comparée.'
       : 'Non personnalisé pour l’instant : aucune caractéristique de votre entreprise n’a encore été comparée. Renseignez votre profil pour obtenir un indice de correspondance réel.';
@@ -289,9 +354,12 @@ export const computeMatchScore = async (
       // the sector was related or not.
       positiveFactors.push({ label: 'Lot identifié, compatibilité métier non confirmée', points: 8 });
     }
+    const tradePoints = tradeMatch === 'strong' ? 50 : tradeMatch === 'partial' ? 25 : opp.trade_id ? 8 : 0;
 
     // Location / working radius match (Haversine, same approach as
     // matchOpportunitiesToCompany in aiService.ts)
+    let zoneEarned = false;
+    let zoneDetail = 'Distance non évaluable : localisation de l’entreprise ou du marché inconnue.';
     if (company.location_latitude && opp.location_latitude) {
       const R = 6371;
       const dLat = ((opp.location_latitude - company.location_latitude) * Math.PI) / 180;
@@ -302,17 +370,27 @@ export const computeMatchScore = async (
           Math.cos((opp.location_latitude * Math.PI) / 180) *
           Math.sin(dLng / 2) ** 2;
       const distanceKm = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      if (distanceKm <= (company.working_radius_km || 100)) {
+      const radius = company.working_radius_km || 100;
+      if (distanceKm <= radius) {
         positiveFactors.push({ label: 'Zone d’intervention couverte', points: 12 });
+        zoneEarned = true;
+        zoneDetail = `Marché à environ ${Math.round(distanceKm)} km, dans votre rayon d’intervention de ${radius} km.`;
+      } else {
+        zoneDetail = `Marché à environ ${Math.round(distanceKm)} km, au-delà de votre rayon d’intervention de ${radius} km.`;
       }
     }
 
     // Budget within a plausible multiple of company revenue
+    let budgetEarned = false;
+    let budgetDetail = 'Montant du marché ou chiffre d’affaires de l’entreprise non renseigné : critère non évaluable.';
     if (opp.estimated_value && company.annual_revenue) {
       if (Number(opp.estimated_value) <= Number(company.annual_revenue) * 3) {
         positiveFactors.push({ label: 'Budget dans votre gamme habituelle', points: 8 });
+        budgetEarned = true;
+        budgetDetail = 'Montant estimé inférieur ou égal à 3 fois votre chiffre d’affaires.';
       } else {
         warning = 'Le montant de cette opportunité dépasse largement votre chiffre d’affaires habituel.';
+        budgetDetail = 'Montant estimé supérieur à 3 fois votre chiffre d’affaires.';
       }
     }
 
@@ -321,7 +399,37 @@ export const computeMatchScore = async (
       `SELECT id FROM company_references WHERE company_id = $1 AND completion_date > NOW() - INTERVAL '3 years' LIMIT 1`,
       [company.id]
     );
-    if (refResult.rows.length > 0) positiveFactors.push({ label: 'Référence récente détectée', points: 6 });
+    const refEarned = refResult.rows.length > 0;
+    if (refEarned) positiveFactors.push({ label: 'Référence récente détectée', points: 6 });
+
+    const profileItems: ScoreBreakdownItem[] = [
+      {
+        label: tradeMatch === 'strong' ? 'Métier parfaitement compatible' : tradeMatch === 'partial' ? 'Métier proche de votre activité' : 'Compatibilité du métier',
+        points: tradePoints,
+        maxPoints: 50,
+        earned: tradePoints > 0,
+        detail: tradeMatch === 'strong'
+          ? `Votre activité déclarée recoupe le métier de l’annonce (${opp.trade_name}).`
+          : tradeMatch === 'partial'
+            ? 'Votre activité recoupe l’un des métiers associés à cette annonce.'
+            : opp.trade_id
+              ? `Métier identifié (${opp.trade_name}) mais sans lien confirmé avec votre activité déclarée : 8 points seulement.`
+              : 'Aucun métier rattaché à l’annonce ou lien avec votre activité non établi.',
+      },
+      { label: 'Zone d’intervention couverte', points: zoneEarned ? 12 : 0, maxPoints: 12, earned: zoneEarned, detail: zoneDetail },
+      { label: 'Budget dans votre gamme habituelle', points: budgetEarned ? 8 : 0, maxPoints: 8, earned: budgetEarned, detail: budgetDetail },
+      { label: 'Référence récente détectée', points: refEarned ? 6 : 0, maxPoints: 6, earned: refEarned, detail: refEarned ? 'Une référence de moins de 3 ans figure dans votre dossier.' : 'Aucune référence de moins de 3 ans dans votre dossier.' },
+    ];
+    const profileEarned = profileItems.reduce((sum, i) => sum + i.points, 0);
+    scoreBreakdown = {
+      kind: 'profile',
+      items: profileItems,
+      earnedPoints: profileEarned,
+      cappedPoints: Math.min(100, profileEarned),
+      formula: profileEarned === 0
+        ? 'Aucun critère confirmé : score plancher de 40 %.'
+        : `${profileEarned} point${profileEarned > 1 ? 's' : ''} sur 76 possibles = ${Math.min(100, profileEarned)} %.`,
+    };
 
     score = Math.min(100, positiveFactors.reduce((sum, f) => sum + f.points, 0));
   }
@@ -392,13 +500,24 @@ export const computeMatchScore = async (
 
   const criteria = CRITERIA_BY_JOURNEY[journey] || CRITERIA_BY_JOURNEY.tender;
 
+  // 20 Sep client audit: this always opened with "Budget cadré" even when the
+  // notice gives no amount at all ("montant non communiqué" right above on the
+  // fiche), and claimed "critères de notation transparents" although the
+  // weighting shown is a per-journey default, not read from the notice. Every
+  // clause below is now conditional on the data actually being there.
+  const euro = (n: number) => `${new Intl.NumberFormat('fr-FR').format(Math.round(n))} € HT`;
+  const publicFacts = [
+    opp.estimated_value ? `budget estimé à ${euro(Number(opp.estimated_value))}` : 'montant non communiqué dans l’avis',
+    opp.trade_name ? `lot ${String(opp.trade_name).toLowerCase()} identifié` : null,
+    opp.deadline ? 'date limite de remise connue' : null,
+  ].filter(Boolean).join(', ');
   const whyRespond = isPublic
-    ? `Budget cadré${opp.trade_name ? `, lot ${opp.trade_name.toLowerCase()} identifié` : ''}, paiement public et critères de notation transparents : vous savez exactement où concentrer votre réponse.`
+    ? `Marché public : ${publicFacts}. Paiement public et règles de consultation publiées : vous savez où concentrer votre réponse.`
     : company
     ? 'Cette opportunité correspond à votre métier et votre zone d’intervention d’après votre profil renseigné.'
     : 'Laissez vos coordonnées pour recevoir une analyse personnalisée à partir de votre profil d’entreprise.';
 
-  return { score, scoreTitle, scoreNote, scoreDisclaimer: SCORE_DISCLAIMER, matchLabel, positiveFactors, warning, criteria, eligibility, whyRespond };
+  return { score, scoreTitle, scoreNote, scoreDisclaimer: SCORE_DISCLAIMER, matchLabel, positiveFactors, scoreBreakdown, warning, criteria, eligibility, whyRespond };
 };
 
 export const computeSubcontractNeedMatchScore = (need: {

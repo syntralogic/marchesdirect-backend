@@ -52,7 +52,15 @@ export const processUnclassifiedOpportunities = async () => {
   try {
     const result = await db.query(
       `SELECT id FROM opportunities
-       WHERE ai_classification_status IN ('not_analyzed', 'failed')
+       WHERE (
+           ai_classification_status IN ('not_analyzed', 'failed')
+           -- A crash/restart mid-classification leaves 'processing' behind
+           -- forever (nothing selected it again), so the fiche kept saying
+           -- "Analyse en cours de génération" for good. classifyOpportunity
+           -- stamps updated_at when it starts, so anything still
+           -- 'processing' well past a normal call's duration is stale.
+           OR (ai_classification_status = 'processing' AND updated_at < NOW() - INTERVAL '15 minutes')
+         )
          AND deleted_at IS NULL
        ORDER BY created_at ASC
        LIMIT $1`,
