@@ -269,6 +269,51 @@ function kickOffDocumentIngestionIfPending(opportunityId: string, dceDocumentsSt
     .finally(() => inFlightDocumentIngestions.delete(opportunityId));
 }
 
+// BUG (client audit, three rounds running - 19/20 Sep - "Failed to search
+// opportunities" / zero results on EVERY keyword search, while geo/department/
+// trade_id-only filters keep working): every earlier fix here assumed
+// `opportunities.search_vector` actually exists, because
+// applyIncrementalMigrations() (config/database.ts) is supposed to add it on
+// boot. But that migration runs as a best-effort, per-statement-isolated
+// step() that logs and CONTINUES on failure rather than crashing the server
+// (deliberately, per its own comment - a bad migration must never take the
+// whole API down) - so if that particular ALTER TABLE ever fails on the
+// live database (lock timeout, a role without DDL rights, anything), the
+// server boots normally, geo/department searches work fine (they never touch
+// this column), and every single q= search 500s identically forever, with no
+// visible symptom anywhere except this route's own error log - which lines
+// up exactly with what three consecutive audits describe. Rather than assume
+// the migration succeeded, this checks once (cached for the process
+// lifetime) and falls back to computing the same expression inline when the
+// column truly isn't there, so search degrades to "not index-accelerated"
+// instead of "completely broken" if that migration is ever in that state.
+let searchVectorColumnExists: Promise<boolean> | null = null;
+async function hasSearchVectorColumn(): Promise<boolean> {
+  if (!searchVectorColumnExists) {
+    searchVectorColumnExists = db.query(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'opportunities' AND column_name = 'search_vector'
+       ) AS exists`
+    ).then((r) => !!r.rows[0]?.exists)
+      .catch((err) => {
+        logger.warn(`Could not check for opportunities.search_vector, assuming it is missing: ${err instanceof Error ? err.message : err}`);
+        return false;
+      });
+  }
+  return searchVectorColumnExists;
+}
+// Mirrors exactly the weighted (title 'A' / description 'B') expression the
+// GENERATED column uses (see database.ts) - kept in sync manually since a
+// fallback that scored differently from the real column would rank
+// identically-worded searches differently depending on which DB it hit.
+// Plain unaccent() (STABLE) is fine here - it's only illegal inside a
+// GENERATED/indexed definition, not in an ordinary query.
+const INLINE_SEARCH_VECTOR_EXPR = `(
+        setweight(to_tsvector('french', unaccent(COALESCE(o.title, ''))), 'A') ||
+        setweight(to_tsvector('french', unaccent(COALESCE(o.description, ''))), 'B')
+      )`;
+
 // GET /api/opportunities - search & filter listings (public, powers the 3 journeys)
 router.get('/', optionalAuth, async (req: Request, res: Response) => {
   try {
@@ -359,6 +404,9 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     // below can put exact matches ahead of the unknown-nature rows that the
     // filter deliberately keeps (see the `nature` filter for why).
     let requestedNatures: string[] = [];
+    // Resolved once per request, right before it's needed - see the
+    // "Failed to search opportunities" comment above the route.
+    const searchVectorExpr = q ? ((await hasSearchVectorColumn()) ? 'o.search_vector' : INLINE_SEARCH_VECTOR_EXPR) : 'o.search_vector';
 
     if (journey) {
       // Client's journey step lets several opportunity types be selected
@@ -588,7 +636,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
             const wordTsIdx = idx++;
             const alts = [`${w}:*`, ...(stem ? [`${stem}:*`] : []), ...syns.map(s => `${s}:*`)];
             params.push(alts.length > 1 ? `(${alts.join(' | ')})` : alts[0]);
-            wordConds.push(`o.search_vector @@ to_tsquery('french', unaccent($${wordTsIdx}))`);
+            wordConds.push(`${searchVectorExpr} @@ to_tsquery('french', unaccent($${wordTsIdx}))`);
           }
         }
         conditions.push(wordConds.join(' AND '));
@@ -803,7 +851,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     // visitor's explicit, deliberate ask for pure chronological order and
     // isn't touched.
     const relevanceTiebreak = tsRankParamIdx !== null
-      ? `ts_rank(o.search_vector, to_tsquery('french', unaccent($${tsRankParamIdx}))) DESC, `
+      ? `ts_rank(${searchVectorExpr}, to_tsquery('french', unaccent($${tsRankParamIdx}))) DESC, `
       : '';
     let orderClause = `${relevanceTiebreak}${DEFAULT_ORDER}`;
     if (sort === 'recent') {
@@ -813,7 +861,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       // with no q, there's nothing to score, so this falls back to the
       // default order rather than an arbitrary/meaningless ranking.
       orderClause = tsRankParamIdx !== null
-        ? `ts_rank(o.search_vector, to_tsquery('french', unaccent($${tsRankParamIdx}))) DESC, ${DEFAULT_ORDER}`
+        ? `ts_rank(${searchVectorExpr}, to_tsquery('french', unaccent($${tsRankParamIdx}))) DESC, ${DEFAULT_ORDER}`
         : DEFAULT_ORDER;
     }
     // R03/R04 boost: an AI-classified trade match outranks a same-word,
