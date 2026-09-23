@@ -160,6 +160,10 @@ CREATE TABLE opportunities (
   -- AI Classification (Milestone 6)
   ai_classification_status VARCHAR(50),     -- 'not_analyzed', 'processing', 'classified', 'failed'
   ai_matched_trades JSONB,                  -- [{trade_id, confidence, reasoning}]
+  nature_prestation VARCHAR(20),            -- 'travaux' | 'fournitures' | 'etudes' | 'mixte' - contre-audit
+                                             -- 15 Sep R04 ("travaux, fournitures et études mélangés").
+                                             -- Nullable/no default: existing rows stay NULL until
+                                             -- (re)classified - see aiService.ts classifyOpportunity.
   
   -- Matching & Recommendations (Milestone 6)
   ai_summary_status VARCHAR(50),            -- 'not_generated', 'processing', 'generated', 'failed'
@@ -194,6 +198,7 @@ CREATE TABLE opportunities (
 );
 
 CREATE INDEX opportunities_search ON opportunities USING GIN(search_vector);
+CREATE INDEX opportunities_nature_prestation ON opportunities(nature_prestation) WHERE nature_prestation IS NOT NULL;
 CREATE INDEX opportunities_status ON opportunities(status);
 CREATE INDEX opportunities_type ON opportunities(opportunity_type_id);
 CREATE INDEX opportunities_source ON opportunities(source_id, source_reference);
@@ -253,6 +258,8 @@ CREATE TABLE companies (
   email VARCHAR(255) NOT NULL UNIQUE,
   phone VARCHAR(20),
   website_url VARCHAR(500),
+  contact_name VARCHAR(255),                -- PUT /companies/me's own contact-person field - had no
+                                             -- column here, so every save 500'd on production.
   
   -- Address
   address_street VARCHAR(500),
@@ -734,15 +741,21 @@ CREATE INDEX session_favorites_session ON session_favorites(session_id);
 
 CREATE TABLE chatbot_conversations (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  -- Nullable: an anonymous visitor (no company account yet) can start a
+  -- chatbot conversation too - session_id below is what identifies theirs
+  -- instead. See applyIncrementalMigrations() for the full rationale.
+  company_id UUID REFERENCES companies(id) ON DELETE CASCADE,
   
   topic VARCHAR(255),                       -- opportunity ID, bid ID, general
   context JSONB,                            -- Topic-specific data
+  session_id VARCHAR(100),                  -- anonymous-visitor identifier, mirrors crm_leads.session_id
+  lead_captured_at TIMESTAMP,
   
   is_active BOOLEAN DEFAULT true,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX chatbot_conversations_session ON chatbot_conversations(session_id) WHERE session_id IS NOT NULL;
 
 CREATE TABLE chatbot_messages (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -857,6 +870,13 @@ CREATE TABLE crm_leads (
   session_id VARCHAR(100),                  -- links back to visitor_events for this visitor's journey
   appointment_mode VARCHAR(20),             -- 'slot' | 'callback' - see resolveAccessLevel() in routes/opportunities.ts
   appointment_slot_at TIMESTAMP,            -- only set when appointment_mode = 'slot'
+  opportunity_id UUID REFERENCES opportunities(id) ON DELETE SET NULL, -- self-published
+                                             -- subcontracting needs ("Je cherche un sous-traitant") -
+                                             -- see schema.sql's "12b" comment block for the full
+                                             -- access-level model.
+  access_level VARCHAR(20),
+  access_granted_at TIMESTAMP,
+  access_granted_by UUID REFERENCES users(id),
   
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -866,6 +886,7 @@ CREATE INDEX crm_leads_email ON crm_leads(email);
 CREATE INDEX crm_leads_status ON crm_leads(status);
 CREATE INDEX crm_leads_crm ON crm_leads(crm_sync_status);
 CREATE INDEX crm_leads_session ON crm_leads(session_id);
+CREATE INDEX crm_leads_opportunity ON crm_leads(opportunity_id);
 
 -- "Votre dossier" feature (12 Sep, client's dossier-demo reference) - see
 -- applyIncrementalMigrations() for the full rationale, kept in sync here.
