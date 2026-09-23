@@ -97,7 +97,11 @@ app.use(cors({
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  // The SPA fires several API calls per page view (brands, trades, listings,
+  // favorites, siret status), so 100 per 15 min made normal browsing hit
+  // 429 after roughly a dozen pages and every button then looked broken.
+  // Login/register/reset keep their own strict limiters below.
+  max: Number(process.env.RATE_LIMIT_MAX) || 1000,
   message: 'Too many requests from this IP, please try again later.',
 });
 
