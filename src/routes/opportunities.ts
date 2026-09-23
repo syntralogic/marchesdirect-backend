@@ -3,6 +3,7 @@ import { body, validationResult } from 'express-validator';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { naturePrestationLateral, NATURE_VALUES } from '../utils/naturePrestation';
+import { tokenizeQuery, tsqueryAlternatives, stemOf, synonymsOf, foldAccents, isTradeWord } from '../utils/searchQuery';
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts, generateOpportunityAnalysisSections } from '../services/aiService';
 import { ingestOpportunityDocuments } from '../services/documentIngestionService';
 import { computeMatchScore } from '../services/matchScoreService';
@@ -473,110 +474,17 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       // unchanged. Same AND logic applied to the trade-name / AI
       // matched-trades fallback so it can't reintroduce the same
       // broadening through that path instead.
-      const FR_STOPWORDS = new Set(['de', 'du', 'des', 'la', 'le', 'les', 'et', 'en', 'au', 'aux', 'pour', 'avec', 'un', 'une', 'sur', 'dans', 'd', 'l']);
-      // Apostrophes/typographic quotes used to be deleted outright by the
-      // sanitizer below, gluing "l'eau" into the single non-word "leau"
-      // (matches nothing). Treat them as word separators instead.
-      // Leading/trailing hyphens are stripped and hyphen-only tokens dropped:
-      // a bare "-" reaching to_tsquery is a syntax error -> HTTP 500 -> the
-      // page showed no results at all.
-      const foldAccents = (v: string) => v.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-      const qWordsRaw = q
-        .replace(/['\u2019`]/g, ' ')
-        .split(/\s+/)
-        .map(w => w.replace(/[^\p{L}\p{N}-]/gu, '').replace(/^-+|-+$/g, '').trim())
-        .filter(Boolean);
-      const qWordsMeaningful = qWordsRaw.filter(w => !FR_STOPWORDS.has(w.toLowerCase()));
-      const qWords = qWordsMeaningful.length > 0 ? qWordsMeaningful : qWordsRaw;
-      // A profession typed the way people say it ("peintre", "electricien",
-      // "plombier", "carreleur") never shares a stem with the trade/notice
-      // wording ("Peinture", "Electricite", "Plomberie", "Carrelage"): French
-      // stemming keeps peintre->peintr but peinture->peintur, so the exact
-      // word matched only the few notices that literally contain it. Each
-      // word therefore also gets a shorter stem (agent suffix removed, at
-      // least 4 letters kept) that is OR'd with the original word - a fiche
-      // matches a word if it matches either form, while different words are
-      // still AND'd with each other as before.
-      const AGENT_SUFFIXES = ['ienne', 'ien', 'iere', 'ier', 'euse', 'eur', 'iste', 're'];
-      const stemOf = (w: string): string | null => {
-        const f = foldAccents(w);
-        for (const suf of AGENT_SUFFIXES) {
-          if (f.endsWith(suf) && f.length - suf.length >= 4) return f.slice(0, f.length - suf.length);
-        }
-        return null;
-      };
-      // Client (19 Sep): "ITE", "Clim" and "isolation thermique" as examples
-      // of poor matching, point 3/4 of the numbered list - a référentiel of
-      // synonyms/abbreviations per métier. Stemming/prefix matching above
-      // handles word-forms of the SAME word (peintre/peinture,
-      // climat/climatisation), but an acronym like "ITE" (isolation
-      // thermique par l'extérieur) shares no letters with "isolation" at
-      // all - no amount of stemming or prefix matching bridges that; it can
-      // only come from an explicit lookup. Each entry's synonyms are added
-      // as extra OR-alternatives for that one word's slot (still AND'd
-      // against the query's other words as before), on both the tsquery
-      // side and the trade-name/ai_matched_trades ILIKE side.
-      const TRADE_KEYWORD_SYNONYMS: Record<string, string[]> = {
-        ite: ['isolation', 'exterieur'],
-        iti: ['isolation', 'interieur'],
-        clim: ['climatisation'],
-        cvc: ['climatisation', 'chauffage', 'ventilation'],
-        vmc: ['ventilation'],
-        pac: ['pompe', 'chaleur'],
-        couvreur: ['toiture', 'couverture'],
-        toiture: ['couverture'],
-        etancheite: ['etancheur'],
-        macon: ['maconnerie'],
-        elec: ['electricite'],
-        electricien: ['electricite'],
-        plombier: ['plomberie'],
-        chauffagiste: ['chauffage'],
-        menuisier: ['menuiserie'],
-        fenetre: ['menuiserie'],
-        fenetres: ['menuiserie'],
-        carreleur: ['carrelage'],
-        platrier: ['platrerie'],
-        placo: ['platrerie'],
-        placoplatre: ['platrerie'],
-        vrd: ['voirie', 'reseaux'],
-        terrassement: ['vrd'],
-        proprete: ['nettoyage'],
-        paysagiste: ['espaces', 'verts'],
-        paysagisme: ['espaces', 'verts'],
-      };
-      const synonymsOf = (w: string): string[] => TRADE_KEYWORD_SYNONYMS[foldAccents(w).toLowerCase()] || [];
-      // Client (19/20 Sep, search overhaul points 2 & 5): "Un lot électricité
-      // ne doit pas ressortir pour « fenêtre » simplement parce que le
-      // descriptif général du chantier mentionne des fenêtres... une mention
-      // accessoire dans une longue description ne doit pas suffire." The
-      // opportunities table has no per-lot structure at all (BOAMP/DECP
-      // notices covering several lots get flattened into one title+
-      // description at ingestion - a real per-lot fix would mean parsing lot
-      // structure out of raw_data, which isn't safely doable without live
-      // access to confirm the actual BOAMP/DECP field shapes first), so this
-      // targets the same symptom the client's example describes without
-      // guessing at that: for a query WORD that names a trade/métier concept
-      // (the same référentiel used for synonym expansion below, e.g. "clim",
-      // "ite", "fenêtre" -> menuiserie, or the trade's own name), an
-      // incidental mention buried in the long description is no longer
-      // enough on its own - it has to be either in the TITLE (short, lot-
-      // specific: "Lot 3 - Menuiseries extérieures", not a page of prose) or
-      // confirmed by the AI's own trade classification for that listing
-      // (trade_id/ai_matched_trades - already computed by classifyOpportunity,
-      // aiService.ts). A non-trade word (a city name, a generic term not in
-      // this référentiel) keeps matching the full title+description as
-      // before - this is specifically about métier words, not a general
-      // tightening of every search.
-      const TRADE_CONCEPT_TOKENS = new Set(
-        Object.values(TRADE_KEYWORD_SYNONYMS).flat().concat(Object.keys(TRADE_KEYWORD_SYNONYMS))
-      );
-      const isTradeWord = (w: string): boolean => {
-        if (synonymsOf(w).length > 0) return true;
-        const folded = foldAccents(w).toLowerCase();
-        if (TRADE_CONCEPT_TOKENS.has(folded)) return true;
-        const stem = stemOf(w);
-        return !!stem && TRADE_CONCEPT_TOKENS.has(stem);
-      };
+      // Tokenization, stopwords, the synonym/abbreviation référentiel and
+      // the trade-word test all now live in utils/searchQuery.ts (client
+      // audit point 8: "conserver ces tests" - pulled out so the matching
+      // logic itself can be unit-tested directly instead of only through a
+      // live database; see utils/__tests__/searchQuery.test.ts). Apostrophes/
+      // typographic quotes are treated as word separators inside
+      // tokenizeQuery (so "l'eau" doesn't glue into "leau"), and leading/
+      // trailing hyphens are stripped there too: a bare "-" reaching
+      // to_tsquery is a syntax error -> HTTP 500 -> the page showed no
+      // results at all.
+      const qWords = tokenizeQuery(q);
       if (qWords.length > 0) {
         const tsIdx = idx++;
         tsRankParamIdx = tsIdx;
@@ -586,9 +494,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         params.push(
           qWords
             .map(w => {
-              const stem = stemOf(w);
-              const syns = synonymsOf(w);
-              const alts = [`${w}:*`, ...(stem ? [`${stem}:*`] : []), ...syns.map(s => `${s}:*`)];
+              const alts = tsqueryAlternatives(w);
               return alts.length > 1 ? `(${alts.join(' | ')})` : alts[0];
             })
             .join(' & ')
