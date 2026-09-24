@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { reconcileOfficialFields } from '../utils/officialFields';
 import { naturePrestationLateral, NATURE_VALUES } from '../utils/naturePrestation';
 import { tokenizeQuery, tsqueryAlternatives, stemOf, synonymsOf, foldAccents, isTradeWord } from '../utils/searchQuery';
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts, generateOpportunityAnalysisSections } from '../services/aiService';
@@ -1120,6 +1121,9 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     ]);
     opportunity.ai_extracted_facts = extractedFacts;
     opportunity.ai_analysis_sections = analysisSections;
+    // One value per official data point across header, details and score
+    // (see utils/officialFields.ts).
+    reconcileOfficialFields(opportunity);
     await ensureTradeResolved(opportunity);
     kickOffDocumentIngestionIfPending(opportunity.id, opportunity.dce_documents_status);
 
