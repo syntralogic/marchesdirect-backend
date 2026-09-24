@@ -1,5 +1,6 @@
 import { db } from '../config/database';
 import { resolveTradeFromText } from './tradeResolver';
+import { reconcileOfficialFields } from '../utils/officialFields';
 
 // ============================================================================
 // OPPORTUNITY MATCH SCORE
@@ -205,6 +206,9 @@ export const computeMatchScore = async (
     throw new Error('Opportunity not found');
   }
   const opp = oppResult.rows[0];
+  // Same resolved amount/buyer as the fiche itself (25 Sep audit: header and
+  // details disagreed).
+  reconcileOfficialFields(opp);
   // 20 Sep client audit (Marssac): a fiche whose classifier never linked a
   // trade read "métier non précisé" although the title says isolation
   // thermique extérieure. Same read-time inference the detail route uses, so

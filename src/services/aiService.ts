@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { findTradeByName, resolveTradeFromText } from './tradeResolver';
 import { db } from '../config/database';
+import { reconcileOfficialFields } from '../utils/officialFields';
 import { logger } from '../utils/logger';
 import { syncLeadToCrm } from './crmSyncService';
 import { formatFaqForPrompt } from '../data/chatbotFaq';
@@ -1235,6 +1236,9 @@ export const generateOpportunitySummary = async (opportunityId: string): Promise
     }
 
     const opp = oppResult.rows[0];
+    // Use the same resolved amount/buyer the fiche shows (falls back to the
+    // figure extracted from the notice when the column is empty).
+    reconcileOfficialFields(opp);
 
     // Plain prose only, no markdown (client's ask, screenshot evidence
     // 8 Sep: raw "# Résumé..." / "**bold**" markers were showing up
@@ -1254,6 +1258,7 @@ export const generateOpportunitySummary = async (opportunityId: string): Promise
     // since the sentence-count instruction alone wasn't enough to stop the
     // model from writing a structured multi-section answer when the
     // source description was itself long and detailed.
+    const todayText = new Date().toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Paris' });
     const systemPrompt = `Tu es un analyste de marchés publics/privés français. Rédige un résumé simple de cette opportunité, en 2 à 4 phrases maximum (120 mots maximum au total), en français courant.
 
 Ce résumé doit se limiter à expliquer simplement en quoi consiste l'opportunité (l'objet de la mission). Ne développe pas les exigences, le calendrier, ou les points de vigilance - ces informations sont déjà présentées ailleurs sur la page et ne doivent pas être répétées ici.
@@ -1262,7 +1267,12 @@ Règles de formatage strictes :
 - Texte brut uniquement, sans aucun markdown (pas de #, pas de **, pas de listes à puces, pas de titres).
 - N'écris jamais de titre de section (par exemple "Objet et livrables principaux", "Exigences clés et calendrier", "Résumé de l'opportunité") - un seul paragraphe continu, sans aucune ligne de titre.
 - Pas de titre du type "Résumé de l'opportunité" - va directement au contenu.
-- Un seul paragraphe court (2 à 4 phrases, 120 mots maximum) - jamais plusieurs paragraphes, jamais plusieurs sections.`;
+- Un seul paragraphe court (2 à 4 phrases, 120 mots maximum) - jamais plusieurs paragraphes, jamais plusieurs sections.
+
+Règles de fidélité aux données officielles (audit client du 25 septembre) :
+- Nous sommes le ${todayText}. Ne qualifie jamais l'échéance de lointaine ou d'anormale : ne commente pas le calendrier.
+- N'invite jamais à rechercher, vérifier ou demander un montant, un budget, un acheteur ou une échéance qui figurent dans les données fournies ci-dessous. N'écris "montant non précisé" que si la ligne Estimated Value indique explicitement qu'il n'est pas communiqué.
+- Reprends les montants, noms et dates exactement tels que fournis, sans les arrondir ni les modifier.`;
 
     // Same GMT/English-Date.toString() leak as generateOpportunityFacts
     // above (opp.deadline is a raw JS Date from pg) - format before
@@ -1271,7 +1281,8 @@ Règles de formatage strictes :
     const userMessage = `Title: ${opp.title}
 Description: ${opp.description}
 Deadline: ${deadlineText}
-Estimated Value: ${opp.estimated_value || 'Not specified'} EUR
+Estimated Value: ${opp.estimated_value ? `${opp.estimated_value} EUR` : 'not communicated in the notice'}
+Buyer: ${opp.buyer_name || 'not communicated'}
 Location: ${opp.location_city}, ${opp.location_region}`;
 
     const summary = await callClaudeAPI(
