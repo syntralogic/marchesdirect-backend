@@ -3,6 +3,7 @@ import { body, validationResult } from 'express-validator';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { reconcileOfficialFields } from '../utils/officialFields';
+import type { RefineAnswers } from '../services/matchEngine';
 import { naturePrestationLateral, NATURE_VALUES } from '../utils/naturePrestation';
 import { tokenizeQuery, tsqueryAlternatives, stemOf, synonymsOf, foldAccents, isTradeWord } from '../utils/searchQuery';
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts, generateOpportunityAnalysisSections } from '../services/aiService';
@@ -1285,6 +1286,21 @@ router.post(
   }
 );
 
+// The visitor's answers to the four "Affinez votre concordance" questions,
+// sent as "experience:oui,capacity:non,location:oui,calendar:a_confirmer".
+// Whitelisted key by key: anything else is ignored.
+function parseRefineAnswers(raw: unknown): RefineAnswers {
+  const out: RefineAnswers = {};
+  if (typeof raw !== 'string') return out;
+  for (const pair of raw.split(',')) {
+    const [k, v] = pair.split(':');
+    if (!['experience', 'capacity', 'location', 'calendar'].includes(k)) continue;
+    if (!['oui', 'non', 'a_confirmer'].includes(v)) continue;
+    (out as any)[k] = v;
+  }
+  return out;
+}
+
 // GET /api/opportunities/:id/match-score - "Analyse stratégique" tab data.
 // Personalizes against the logged-in user's company profile when available,
 // otherwise returns the generic (non-personalized) breakdown.
@@ -1320,10 +1336,10 @@ router.post(
         }
       }
 
-      const scores: Record<string, { score: number; scoreTitle: string }> = {};
+      const scores: Record<string, { score: number | null; scoreTitle: string }> = {};
       for (const oppId of req.body.ids as string[]) {
         try {
-          const result = await computeMatchScore(oppId, companyId);
+          const result = await computeMatchScore(oppId, companyId, { sessionId: req.body.sessionId as string });
           scores[oppId] = { score: result.score, scoreTitle: result.scoreTitle };
         } catch {
           // Skip an individual bad id rather than failing the whole batch -
@@ -1368,7 +1384,10 @@ router.get('/:id/match-score', optionalAuth, async (req: AuthRequest, res: Respo
     // personalizing against the SIRET-derived profile (trade/location
     // inferred from the APE code, without an account) needs a deeper change
     // to computeMatchScore, which today only reads a real `companies` row.
-    const result = await computeMatchScore(req.params.id, companyId);
+    const result = await computeMatchScore(req.params.id, companyId, {
+      sessionId: req.query.sessionId as string,
+      answers: parseRefineAnswers(req.query.answers),
+    });
     res.json(result);
   } catch (err: any) {
     logger.error('Match score error:', err);
