@@ -30,7 +30,8 @@ export interface EligibilityItem {
 
 export interface CriterionWeight {
   label: string;
-  weight: number;
+  // null when the notice names the criterion but gives no weighting for it.
+  weight: number | null;
 }
 
 // One line of the numerical justification shown under the score: every
@@ -69,7 +70,12 @@ export interface MatchScoreResult {
   positiveFactors: ScoreFactor[];
   scoreBreakdown?: ScoreBreakdown;
   warning: string | null;
+  // Award criteria as stated by the buyer in the notice/DCE, nothing else.
   criteria: CriterionWeight[];
+  // 'notice' when criteria were actually extracted from the source, 'unknown'
+  // when they were not (the UI then says "à vérifier dans le règlement de
+  // consultation" instead of showing a generic weighting).
+  criteriaSource: 'notice' | 'unknown';
   eligibility: EligibilityItem[];
   whyRespond: string;
 }
@@ -94,42 +100,42 @@ const correspondenceNoteFor = (s: number): string =>
   : s >= 40 ? 'Cette opportunité correspond partiellement au profil de votre entreprise.'
   : "Cette opportunité correspond faiblement au profil de votre entreprise, d'après les informations disponibles.";
 
-// Buyers score bids on different weightings depending on the opportunity
-// type - these are the standard defaults used across French procurement
-// (public-market weighting is regulated practice; private/subcontracting
-// mirror it loosely). A future improvement could parse actual weights out of
-// raw_data when a source publishes them, but no connector currently does.
-const CRITERIA_BY_JOURNEY: Record<string, CriterionWeight[]> = {
-  public_procurement: [
-    { label: 'Prix de l’offre', weight: 40 },
-    { label: 'Valeur technique', weight: 40 },
-    { label: 'Délai et organisation', weight: 20 },
-  ],
-  tender: [
-    { label: 'Qualité technique', weight: 45 },
-    { label: 'Prix', weight: 35 },
-    { label: 'Planning proposé', weight: 20 },
-  ],
-  subcontracting: [
-    { label: 'Prix et chiffrage', weight: 50 },
-    { label: 'Moyens et références', weight: 30 },
-    { label: 'Disponibilité', weight: 20 },
-  ],
-};
+// 25 Sep client audit (INRAE): the fiche showed 40 % prix / 40 % technique /
+// 20 % délai as "pondération des critères de l'acheteur" while the official
+// notice says 60 % prix / 40 % technique. A per-journey default table was
+// being presented as the buyer's own weighting. Only criteria the notice
+// really states (extracted into ai_extracted_facts.selection_criteria, which
+// is instructed never to invent a breakdown) are returned now; when nothing
+// was extracted the list stays empty and the UI asks the visitor to check the
+// règlement de consultation.
+export function criteriaFromFacts(facts: any): CriterionWeight[] {
+  let f = facts;
+  if (typeof f === 'string') {
+    try { f = JSON.parse(f); } catch { return []; }
+  }
+  const sc = f?.selection_criteria;
+  if (!sc || sc.available !== true || !Array.isArray(sc.value)) return [];
+  return sc.value
+    .filter((c: any) => c && typeof c.label === 'string' && c.label.trim())
+    .map((c: any) => ({
+      label: String(c.label).trim(),
+      weight: typeof c.weight_percent === 'number' && Number.isFinite(c.weight_percent) ? c.weight_percent : null,
+    }));
+}
 
 // Baseline documents every opportunity type expects, plus a trade-specific
 // certification line when the opportunity has a known trade.
 function baseRequiredDocs(journey: string, tradeName: string | null): { label: string; note: string; documentType: string }[] {
   const docs = [
-    { label: 'Kbis de moins de 3 mois', note: 'Pièce ou capacité demandée pour répondre.', documentType: 'kbis' },
-    { label: 'Assurance décennale', note: 'Pièce ou capacité demandée pour répondre.', documentType: 'insurance' },
+    { label: 'Kbis de moins de 3 mois', note: 'Pièce à préparer (liste indicative, à confirmer dans le règlement de consultation).', documentType: 'kbis' },
+    { label: 'Assurance décennale', note: 'Pièce à préparer (liste indicative, à confirmer dans le règlement de consultation).', documentType: 'insurance' },
   ];
   if (journey === 'public_procurement') {
-    docs.push({ label: 'Attestations fiscale et sociale', note: 'Pièces exigées pour tout marché public.', documentType: 'certificate' });
+    docs.push({ label: 'Attestations fiscale et sociale', note: 'Pièces généralement demandées pour un marché public.', documentType: 'certificate' });
   }
   docs.push({
     label: tradeName ? `Qualification ${tradeName} ou équivalent` : 'Qualification professionnelle du lot',
-    note: 'Pièce ou capacité demandée pour répondre.',
+    note: 'Pièce à préparer (liste indicative, à confirmer dans le règlement de consultation).',
     documentType: 'certificate',
   });
   docs.push({ label: 'Référence récente sur un chantier comparable', note: 'Un projet similaire réalisé dans les 3 dernières années.', documentType: 'reference' });
@@ -498,7 +504,7 @@ export const computeMatchScore = async (
     }
   }
 
-  const criteria = CRITERIA_BY_JOURNEY[journey] || CRITERIA_BY_JOURNEY.tender;
+  const criteria = criteriaFromFacts(opp.ai_extracted_facts);
 
   // 20 Sep client audit: this always opened with "Budget cadré" even when the
   // notice gives no amount at all ("montant non communiqué" right above on the
@@ -517,7 +523,7 @@ export const computeMatchScore = async (
     ? 'Cette opportunité correspond à votre métier et votre zone d’intervention d’après votre profil renseigné.'
     : 'Laissez vos coordonnées pour recevoir une analyse personnalisée à partir de votre profil d’entreprise.';
 
-  return { score, scoreTitle, scoreNote, scoreDisclaimer: SCORE_DISCLAIMER, matchLabel, positiveFactors, scoreBreakdown, warning, criteria, eligibility, whyRespond };
+  return { score, scoreTitle, scoreNote, scoreDisclaimer: SCORE_DISCLAIMER, matchLabel, positiveFactors, scoreBreakdown, warning, criteria, criteriaSource: criteria.length > 0 ? 'notice' : 'unknown', eligibility, whyRespond };
 };
 
 export const computeSubcontractNeedMatchScore = (need: {
@@ -544,7 +550,8 @@ export const computeSubcontractNeedMatchScore = (need: {
     matchLabel: matchLabelFor(score),
     positiveFactors,
     warning: !need.team_size ? 'Précisez l’effectif recherché pour affiner les candidatures reçues.' : null,
-    criteria: CRITERIA_BY_JOURNEY.subcontracting,
+    criteria: [],
+    criteriaSource: 'unknown',
     eligibility: [],
     whyRespond: 'Besoin diffusé aux entreprises correspondant au métier, à la zone et aux qualifications demandées.',
   };
