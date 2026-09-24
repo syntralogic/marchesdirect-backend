@@ -32,13 +32,13 @@ interface TradeRow extends ResolvedTrade {
   description: string | null;
 }
 
-const fold = (text: string): string =>
+export const fold = (text: string): string =>
   String(text || '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
 
-const tokens = (text: string): string[] =>
+export const tokens = (text: string): string[] =>
   fold(text)
     .split(/[^a-z0-9]+/)
     .filter((w) => w.length >= 3)
@@ -47,7 +47,7 @@ const tokens = (text: string): string[] =>
 
 // Keyword -> trade slug. Deliberately small and specific: only words that
 // unambiguously name a trade of the canonical list above.
-const KEYWORD_TRADE_SLUG: Record<string, string> = {
+export const KEYWORD_TRADE_SLUG: Record<string, string> = {
   isolation: 'isolation', isolant: 'isolation', calorifugeage: 'isolation', ite: 'isolation',
   couverture: 'couverture', toiture: 'couverture', etancheite: 'couverture', zinguerie: 'couverture',
   peinture: 'peinture', peintre: 'peinture',
@@ -58,8 +58,23 @@ const KEYWORD_TRADE_SLUG: Record<string, string> = {
   carrelage: 'carrelage', faience: 'carrelage',
   platrerie: 'platrerie', placo: 'platrerie', cloison: 'platrerie',
   maconnerie: 'maconnerie', charpente: 'charpente', demolition: 'demolition', deconstruction: 'demolition',
-  vitrerie: 'vitrerie', voirie: 'vrd', assainissement: 'vrd', vrd: 'vrd',
+  vitrerie: 'vitrerie', vitrage: 'vitrerie', voirie: 'vrd', assainissement: 'vrd', vrd: 'vrd', terrassement: 'vrd',
+  electricien: 'electricite', plombier: 'plomberie', chauffagiste: 'cvc', frigorifique: 'cvc',
+  nettoyage: 'nettoyage', proprete: 'nettoyage', paysager: 'espaces-verts', jardin: 'espaces-verts', elagage: 'espaces-verts',
+  tonte: 'espaces-verts', platre: 'platrerie', doublage: 'platrerie', gypse: 'platrerie',
 };
+
+// Every canonical trade a free text names (accent/case/plural-insensitive),
+// used to compare what a market asks for with what a company does.
+// Keyword hits only - no fuzzy substring matching, so "plan climat" is not
+// "climatisation" and "messagerie électronique" is not "électricité".
+export function extractTradeSlugs(text: string | null | undefined): string[] {
+  const found = new Set<string>();
+  for (const w of tokens(text || '')) {
+    if (KEYWORD_TRADE_SLUG[w]) found.add(KEYWORD_TRADE_SLUG[w]);
+  }
+  return [...found];
+}
 
 let tradeCache: { rows: TradeRow[]; loadedAt: number } | null = null;
 const TRADE_CACHE_MS = 10 * 60 * 1000;
