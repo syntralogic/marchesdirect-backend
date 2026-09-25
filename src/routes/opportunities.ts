@@ -947,18 +947,17 @@ router.get('/stats/counts', async (req: Request, res: Response) => {
 });
 
 // GET /api/opportunities/stats/regions - opportunity count per French region,
-// for the interactive map on /zones. Groups on location_region as stored by
-// the connectors (BOAMP etc. give a region name directly on most notices).
+// for the interactive map on /zones.
 //
-// Client's explicit ask: count regardless of status - no excluding
-// expired/cancelled/awarded/merged, no deadline-passed filter. Reads
-// straight off `opportunities` (not opportunity_search_index, whose own
-// WHERE clause hard-excludes cancelled/expired/merged at the view
-// definition level) so every row counts here exactly like the main search
-// (GET /) now does. Exception: status = 'merged' (deduplicationService.ts's
-// marker for the losing side of a duplicate pair) stays excluded here too,
-// same reasoning as the GET / route above - "show everything" was never
-// meant to bring back already-deduplicated rows.
+// 25 Sep audit follow-up: "map says 4 194 for Nouvelle-Aquitaine, but
+// 'Voir les opportunités' lands on a search showing 285." Root cause: this
+// route used to count every status (awarded/expired/cancelled/merged
+// included), while GET / - the search the button links to - defaults to
+// status='active' only since this file's earlier point-4 fix. Same
+// "counter must describe the same filtered set as the list it links to"
+// rule as the other counter fixes in this file, so this now counts
+// status='active' only too, matching exactly what the button's search
+// will show.
 router.get('/stats/regions', async (req: Request, res: Response) => {
   try {
     // G13 (contre-audit 15 Sep): "carte vs liste count discrepancy (Grand
@@ -981,7 +980,7 @@ router.get('/stats/regions', async (req: Request, res: Response) => {
        FROM opportunities
        WHERE location_region IS NOT NULL AND location_region != ''
          AND deleted_at IS NULL
-         AND status != 'merged'
+         AND status = 'active'
        GROUP BY lower(unaccent(trim(location_region)))
        ORDER BY count DESC`
     );
@@ -993,8 +992,9 @@ router.get('/stats/regions', async (req: Request, res: Response) => {
 });
 
 // GET /api/opportunities/stats/departments - same, grouped by French
-// department (numeric code, e.g. "33" for Gironde). Same "count everything
-// except merged duplicates" rule as /stats/regions above.
+// department (numeric code, e.g. "33" for Gironde). Same "count only
+// status='active', to match the list this feeds" rule as /stats/regions
+// above (25 Sep audit follow-up: map-vs-list count mismatch).
 router.get('/stats/departments', async (req: Request, res: Response) => {
   try {
     // Same fix as /stats/regions just above, for the same reason: raw
@@ -1009,7 +1009,7 @@ router.get('/stats/departments', async (req: Request, res: Response) => {
        FROM opportunities
        WHERE location_department IS NOT NULL AND location_department != ''
          AND deleted_at IS NULL
-         AND status != 'merged'
+         AND status = 'active'
        GROUP BY CASE
          WHEN TRIM(location_department) ~ '^[0-9]+$' THEN LPAD(TRIM(location_department), 2, '0')
          ELSE UPPER(TRIM(location_department))
