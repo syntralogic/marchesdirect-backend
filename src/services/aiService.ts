@@ -799,6 +799,15 @@ export type ExtractedOpportunityFacts = {
   // documents (see documentIngestionService.ts) - available:false whenever
   // no documents have been parsed yet, never estimated from the notice text.
   requirements_detected: { value: number; available: boolean };
+  // Client audit (25 Sep, point 10): private tender / sous-traitance
+  // listings need "le périmètre, les quantités, le calendrier
+  // d'intervention, les contraintes et les attentes" shown even while the
+  // buyer identity stays locked. Optional (older cached facts objects and
+  // real BOAMP extractions that predate this won't have them) - callers
+  // must check `?.available` same as every other field here.
+  scope_details: ExtractedFact;
+  intervention_calendar: ExtractedFact;
+  constraints_expectations: ExtractedFact;
 };
 
 export const extractOpportunityFacts = async (
@@ -848,6 +857,11 @@ Also extract, when the source states them:
 - buyer_phone: the awarding buyer's phone number, if stated.
 - buyer_website: the awarding buyer's website URL, if stated.
 
+Also extract, when the source states them:
+- scope_details: the concrete scope/perimeter and quantities of the work (surfaces, quantities, number of units, lots covered) - not a repeat of contract_object, only quantified/perimeter specifics if the source gives them.
+- intervention_calendar: the intended schedule or phasing of the work itself (e.g. "par tranches de livraison", "hors période hivernale") - distinct from submission_deadline, which is the bid deadline, not the work's own calendar.
+- constraints_expectations: site-access, coordination, qualification, or other constraints/expectations on the company carrying out the work (e.g. "intervention en site occupé", "qualification RGE requise") - distinct from required_qualifications when the source separates them, otherwise leave not available rather than duplicating that field.
+
 Also extract selection_criteria: the award/scoring criteria and their weighting, if explicitly stated
 (e.g. "Critere prix: 40%, Critere valeur technique: 45%, Critere delais: 15%"). Only include criteria the
 source actually names; if a weight isn't given for a named criterion, set weight_percent to null and
@@ -885,7 +899,10 @@ Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
   "buyer_phone": {"value": "not available", "available": false},
   "buyer_website": {"value": "not available", "available": false},
   "selection_criteria": {"value": [{"label": "Prix", "weight_percent": 40, "not_specified": false}], "available": true},
-  "requirements_detected": {"value": 0, "available": false}
+  "requirements_detected": {"value": 0, "available": false},
+  "scope_details": {"value": "not available", "available": false},
+  "intervention_calendar": {"value": "not available", "available": false},
+  "constraints_expectations": {"value": "not available", "available": false}
 }`;
 
   // opp.deadline (a TIMESTAMP column) comes back from pg as a native JS
