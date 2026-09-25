@@ -113,7 +113,21 @@ const needValidators = [
   body('locationCity').optional({ checkFalsy: true }).isString().trim(),
   body('locationRegion').optional({ checkFalsy: true }).isString().trim(),
   body('budgetMin').optional({ checkFalsy: true }).isNumeric(),
-  body('budgetMax').optional({ checkFalsy: true }).isNumeric(),
+  // Client audit (25 Sep): no check existed anywhere that budgetMin <=
+  // budgetMax - a need could be published with e.g. min 50000 / max 10000,
+  // which every downstream range display/filter reads as backwards. Only
+  // enforced when both are actually present; either one alone (an
+  // open-ended min or max) is a legitimate, unambiguous range.
+  body('budgetMax')
+    .optional({ checkFalsy: true })
+    .isNumeric()
+    .custom((value, { req }) => {
+      const min = req.body.budgetMin;
+      if (min !== undefined && min !== null && min !== '' && Number(value) < Number(min)) {
+        throw new Error('budgetMax must be greater than or equal to budgetMin');
+      }
+      return true;
+    }),
   body('teamSize').optional({ checkFalsy: true }).isString().trim(),
   body('startDate').optional({ checkFalsy: true }).isISO8601(),
   body('duration').optional({ checkFalsy: true }).isString().trim(),

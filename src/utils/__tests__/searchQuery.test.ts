@@ -1,4 +1,4 @@
-import { tokenizeQuery, stemOf, synonymsOf, isTradeWord, tsqueryAlternatives, FR_STOPWORDS } from '../searchQuery';
+import { tokenizeQuery, stemOf, synonymsOf, isTradeWord, tsqueryAlternatives, matchTermsOf, FR_STOPWORDS } from '../searchQuery';
 
 // 20 Sep client audit ("valider sur l'ensemble des métiers... préparer des
 // tests avec plusieurs formulations et localisations... conserver ces
@@ -104,5 +104,25 @@ describe('tsqueryAlternatives (what a word actually expands to in the search)', 
 
   it('"couvreur" (client\'s example) expands to itself, its stem, and the canonical trade names', () => {
     expect(tsqueryAlternatives('couvreur').sort()).toEqual(['couvreur:*', 'couvr:*', 'toiture:*', 'couverture:*'].sort());
+  });
+
+  it('client report (25 Sep): "elec" drops its own ambiguous prefix, matching only via "electricite" - never "electronique"', () => {
+    expect(tsqueryAlternatives('elec')).toEqual(['electricite:*']);
+    expect(tsqueryAlternatives('elec')).not.toContain('elec:*');
+  });
+
+  it('a non-ambiguous abbreviation like "clim" is unaffected', () => {
+    expect(tsqueryAlternatives('Clim')).toContain('Clim:*');
+  });
+});
+
+describe('matchTermsOf (ILIKE substring/prefix alternatives)', () => {
+  it('client report (25 Sep): "elec" only matches through "electricite", not as a bare "elec" substring of "electronique"', () => {
+    expect(matchTermsOf('elec')).toEqual(['electricite']);
+    expect(matchTermsOf('elec')).not.toContain('elec');
+  });
+
+  it('a non-ambiguous word still includes its own folded form', () => {
+    expect(matchTermsOf('couvreur').sort()).toEqual(['couvreur', 'couvr', 'toiture', 'couverture'].sort());
   });
 });

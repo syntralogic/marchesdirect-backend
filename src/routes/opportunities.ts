@@ -5,7 +5,7 @@ import { logger } from '../utils/logger';
 import { reconcileOfficialFields } from '../utils/officialFields';
 import type { RefineAnswers } from '../services/matchEngine';
 import { naturePrestationLateral, NATURE_VALUES } from '../utils/naturePrestation';
-import { tokenizeQuery, tsqueryAlternatives, stemOf, synonymsOf, foldAccents, isTradeWord } from '../utils/searchQuery';
+import { tokenizeQuery, tsqueryAlternatives, isTradeWord, matchTermsOf } from '../utils/searchQuery';
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts, generateOpportunityAnalysisSections } from '../services/aiService';
 import { ingestOpportunityDocuments } from '../services/documentIngestionService';
 import { computeMatchScore } from '../services/matchScoreService';
@@ -519,9 +519,12 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         const tradeConds: string[] = [];
         const wordConds: string[] = [];
         for (const w of qWords) {
-          const stem = stemOf(w);
-          const syns = synonymsOf(w);
-          const patterns = [`%${foldAccents(w)}%`, ...(stem ? [`%${stem}%`] : []), ...syns.map(s => `%${s}%`)];
+          // Client report (25 Sep): "elec" matching "électronique" - fixed
+          // by dropping a known-ambiguous abbreviation's own raw substring
+          // from the match set (see matchTermsOf/AMBIGUOUS_ABBREVIATIONS in
+          // searchQuery.ts); everything else still matches exactly as
+          // before via its stem/synonym expansions.
+          const patterns = matchTermsOf(w).map(t => `%${t}%`);
 
           const nameIdx = idx++;
           params.push(patterns);
@@ -542,7 +545,11 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
             wordConds.push(`(unaccent(o.title) ILIKE ANY($${titleIdx}::text[]) OR ${tradeCond})`);
           } else {
             const wordTsIdx = idx++;
-            const alts = [`${w}:*`, ...(stem ? [`${stem}:*`] : []), ...syns.map(s => `${s}:*`)];
+            // Reuses tsqueryAlternatives (the same helper the ORDER BY
+            // relevance tiebreak below uses) instead of re-deriving the
+            // same alternatives list inline, so the ambiguous-abbreviation
+            // fix there (see searchQuery.ts) can't drift out of sync here.
+            const alts = tsqueryAlternatives(w);
             params.push(alts.length > 1 ? `(${alts.join(' | ')})` : alts[0]);
             wordConds.push(`${searchVectorExpr} @@ to_tsquery('french', unaccent($${wordTsIdx}))`);
           }
