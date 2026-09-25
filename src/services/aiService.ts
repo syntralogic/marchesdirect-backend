@@ -1001,14 +1001,18 @@ export const classifyOpportunity = async (
 2. CPV codes (EU procurement classification)
 3. Complexity level (low, medium, high)
 4. Nature of the prestation itself - not the trade, the *kind* of work within it:
-   - "travaux": on-site installation, construction, repair or maintenance work
+   - "travaux": on-site installation, construction, repair or building-fabric maintenance work (a worksite)
    - "fournitures": supply/purchase of materials, equipment or goods, no on-site work
    - "etudes": design, AMO, diagnostic, audit or other study/advisory missions
+   - "services": a recurring service contract that is not itself a worksite - cleaning, security/surveillance, catering, waste collection, transport, or upkeep of technical equipment (heating/HVAC, lifts, fire safety) as a maintenance contract rather than a one-off repair
    - "mixte": genuinely combines more than one of the above (e.g. a lot that includes both supply and installation)
    Pick this from what the notice actually asks a bidder to deliver, not from
    keywords in the title alone - a "fenêtres" notice about prestressing-cable
    hardware or a "couverture" notice about fleece blankets is a different
-   trade/CPV entirely, not a fournitures-vs-travaux question.
+   trade/CPV entirely, not a fournitures-vs-travaux question. A chauffagiste
+   answering a recurring HVAC-maintenance contract is bidding on "services",
+   not "travaux" - don't default every mention of "maintenance" or
+   "entretien" to travaux.
 5. Confidence scores
 
 Return ONLY valid JSON, no markdown, no extra text:
@@ -1055,10 +1059,11 @@ Estimated Value: ${opp.estimated_value || 'Not specified'}`;
     if (!classification.complexity) {
       classification.complexity = 'medium';
     }
-    // R04: guard against the model returning something outside the 4
+    // R04: guard against the model returning something outside the 5
     // allowed values (free-text drift, wrong casing, etc.) - store NULL
     // rather than a bogus value the search boost below wouldn't recognize.
-    const VALID_NATURE = ['travaux', 'fournitures', 'etudes', 'mixte'];
+    // 25 Sep audit point 7: added 'services' (see utils/naturePrestation.ts).
+    const VALID_NATURE = ['travaux', 'fournitures', 'etudes', 'mixte', 'services'];
     const naturePrestation = VALID_NATURE.includes(classification.nature_prestation)
       ? classification.nature_prestation
       : null;

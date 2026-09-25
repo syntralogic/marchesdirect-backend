@@ -337,7 +337,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       min_value,
       max_value,
       status,        // 'active' | 'expired' | 'awarded' | 'cancelled' (comma-separated for multiple)
-      nature,        // R02: 'travaux' | 'fournitures' | 'etudes' | 'mixte' (comma-separated).
+      nature,        // R02: 'travaux' | 'fournitures' | 'etudes' | 'mixte' | 'services' (comma-separated).
                       // Explicit nature-of-prestation filter - see naturePrestation.ts.
       recent_days,   // client's filter list ("marchés nouveaux") - publication_date within N days,
                       // independent of status: a just-published notice can still be 'active' whether
