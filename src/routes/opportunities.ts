@@ -599,8 +599,14 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       // side.
       const regions = region.split(',').map(r => r.trim()).filter(Boolean);
       if (regions.length > 0) {
+        // A NULL location_region is not a non-match - it's an
+        // un-geocoded row (BOAMP never sends region, TED only sends
+        // country code) that would otherwise be silently dropped the
+        // moment a visitor picks any region/department filter, tanking
+        // the result count against what the map total promised. Same
+        // pattern the `nature` filter already uses below.
         conditions.push(
-          `unaccent(o.location_region) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p))`
+          `(unaccent(o.location_region) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p)) OR o.location_region IS NULL)`
         );
         params.push(regions.map(r => `%${r}%`));
       }
@@ -644,7 +650,10 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         // "Angouleme", "Angoulême") - ILIKE folds case but not accents, so a
         // city picked with its accent missed unaccented rows and vice versa.
         // Same unaccent() treatment the region filter already has.
-        conditions.push(`unaccent(o.location_city) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p))`);
+        // Same NULL-inclusion as the region filter above - an
+        // un-geocoded row shouldn't be dropped just because a city
+        // filter is active.
+        conditions.push(`(unaccent(o.location_city) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p)) OR o.location_city IS NULL)`);
         params.push(cities.map(c => `%${c}%`));
       }
     }
@@ -670,7 +679,8 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
           departmentVariants.add(d.padStart(3, '0'));
           departmentVariants.add(d.replace(/^0+/, '') || d);
         }
-        conditions.push(`UPPER(TRIM(o.location_department)) = ANY($${idx++}::text[])`);
+        // Same NULL-inclusion as the region/city filters above.
+        conditions.push(`(UPPER(TRIM(o.location_department)) = ANY($${idx++}::text[]) OR o.location_department IS NULL)`);
         params.push(Array.from(departmentVariants));
       }
     }
