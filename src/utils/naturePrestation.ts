@@ -35,8 +35,15 @@
 // aggressively would silently drop real work from results, which is a far
 // worse failure than the one being fixed.
 
-/** The four values classifyOpportunity() is allowed to store (see aiService.ts). */
-export const NATURE_VALUES = ['travaux', 'fournitures', 'etudes', 'mixte'] as const;
+// 25 Sep client audit, point 7: "Ajouter Services aux natures de
+// prestations : nettoyage et maintenance ne se résument pas aux travaux ou
+// fournitures." A cleaning/gardiennage/collecte contract is recurring
+// service delivery, not on-site construction work (travaux) and not a
+// goods purchase (fournitures) - lumping it into travaux is exactly the
+// kind of mismatch the concordance work elsewhere in this audit was fixing.
+
+/** The five values classifyOpportunity() is allowed to store (see aiService.ts). */
+export const NATURE_VALUES = ['travaux', 'fournitures', 'etudes', 'mixte', 'services'] as const;
 export type NaturePrestation = (typeof NATURE_VALUES)[number];
 
 export function isNaturePrestation(value: unknown): value is NaturePrestation {
@@ -85,6 +92,28 @@ const STUDY_PATTERNS: RegExp[] = [
   /\bmaitrise\s+d'?\s*oeuvre\b/,
 ];
 
+/**
+ * Recurring service delivery: cleaning, security, catering, collection,
+ * technical-equipment upkeep (CVC/chauffage/ascenseurs, as opposed to the
+ * building-fabric upkeep already covered by WORKS_PATTERNS below) and other
+ * prestations that are neither a one-off construction job nor a goods
+ * purchase. This is what the client's "peinture" vs "chauffagiste" example
+ * (point 3 of the same audit) was really asking to be told apart from
+ * travaux - a maintenance *contract* is a services market, not a worksite.
+ */
+const SERVICES_PATTERNS: RegExp[] = [
+  /\bnettoyage\s+(de\s+)?(locaux|batiments?|vitres?|voirie)?\b/,
+  /\b(gardiennage|surveillance|telesurveillance)\b/,
+  /\brestauration\s+(collective|scolaire)\b/,
+  /\bcollecte\s+(des?\s+|et\s+traitement\s+des?\s+)?dechets\b/,
+  /\bblanchisserie\b/,
+  /\baccueil\s+et\s+standard|standard\s+telephonique\b/,
+  /\b(maintenance|entretien)\s+(du\s+|des\s+|de\s+la\s+|de\s+l'|d'|des\s+installations?\s+de\s+)?(chauffage|climatisation|ventilation|cvc|chaudieres?|ascenseurs?|extincteurs?|desenfumage)\b/,
+  /\btransport\s+(scolaire|de\s+personnes|sanitaire)\b/,
+  /\bprestations?\s+de\s+services?\b/,
+  /\bexploitation\s+(et\s+maintenance\s+)?(du\s+|des\s+)?(chauffage|reseau\s+de\s+chaleur)\b/,
+];
+
 /** Execution on site. */
 const WORKS_PATTERNS: RegExp[] = [
   /\btravaux\b/,
@@ -127,10 +156,16 @@ export function inferNaturePrestation(title: string | null, description?: string
 
   if (supplyInTitle) return 'fournitures';
   if (STUDY_PATTERNS.some((p) => p.test(normalisedTitle))) return 'etudes';
+  // Checked before WORKS_PATTERNS: "maintenance chauffage/climatisation" is
+  // a recurring services contract, not a worksite, even though it shares
+  // the "maintenance"/"entretien" verb with the building-fabric upkeep
+  // patterns below.
+  if (SERVICES_PATTERNS.some((p) => p.test(normalisedTitle))) return 'services';
   if (worksInTitle) return 'travaux';
 
   if (SUPPLY_PATTERNS.some((p) => p.test(normalisedBody))) return 'fournitures';
   if (STUDY_PATTERNS.some((p) => p.test(normalisedBody))) return 'etudes';
+  if (SERVICES_PATTERNS.some((p) => p.test(normalisedBody))) return 'services';
 
   return null;
 }
@@ -157,6 +192,7 @@ function toPgPattern(re: RegExp): string {
 
 const PG_SUPPLY = SUPPLY_PATTERNS.map(toPgPattern);
 const PG_STUDY = STUDY_PATTERNS.map(toPgPattern);
+const PG_SERVICES = SERVICES_PATTERNS.map(toPgPattern);
 const PG_WORKS = WORKS_PATTERNS.map(toPgPattern);
 const PG_SUPPLY_WITH_WORKS = toPgPattern(SUPPLY_WITH_WORKS);
 
@@ -170,9 +206,11 @@ export function naturePrestationSql(alias = 'o'): string {
 
   const supplyTitle = `(${sqlRegexAny(title, PG_SUPPLY)})`;
   const studyTitle = `(${sqlRegexAny(title, PG_STUDY)})`;
+  const servicesTitle = `(${sqlRegexAny(title, PG_SERVICES)})`;
   const worksTitle = `(${sqlRegexAny(title, PG_WORKS)})`;
   const supplyBody = `(${sqlRegexAny(body, PG_SUPPLY)})`;
   const studyBody = `(${sqlRegexAny(body, PG_STUDY)})`;
+  const servicesBody = `(${sqlRegexAny(body, PG_SERVICES)})`;
   const supplyWithWorks = `(${title} ~ '${PG_SUPPLY_WITH_WORKS.replace(/'/g, "''")}')`;
 
   return `COALESCE(
@@ -182,9 +220,11 @@ export function naturePrestationSql(alias = 'o'): string {
       WHEN ${supplyTitle} AND ${worksTitle} THEN 'mixte'
       WHEN ${supplyTitle} THEN 'fournitures'
       WHEN ${studyTitle} THEN 'etudes'
+      WHEN ${servicesTitle} THEN 'services'
       WHEN ${worksTitle} THEN 'travaux'
       WHEN ${supplyBody} THEN 'fournitures'
       WHEN ${studyBody} THEN 'etudes'
+      WHEN ${servicesBody} THEN 'services'
       ELSE NULL
     END
   )`;

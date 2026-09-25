@@ -41,6 +41,25 @@ describe('inferNaturePrestation', () => {
     // Title already decides - a passing mention in the body must not override it.
     expect(inferNaturePrestation('Travaux de voirie', 'fourniture de consommables incluse')).toBe('travaux');
   });
+
+  // 25 Sep client audit, point 7: "nettoyage et maintenance ne se résument
+  // pas aux travaux ou fournitures" - a chauffagiste bidding on a recurring
+  // HVAC-maintenance contract shouldn't be shown a travaux/fournitures
+  // classification for it.
+  it("classifies recurring service contracts as 'services', not 'travaux'", () => {
+    expect(inferNaturePrestation('Maintenance chauffage/ventilation/climatisation - INRAE')).toBe('services');
+    expect(inferNaturePrestation('Nettoyage des locaux administratifs')).toBe('services');
+    expect(inferNaturePrestation('Prestations de gardiennage et surveillance du site')).toBe('services');
+    expect(inferNaturePrestation('Marché de restauration collective scolaire')).toBe('services');
+    expect(inferNaturePrestation('Collecte et traitement des déchets ménagers')).toBe('services');
+  });
+
+  it("keeps building-fabric upkeep (espaces verts, voirie, toitures) as 'travaux', not 'services'", () => {
+    // WORKS_PATTERNS already owns these nouns - the new services patterns
+    // must not steal them, since that upkeep is still an on-site worksite.
+    expect(inferNaturePrestation('Entretien des espaces verts de la commune')).toBe('travaux');
+    expect(inferNaturePrestation('Maintenance de voirie communale')).toBe('travaux');
+  });
 });
 
 describe('naturePrestationSql', () => {
