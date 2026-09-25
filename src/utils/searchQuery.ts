@@ -91,6 +91,33 @@ export const TRADE_KEYWORD_SYNONYMS: Record<string, string[]> = {
 
 export const synonymsOf = (w: string): string[] => TRADE_KEYWORD_SYNONYMS[foldAccents(w).toLowerCase()] || [];
 
+// Client report (25 Sep): searching "elec" (or "Électricité", which folds
+// to the same lookup) surfaced "électronique" notices - unrelated to the
+// requested trade. Cause: "elec" is a literal substring of "electronique"
+// once accents are stripped, and the raw typed word is always included
+// as one of the OR'd match alternatives alongside its synonym expansion
+// (see matchTermsOf/tsqueryAlternatives below) - so the short abbreviation
+// itself, not just its "electricite" synonym, was doing the matching.
+// Listed explicitly (real known collisions) rather than inferred from
+// word length, since prefix/substring matching the raw word is exactly
+// right for most synonym keys ("clim" -> matches "climatiseur" fine, no
+// unrelated trade starts with "clim").
+export const AMBIGUOUS_ABBREVIATIONS = new Set(['elec']);
+
+// The folded terms (itself, its stem, its synonyms) a word should be
+// substring/prefix-matched against - with a known-ambiguous abbreviation's
+// own literal form left out (see AMBIGUOUS_ABBREVIATIONS above), so it can
+// only ever match through its synonym expansion. Shared by the ILIKE
+// patterns built in opportunities.ts and by tsqueryAlternatives below, so
+// the fix applies everywhere a word can match a notice.
+export function matchTermsOf(w: string): string[] {
+  const stem = stemOf(w);
+  const syns = synonymsOf(w);
+  const folded = foldAccents(w).toLowerCase();
+  const includeRaw = !AMBIGUOUS_ABBREVIATIONS.has(folded);
+  return [...(includeRaw ? [foldAccents(w)] : []), ...(stem ? [stem] : []), ...syns];
+}
+
 const TRADE_CONCEPT_TOKENS = new Set(
   Object.values(TRADE_KEYWORD_SYNONYMS).flat().concat(Object.keys(TRADE_KEYWORD_SYNONYMS))
 );
@@ -119,5 +146,7 @@ export const isTradeWord = (w: string): boolean => {
 export function tsqueryAlternatives(w: string): string[] {
   const stem = stemOf(w);
   const syns = synonymsOf(w);
-  return [`${w}:*`, ...(stem ? [`${stem}:*`] : []), ...syns.map((s) => `${s}:*`)];
+  const folded = foldAccents(w).toLowerCase();
+  const includeRaw = !AMBIGUOUS_ABBREVIATIONS.has(folded);
+  return [...(includeRaw ? [`${w}:*`] : []), ...(stem ? [`${stem}:*`] : []), ...syns.map((s) => `${s}:*`)];
 }
