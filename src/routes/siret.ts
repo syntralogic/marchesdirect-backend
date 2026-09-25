@@ -4,7 +4,7 @@ import axios from 'axios';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { syncLeadToCrm } from '../services/crmSyncService';
-import { sendPrefilledDossierEmail } from '../services/prefilledDossierService';
+import { sendPrefilledDossierEmail, generatePrefilledDossierPdf } from '../services/prefilledDossierService';
 import { AuthRequest } from '../middleware/auth';
 import {
   requestVerificationCode,
@@ -623,6 +623,104 @@ router.post(
     }
 
     res.json({ leadCaptured: true, dossierEmailed });
+  }
+);
+
+// Shared by GET /lead/dossier-pdf and POST /lead/resend below: re-derives the
+// same PrefilledDossierInput the /lead endpoint used to send the first email,
+// from sessionId + opportunityId alone, so the visitor can get their document
+// again without re-entering anything. Only ever serves a session that has
+// already passed the lead gate (lead_captured_at set) - this never lets
+// someone skip straight to the document without capturing contact details
+// first, it only lets an already-captured visitor retrieve what they were
+// already sent.
+async function loadPrefilledDossierInput(sessionId: string, opportunityId: string) {
+  const lookup = await db.query(
+    'SELECT siret, company_data, email, lead_captured_at FROM siret_lookups WHERE session_id = $1',
+    [sessionId]
+  );
+  if (lookup.rows.length === 0 || !lookup.rows[0].lead_captured_at) {
+    return { error: 'lead_not_captured' as const };
+  }
+  const { siret, company_data, email } = lookup.rows[0];
+  const companyName = company_data?.name || null;
+  if (!companyName || !email) {
+    return { error: 'lead_not_captured' as const };
+  }
+
+  const oppResult = await db.query(
+    `SELECT title, buyer_name, source_reference, location_city, deadline, estimated_value, currency
+     FROM opportunities WHERE id = $1 AND deleted_at IS NULL`,
+    [opportunityId]
+  );
+  if (oppResult.rows.length === 0) {
+    return { error: 'opportunity_not_found' as const };
+  }
+  const o = oppResult.rows[0];
+
+  return {
+    email,
+    input: {
+      companyName,
+      siret: siret || null,
+      opportunityTitle: o.title,
+      buyerName: o.buyer_name,
+      reference: o.source_reference,
+      locationCity: o.location_city,
+      submissionDeadline: o.deadline ? new Date(o.deadline).toLocaleDateString('fr-FR') : null,
+      estimatedValue: o.estimated_value ? Number(o.estimated_value) : null,
+      currency: o.currency,
+    },
+  };
+}
+
+// GET /api/siret/lead/dossier-pdf - "Télécharger mon exemplaire" on the
+// Dossier screen (client's 25 Sep audit, point 5): an anonymous visitor who
+// already validated email/phone and was emailed the PDF had no way to grab
+// it immediately in-browser, only the AppointmentModal recap had a download
+// button. Regenerates the identical PDF on demand instead of storing it.
+router.get('/lead/dossier-pdf', async (req: AuthRequest, res: Response) => {
+  const sessionId = String(req.query.sessionId || '');
+  const opportunityId = String(req.query.opportunityId || '');
+  if (!sessionId || !opportunityId) {
+    return res.status(400).json({ error: 'sessionId et opportunityId requis.' });
+  }
+  const result = await loadPrefilledDossierInput(sessionId, opportunityId);
+  if ('error' in result) {
+    return res.status(409).json({ error: result.error, message: "Confirmez d'abord vos coordonnées pour accéder à ce document." });
+  }
+  try {
+    const pdf = await generatePrefilledDossierPdf(result.input);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="dossier-pre-rempli.pdf"');
+    res.send(pdf);
+  } catch (err) {
+    logger.error('Prefilled dossier PDF generation error:', err);
+    res.status(500).json({ error: 'Échec de la génération du document.' });
+  }
+});
+
+// POST /api/siret/lead/resend - "Me le renvoyer" (same audit point): resends
+// the exact same email the /lead endpoint already sent, for a visitor who
+// can't find it in their inbox.
+router.post(
+  '/lead/resend',
+  [
+    body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
+    body('opportunityId').isUUID(),
+  ],
+  async (req: AuthRequest, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ error: errors.array()[0].msg });
+    }
+    const { sessionId, opportunityId } = req.body;
+    const result = await loadPrefilledDossierInput(sessionId, opportunityId);
+    if ('error' in result) {
+      return res.status(409).json({ error: result.error, message: "Confirmez d'abord vos coordonnées pour recevoir ce document." });
+    }
+    const sent = await sendPrefilledDossierEmail(result.email, result.input);
+    res.json({ sent });
   }
 );
 
