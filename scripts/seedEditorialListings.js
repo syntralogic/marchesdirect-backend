@@ -171,6 +171,11 @@ const SCENARIOS = [
       `Consultation privée lancée par une copropriété de ${city} pour équiper en climatisation réversible multi-split un premier lot de logements et les parties communes, avant extension au reste de l'immeuble selon le retour d'expérience.`,
     ],
     valueRange: [18000, 65000], deadlineDaysRange: [18, 35],
+    details: (city) => ({
+      scope: `Périmètre : parties communes de l'immeuble et un premier lot de logements pilotes à ${city} (l'étendue des lots restants sera précisée après retour d'expérience). Quantités estimées : plusieurs unités intérieures multi-split par logement pilote, à confirmer selon relevé sur site.`,
+      calendar: `Intervention souhaitée hors période de chauffe, démarrage envisagé sous quelques semaines après sélection du prestataire.`,
+      constraints: `Intervention en site occupé (copropriété habitée) : coordination des accès avec les résidents attendue. Garantie et SAV sur les équipements posés demandés.`,
+    }),
   },
   {
     tradeSlug: "cvc", journey: "subcontracting",
@@ -183,6 +188,11 @@ const SCENARIOS = [
       `Lot chauffage à sous-traiter dans le cadre d'une rénovation de résidence à ${city} : remplacement d'une chaufferie collective par une chaudière à condensation, dépose comprise. Recherche d'un sous-traitant disponible sous délai court.`,
     ],
     valueRange: [25000, 90000], deadlineDaysRange: [14, 30],
+    details: (city) => ({
+      scope: `Périmètre : dépose de l'ancienne chaufferie collective et pose d'une chaudière collective à condensation, sur la résidence concernée à ${city}. Quantités précises (puissance, nombre de logements desservis) à confirmer au sous-traitant retenu.`,
+      calendar: `Intervention à délai court, dans la continuité du planning de l'entreprise générale déjà engagée sur le chantier.`,
+      constraints: `Coordination obligatoire avec l'entreprise générale pilote et les autres corps d'état déjà sur site. Qualification RGE/PG souhaitée pour l'installation de chaudières collectives.`,
+    }),
   },
   // --- Électricité ---
   {
@@ -196,6 +206,11 @@ const SCENARIOS = [
       `Immeuble tertiaire à ${city} : consultation restreinte pour une mise en conformité électrique complète (tableau général, câblage) sur plusieurs niveaux, hors intervention sur les parties déjà rénovées.`,
     ],
     valueRange: [12000, 48000], deadlineDaysRange: [15, 30],
+    details: (city) => ({
+      scope: `Périmètre : tableau électrique général et câblage sur trois étages de l'immeuble tertiaire à ${city}, hors parties déjà rénovées. Quantités (nombre de circuits, longueur de câblage) à établir lors de la visite.`,
+      calendar: `Travaux envisagés par tranches d'étage pour limiter la gêne à l'activité des occupants du bâtiment.`,
+      constraints: `Mise en conformité avec la réglementation électrique en vigueur attendue ; intervention en horaires décalés possible selon l'occupation des locaux.`,
+    }),
   },
   {
     tradeSlug: "electricite", journey: "subcontracting",
@@ -208,6 +223,11 @@ const SCENARIOS = [
       `Chantier de résidence à ${city} : lot bornes de recharge véhicules électriques (IRVE) à sous-traiter, raccordement au tableau général et mise en service comprises.`,
     ],
     valueRange: [8000, 30000], deadlineDaysRange: [10, 25],
+    details: (city) => ({
+      scope: `Périmètre : installation de bornes de recharge véhicules électriques sur le parking résidentiel à ${city}, raccordement au tableau général compris. Nombre de bornes à confirmer selon la demande des résidents.`,
+      calendar: `Intervention à délai court demandée par l'entreprise générale, dans le cadre du planning global du chantier de résidence.`,
+      constraints: `Qualification IRVE (Qualifelec ou équivalent) attendue. Coordination avec les autres corps d'état du chantier de résidence.`,
+    }),
   },
   // --- Plomberie ---
   {
@@ -221,6 +241,11 @@ const SCENARIOS = [
       `Immeuble ancien à ${city} : appel à devis privé pour le remplacement des colonnes montantes, intervention en site occupé avec coordination des accès logements requise.`,
     ],
     valueRange: [15000, 55000], deadlineDaysRange: [20, 35],
+    details: (city) => ({
+      scope: `Périmètre : remplacement des colonnes montantes eau froide/eau chaude de l'immeuble ancien à ${city}. Quantités (nombre de colonnes, de logements traversés) à établir lors du diagnostic sur site.`,
+      calendar: `Travaux en site occupé, à planifier logement par logement selon la disponibilité des résidents.`,
+      constraints: `Coordination des accès aux logements requise avec le syndic. Remise en état des parties traversées (murs, gaines techniques) attendue après intervention.`,
+    }),
   },
   {
     tradeSlug: "plomberie", journey: "subcontracting",
@@ -233,6 +258,11 @@ const SCENARIOS = [
       `Programme immobilier neuf à ${city} : lot plomberie/sanitaire (réseaux, raccordements) à sous-traiter sur plusieurs logements, livraison par tranches successives.`,
     ],
     valueRange: [10000, 35000], deadlineDaysRange: [10, 25],
+    details: (city) => ({
+      scope: `Périmètre : pose des réseaux sanitaires et raccordement des équipements sur plusieurs lots d'un programme de logements neufs à ${city}, livrés par tranches. Quantités précises (nombre de logements par tranche) à confirmer avec l'entreprise générale.`,
+      calendar: `Intervention par tranches de livraison, calendrier calé sur l'avancement global du programme immobilier.`,
+      constraints: `Respect du planning de livraison par tranches de l'entreprise générale. Qualification et assurance décennale attendues pour les réseaux sanitaires.`,
+    }),
   },
   // --- Isolation ---
   {
@@ -246,6 +276,11 @@ const SCENARIOS = [
       `Résidence privée à ${city} : consultation pour travaux d'isolation thermique par l'extérieur (façades), dans le cadre d'une rénovation énergétique globale du bâtiment.`,
     ],
     valueRange: [40000, 150000], deadlineDaysRange: [25, 40],
+    details: (city) => ({
+      scope: `Périmètre : isolation thermique par l'extérieur des façades de la résidence à ${city}, dans le cadre d'une rénovation énergétique globale. Quantités (surface de façade à traiter) à confirmer après relevé sur site.`,
+      calendar: `Travaux envisagés hors période hivernale, calendrier lié au déblocage des aides à la rénovation énergétique.`,
+      constraints: `Qualification RGE requise pour l'éligibilité aux aides. Intervention en site occupé avec échafaudage : sécurisation des abords attendue.`,
+    }),
   },
   {
     tradeSlug: "isolation", journey: "subcontracting",
@@ -258,6 +293,11 @@ const SCENARIOS = [
       `Lotissement en cours de construction à ${city} : lot isolation combles perdus par soufflage à sous-traiter sur plusieurs maisons livrées par phases.`,
     ],
     valueRange: [6000, 22000], deadlineDaysRange: [10, 25],
+    details: (city) => ({
+      scope: `Périmètre : isolation par soufflage des combles perdus sur un lotissement de maisons individuelles à ${city}, plusieurs maisons livrées par phases. Quantités (surface de combles par maison) à confirmer selon l'avancement du lotissement.`,
+      calendar: `Intervention par phases, au fur et à mesure de la livraison des maisons du lotissement.`,
+      constraints: `Coordination avec le calendrier de livraison de l'entreprise générale. Matériau et épaisseur d'isolation à respecter selon le cahier des charges du constructeur.`,
+    }),
   },
   // --- Menuiserie / fenêtres ---
   {
@@ -271,6 +311,11 @@ const SCENARIOS = [
       `Consultation privée à ${city} pour le remplacement de menuiseries extérieures vétustes (fenêtres, portes-fenêtres) par du double vitrage, façade complète.`,
     ],
     valueRange: [20000, 80000], deadlineDaysRange: [20, 35],
+    details: (city) => ({
+      scope: `Périmètre : remplacement des fenêtres et portes-fenêtres en simple vitrage sur l'ensemble de la façade de la copropriété à ${city}. Quantités (nombre d'ouvertures) à établir lors du relevé sur site.`,
+      calendar: `Travaux envisagés par étage ou par cage d'escalier, calendrier à définir avec le syndic.`,
+      constraints: `Intervention en site occupé : accès aux logements à coordonner avec les résidents. Respect de l'aspect extérieur harmonisé de la façade demandé.`,
+    }),
   },
   {
     tradeSlug: "menuiserie", journey: "subcontracting",
@@ -283,6 +328,11 @@ const SCENARIOS = [
       `Programme de maisons neuves à ${city} : lot menuiseries extérieures (fenêtres, volets) à sous-traiter, pose sur plusieurs lots selon calendrier de livraison.`,
     ],
     valueRange: [10000, 38000], deadlineDaysRange: [12, 28],
+    details: (city) => ({
+      scope: `Périmètre : pose de fenêtres et volets sur plusieurs lots d'un programme de maisons individuelles neuves à ${city}, livrées par tranches. Quantités (nombre de maisons par tranche) à confirmer avec l'entreprise générale.`,
+      calendar: `Pose calée sur le calendrier de livraison par tranches du programme.`,
+      constraints: `Respect du planning de livraison de l'entreprise générale. Qualité de pose engageant la garantie décennale attendue.`,
+    }),
   },
   // --- Maçonnerie ---
   {
@@ -296,6 +346,11 @@ const SCENARIOS = [
       `Bâtiment privé à ${city} : consultation pour travaux de maçonnerie (reprise de fissures, réfection de façade) suite à un diagnostic structurel.`,
     ],
     valueRange: [10000, 45000], deadlineDaysRange: [18, 30],
+    details: (city) => ({
+      scope: `Périmètre : reprise de fissures structurelles et réfection d'un pan de façade à ${city}, suite à un diagnostic structurel. Quantités (surface de façade concernée) à confirmer après visite.`,
+      calendar: `Intervention envisagée dès validation du diagnostic structurel, avant aggravation des désordres constatés.`,
+      constraints: `Suivi des préconisations du diagnostic structurel attendu. Sécurisation des abords pendant les travaux de façade.`,
+    }),
   },
   {
     tradeSlug: "maconnerie", journey: "subcontracting",
@@ -308,6 +363,11 @@ const SCENARIOS = [
       `Chantier d'extension à ${city} : lot gros oeuvre (fondations, élévation des murs) à sous-traiter, dans le cadre d'un agrandissement de maison individuelle.`,
     ],
     valueRange: [18000, 55000], deadlineDaysRange: [15, 30],
+    details: (city) => ({
+      scope: `Périmètre : réalisation des fondations et de l'élévation d'une extension de maison individuelle à ${city}. Quantités (surface au sol de l'extension) à confirmer avec l'entreprise générale.`,
+      calendar: `Intervention en début de chantier, avant les autres corps d'état de l'extension.`,
+      constraints: `Coordination avec le planning global de l'entreprise générale. Respect des plans structurels validés par le bureau d'études.`,
+    }),
   },
   // --- Peinture ---
   {
@@ -321,6 +381,11 @@ const SCENARIOS = [
       `Résidence à ${city} : consultation pour travaux de peinture intérieure des parties communes, incluant préparation des supports et finitions.`,
     ],
     valueRange: [8000, 30000], deadlineDaysRange: [12, 25],
+    details: (city) => ({
+      scope: `Périmètre : remise en état des parties communes (cages d'escalier, halls) d'une résidence de plusieurs logements à ${city}, préparation des supports comprise. Quantités (surfaces à traiter) à confirmer sur site.`,
+      calendar: `Travaux envisagés en horaires de journée, hors passages fréquents des résidents si possible.`,
+      constraints: `Intervention en site occupé : sécurisation et signalisation des zones en travaux attendues. Nuisances sonores et olfactives à limiter.`,
+    }),
   },
   {
     tradeSlug: "peinture", journey: "subcontracting",
@@ -333,6 +398,11 @@ const SCENARIOS = [
       `Programme immobilier neuf à ${city} : lot peinture/finitions à sous-traiter sur plusieurs logements, livraison par tranches successives.`,
     ],
     valueRange: [12000, 40000], deadlineDaysRange: [10, 25],
+    details: (city) => ({
+      scope: `Périmètre : finitions peinture intérieure sur plusieurs lots d'un programme de logements neufs à ${city}, livrés par tranches. Quantités (nombre de logements par tranche) à confirmer avec l'entreprise générale.`,
+      calendar: `Intervention en fin de chantier, juste avant la livraison de chaque tranche de logements.`,
+      constraints: `Respect du planning de livraison par tranches. Finitions engageant la réception des logements par les acquéreurs.`,
+    }),
   },
   // --- Couverture ---
   {
@@ -346,6 +416,11 @@ const SCENARIOS = [
       `Bâtiment privé à ${city} : consultation pour réfection de toiture (couverture et zinguerie) suite à un constat de dégradation.`,
     ],
     valueRange: [15000, 60000], deadlineDaysRange: [15, 30],
+    details: (city) => ({
+      scope: `Périmètre : réfection complète d'une toiture endommagée avec reprise de la zinguerie à ${city}. Quantités (surface de toiture) à confirmer après constat sur site.`,
+      calendar: `Intervention envisagée rapidement compte tenu de la dégradation constatée, sous réserve de conditions météo favorables.`,
+      constraints: `Sécurisation du chantier en hauteur attendue. Protection des éléments en dessous de la toiture pendant les travaux.`,
+    }),
   },
   {
     tradeSlug: "couverture", journey: "subcontracting",
@@ -358,6 +433,11 @@ const SCENARIOS = [
       `Programme de maisons individuelles à ${city} : lot charpente-couverture à sous-traiter sur plusieurs constructions, livraison échelonnée.`,
     ],
     valueRange: [20000, 65000], deadlineDaysRange: [15, 30],
+    details: (city) => ({
+      scope: `Périmètre : pose de charpente et couverture sur un lot de plusieurs maisons individuelles neuves à ${city}, livraison échelonnée. Quantités (nombre de maisons du lot) à confirmer avec le constructeur.`,
+      calendar: `Pose calée sur l'avancement du gros oeuvre de chaque maison, livraison échelonnée.`,
+      constraints: `Coordination avec le planning du constructeur. Respect des matériaux et pentes de toiture définis au permis de construire.`,
+    }),
   },
   // --- Rénovation générale (batiment-general) ---
   {
@@ -371,6 +451,11 @@ const SCENARIOS = [
       `Ensemble de logements à ${city} : consultation privée tous corps d'état pour une rénovation complète avant remise en location.`,
     ],
     valueRange: [60000, 250000], deadlineDaysRange: [25, 45],
+    details: (city) => ({
+      scope: `Périmètre : rénovation tous corps d'état d'un ensemble de logements à ${city} avant remise en location. Quantités (nombre de logements concernés) à confirmer avec le bailleur.`,
+      calendar: `Travaux envisagés logement par logement, calendrier à coordonner avec les dates de relocation prévues.`,
+      constraints: `Coordination de l'ensemble des corps d'état à assurer. Délai de remise en location à respecter selon la programmation du bailleur.`,
+    }),
   },
   {
     tradeSlug: "batiment-general", journey: "subcontracting",
@@ -383,6 +468,11 @@ const SCENARIOS = [
       `Chantier de réhabilitation à ${city} : plusieurs lots second oeuvre et finitions à sous-traiter, dans le cadre d'une rénovation d'immeuble pilotée en entreprise générale.`,
     ],
     valueRange: [40000, 180000], deadlineDaysRange: [20, 40],
+    details: (city) => ({
+      scope: `Périmètre : plusieurs lots second oeuvre (cloisons, finitions) d'une réhabilitation d'immeuble à ${city}, pilotée en entreprise générale. Quantités (nombre de logements ou surface par lot) à confirmer avec l'entreprise générale.`,
+      calendar: `Intervention par lots, selon le planning de réhabilitation piloté par l'entreprise générale.`,
+      constraints: `Coordination avec les autres sous-traitants déjà engagés sur le chantier. Respect du planning global de réhabilitation.`,
+    }),
   },
   // --- Espaces verts ---
   {
@@ -396,6 +486,11 @@ const SCENARIOS = [
       `Résidence privée à ${city} : consultation pour un marché annuel d'entretien paysager des espaces verts communs.`,
     ],
     valueRange: [6000, 25000], deadlineDaysRange: [15, 30],
+    details: (city) => ({
+      scope: `Périmètre : entretien des espaces verts communs de la copropriété à ${city} (tonte, taille, entretien des massifs), contrat annuel. Quantités (surface d'espaces verts, fréquence de passage) à confirmer avec le syndic.`,
+      calendar: `Contrat annuel avec passages réguliers selon la saison, fréquence à définir avec la copropriété.`,
+      constraints: `Respect du calendrier de passage attendu par les résidents. Produits et méthodes d'entretien respectueux de l'environnement souhaités.`,
+    }),
   },
   {
     tradeSlug: "espaces-verts", journey: "tender",
@@ -408,6 +503,11 @@ const SCENARIOS = [
       `Lotissement en fin de construction à ${city} : consultation pour l'aménagement paysager des espaces communs (plantations, engazonnement) avant remise aux acquéreurs.`,
     ],
     valueRange: [12000, 45000], deadlineDaysRange: [15, 30],
+    details: (city) => ({
+      scope: `Périmètre : aménagement des espaces verts communs d'un lotissement neuf à ${city} (plantations, engazonnement) avant livraison. Quantités (surface à aménager) à confirmer avec le promoteur.`,
+      calendar: `Intervention avant la livraison du lotissement aux acquéreurs, calendrier calé sur l'avancement global du programme.`,
+      constraints: `Respect du délai de livraison du promoteur. Choix des végétaux à valider selon le cahier des charges paysager du lotissement.`,
+    }),
   },
   // --- Nettoyage ---
   {
@@ -421,6 +521,11 @@ const SCENARIOS = [
       `Immeuble tertiaire à ${city} : consultation privée pour un marché annuel de nettoyage des locaux et parties communes.`,
     ],
     valueRange: [10000, 40000], deadlineDaysRange: [12, 25],
+    details: (city) => ({
+      scope: `Périmètre : entretien des parties communes et des bureaux d'un immeuble tertiaire à ${city}, contrat annuel. Quantités (surface à nettoyer, fréquence de passage) à confirmer avec le gestionnaire.`,
+      calendar: `Contrat annuel avec passages réguliers, fréquence hebdomadaire ou quotidienne à définir avec le gestionnaire.`,
+      constraints: `Intervention en horaires compatibles avec l'activité des occupants de l'immeuble. Produits et matériel professionnels attendus.`,
+    }),
   },
   {
     tradeSlug: "nettoyage", journey: "tender",
@@ -433,6 +538,11 @@ const SCENARIOS = [
       `Programme de logements neufs à ${city} : consultation pour le nettoyage de fin de chantier de l'ensemble des lots avant livraison.`,
     ],
     valueRange: [5000, 20000], deadlineDaysRange: [8, 20],
+    details: (city) => ({
+      scope: `Périmètre : nettoyage de fin de chantier de l'ensemble des lots d'un programme de logements neufs à ${city}, avant remise aux acquéreurs. Quantités (nombre de logements) à confirmer avec le promoteur.`,
+      calendar: `Intervention juste avant la livraison de chaque tranche du programme, calendrier calé sur l'avancement du chantier.`,
+      constraints: `Respect du planning de livraison du promoteur. Nettoyage engageant la réception des logements par les acquéreurs.`,
+    }),
   },
   // --- Maintenance ---
   {
@@ -446,6 +556,11 @@ const SCENARIOS = [
       `Résidence privée à ${city} : consultation pour un marché de maintenance multi-technique annuel (équipements communs, VMC, portails automatiques).`,
     ],
     valueRange: [8000, 35000], deadlineDaysRange: [15, 30],
+    details: (city) => ({
+      scope: `Périmètre : maintenance des équipements communs (ascenseurs, VMC, portails) d'une résidence privée à ${city}, contrat annuel. Quantités (nombre d'équipements) à confirmer avec le syndic.`,
+      calendar: `Contrat annuel avec passages de maintenance préventive réguliers, fréquence à définir avec la résidence.`,
+      constraints: `Qualifications spécifiques attendues selon les équipements (ascenseurs notamment). Astreinte ou intervention d'urgence possible selon le contrat.`,
+    }),
   },
   {
     tradeSlug: "maintenance", journey: "subcontracting",
@@ -458,6 +573,11 @@ const SCENARIOS = [
       `Immeuble tertiaire à ${city} : lot maintenance VMC/désenfumage à sous-traiter dans le cadre d'un contrat multi-technique existant.`,
     ],
     valueRange: [6000, 22000], deadlineDaysRange: [12, 25],
+    details: (city) => ({
+      scope: `Périmètre : maintenance des systèmes de VMC et de désenfumage d'un immeuble de bureaux à ${city}, dans le cadre d'un contrat multi-technique existant. Quantités (nombre de systèmes) à confirmer avec le prestataire principal.`,
+      calendar: `Interventions de maintenance périodiques, calendrier calé sur le contrat multi-technique existant.`,
+      constraints: `Qualification spécifique désenfumage/VMC attendue. Coordination avec le prestataire multi-technique principal déjà en place.`,
+    }),
   },
 ];
 
@@ -556,6 +676,7 @@ async function run() {
       const [dMin, dMax] = scenario.deadlineDaysRange;
       const deadlineDays = dMin + (h % (dMax - dMin));
       const title = scenario.titlePattern(city.name)[titleVariantIdx];
+      const details = scenario.details(city.name);
 
       rows.push({
         sourceRef: `editorial-${key}`,
@@ -568,6 +689,7 @@ async function run() {
         department: city.department,
         region: city.region,
         deadlineDays,
+        details,
       });
     }
   }
@@ -582,45 +704,99 @@ async function run() {
     return;
   }
 
-  // 17 bound params per row (18 columns total; publication_date is a bare
+  // 18 bound params per row (19 columns total; publication_date is a bare
   // NOW() with no param of its own, deadline's one param is deadlineDays):
   //  1 source_id, 2 source_reference, 3 opportunity_type_id, 4 trade_id,
   //  5 title, 6 description, 7 deadlineDays (used inside the deadline
   //  interval expression below), 8 estimated_value, 9 currency,
   //  10 location_city, 11 location_department, 12 location_region,
   //  13 status, 14 ai_classification_status, 15 ai_matched_trades,
-  //  16 ai_summary_status, 17 dce_documents_status.
+  //  16 ai_summary_status, 17 dce_documents_status, 18 ai_extracted_facts.
+  //
+  // ai_extracted_facts (added 25 Sep audit, point 10): these rows never go
+  // through extractOpportunityFacts (no real notice/DCE text to extract
+  // from, and the account's Anthropic API credits are exhausted anyway -
+  // see marchesdirect.md), so the fiche's "Détails du dossier" block used
+  // to fall back to just lieu/montant/échéance/référence for every private
+  // tender and sous-traitance listing - exactly the "quelques lignes
+  // génériques" thinness the client flagged. Populated here instead,
+  // directly from each scenario's own scope/calendar/constraints text (see
+  // SCENARIOS[].details above) - deterministic, not AI-dependent, and
+  // varies per trade+journey same as the title/paragraph do. buyer_name/
+  // contact_email are deliberately left "not available" (never set) so the
+  // existing identity-redaction gate still fully governs those - this only
+  // adds facts about the job itself. team_size_estimate/key_risks/
+  // contract_duration/selection_criteria are included as explicit
+  // "not available" only so routes/opportunities.ts's factsNeedExtraction()
+  // sees a complete-shaped object and doesn't queue these rows for a real
+  // (currently-failing) AI extraction on every visit.
   const values = [];
   rows.forEach((r) => {
+    const facts = {
+      scope_details: { value: r.details.scope, available: true },
+      intervention_calendar: { value: r.details.calendar, available: true },
+      constraints_expectations: { value: r.details.constraints, available: true },
+      buyer_name: { value: "not available", available: false },
+      contact_email: { value: "not available", available: false },
+      contract_object: { value: "not available", available: false },
+      procedure_type: { value: "not available", available: false },
+      submission_deadline: { value: "not available", available: false },
+      estimated_value: { value: "not available", available: false },
+      required_qualifications: { value: "not available", available: false },
+      team_size_estimate: { value: "not available", available: false },
+      key_risks: { value: [], available: false },
+      contract_duration: { value: "not available", available: false },
+      submission_method: { value: "not available", available: false },
+      allotment: { value: "not available", available: false },
+      technical_visit: { value: "not available", available: false },
+      selection_criteria: { value: [], available: false },
+      attribution_winner: { value: "not available", available: false },
+      attribution_amount: { value: "not available", available: false },
+      attribution_date: { value: "not available", available: false },
+      buyer_phone: { value: "not available", available: false },
+      buyer_website: { value: "not available", available: false },
+      requirements_detected: { value: 0, available: false },
+    };
     values.push(
       sourceId, r.sourceRef, r.typeId, r.tradeId,
       r.title, r.description, r.deadlineDays, r.value, "EUR",
       r.city, r.department, r.region,
       "active", "classified",
       JSON.stringify([{ trade_id: r.tradeId, confidence: 1.0, reasoning: "Assignation éditoriale directe (catalogue interne, pas de classification IA)." }]),
-      "not_generated", "no_documents_found"
+      "not_generated", "no_documents_found",
+      JSON.stringify(facts)
     );
   });
-  const PARAMS_PER_ROW = 17;
+  const PARAMS_PER_ROW = 18;
   const placeholders = rows
     .map((_r, idx) => {
       const base = idx * PARAMS_PER_ROW;
-      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, NOW(), NOW() + ($${base + 7}::int * interval '1 day'), $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13}, $${base + 14}, $${base + 15}, $${base + 16}, $${base + 17})`;
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, NOW(), NOW() + ($${base + 7}::int * interval '1 day'), $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13}, $${base + 14}, $${base + 15}, $${base + 16}, $${base + 17}, $${base + 18}::jsonb)`;
     })
     .join(",\n");
 
+  // ON CONFLICT ... DO UPDATE (not DO NOTHING) specifically so this batch
+  // can backfill ai_extracted_facts onto the ~1,600 editorial rows already
+  // inserted by earlier runs of this script - a plain DO NOTHING would
+  // silently skip every one of them since their source_reference already
+  // exists. Only ai_extracted_facts is touched on conflict, only when it's
+  // still NULL, so a row that somehow did get a real AI extraction later
+  // is left alone rather than being overwritten with this fallback data.
   const result = await pool.query(
     `INSERT INTO opportunities (
        source_id, source_reference, opportunity_type_id, trade_id,
        title, description, publication_date, deadline,
        estimated_value, currency, location_city, location_department, location_region,
-       status, ai_classification_status, ai_matched_trades, ai_summary_status, dce_documents_status
+       status, ai_classification_status, ai_matched_trades, ai_summary_status, dce_documents_status,
+       ai_extracted_facts
      ) VALUES ${placeholders}
-     ON CONFLICT (source_id, source_reference) DO NOTHING`,
+     ON CONFLICT (source_id, source_reference) DO UPDATE
+       SET ai_extracted_facts = EXCLUDED.ai_extracted_facts
+       WHERE opportunities.ai_extracted_facts IS NULL`,
     values
   );
 
-  console.log(`[seedEditorialListings] Inserted ${result.rowCount} new rows (${rows.length - (result.rowCount || 0)} already existed - safe re-run).`);
+  console.log(`[seedEditorialListings] Inserted/backfilled ${result.rowCount} rows (new inserts + ai_extracted_facts backfill on existing rows - safe re-run).`);
   console.log("[seedEditorialListings] Curated national-spread batch, not a literal every-city catalog - see the header comment for how to extend it further.");
 }
 
