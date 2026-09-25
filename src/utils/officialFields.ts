@@ -65,4 +65,77 @@ export function reconcileOfficialFields(opp: any): void {
   if (isGenericBuyer(opp.buyer_name) && facts.buyer_name?.available && !isGenericBuyer(facts.buyer_name.value)) {
     opp.buyer_name = String(facts.buyer_name.value).trim();
   }
+
+  reconcileProcedureType(opp);
+  reconcileDeadlineTime(opp);
+}
+
+// ============================================================================
+// PROCEDURE TYPE (25 Sep client audit): the fiche's "Procédure" row read
+// straight off facts.procedure_type, the AI's free-text reading of the
+// notice ("Appel d'offres"), while the connector's raw feed record already
+// carries a structured, authoritative code for the same field
+// (BOAMP/DECP "procedure": e.g. "PROCEDURE_ADAPTEE_OUVERTE" -> humanized by
+// the frontend's RAW_LABEL_MAP as "Procédure adaptée ouverte"). The two
+// disagreed because nothing ever compared them. The raw structured code is
+// the authoritative source when present - it overwrites the AI's free-text
+// reading rather than the other way round, same "one value per official
+// data point" rule as amount/buyer above. Frontend's humanizeRawLabel()
+// already knows how to turn the raw code into readable French.
+// ============================================================================
+
+const RAW_DATA_PROCEDURE_KEYS = ['procedure', 'type_procedure', 'procedureType'];
+
+export function extractRawProcedureCode(rawData: unknown): string | null {
+  if (!rawData || typeof rawData !== 'object') return null;
+  const fields = (rawData as any).fields || rawData;
+  for (const key of RAW_DATA_PROCEDURE_KEYS) {
+    const v = (fields as any)?.[key];
+    if (typeof v === 'string' && v.trim().length > 0) return v.trim();
+  }
+  return null;
+}
+
+export function reconcileProcedureType(opp: any): void {
+  const facts = opp?.ai_extracted_facts;
+  if (!facts || typeof facts !== 'object') return;
+  const rawCode = extractRawProcedureCode(opp.raw_data);
+  if (rawCode) {
+    facts.procedure_type = { value: rawCode, available: true };
+  }
+}
+
+// ============================================================================
+// DEADLINE TIME OF DAY (25 Sep client audit): the fiche header/countdown
+// only ever shows the date (opportunity.deadline formatted with no time),
+// while the "Détails du dossier" row shows the AI's free-text reading of
+// the notice verbatim - which sometimes states a submission time ("avant
+// le 15 octobre 2026 a 11h00"). One block carried a time, the other never
+// could, and they read as disagreeing. Rather than guess at the deadline
+// column's own timezone (the column drives sorting/status elsewhere in the
+// app - not safe to mutate here), this derives a single `deadline_time`
+// field from the same notice text the detail row already uses, so the
+// header can show the identical time instead of silently dropping it.
+// Left null when the notice states no time - never invented.
+// ============================================================================
+
+export function parseDeadlineTimeOfDay(text: unknown): { hours: number; minutes: number } | null {
+  if (typeof text !== 'string') return null;
+  const m = text.match(/\b(\d{1,2})\s*[h:]\s*(\d{2})?\b/);
+  if (!m) return null;
+  const hours = Number(m[1]);
+  const minutes = m[2] ? Number(m[2]) : 0;
+  if (!Number.isFinite(hours) || hours > 23 || minutes > 59) return null;
+  return { hours, minutes };
+}
+
+export function reconcileDeadlineTime(opp: any): void {
+  const facts = opp?.ai_extracted_facts;
+  opp.deadline_time = null;
+  if (!facts || typeof facts !== 'object' || !opp.deadline) return;
+  const parsed = facts.submission_deadline?.available
+    ? parseDeadlineTimeOfDay(facts.submission_deadline.value)
+    : null;
+  if (!parsed) return;
+  opp.deadline_time = `${String(parsed.hours).padStart(2, '0')}h${String(parsed.minutes).padStart(2, '0')}`;
 }

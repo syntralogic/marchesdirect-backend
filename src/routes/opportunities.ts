@@ -815,6 +815,15 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
               o.location_department, o.estimated_start_date, o.estimated_end_date,
               o.ai_classification_status, o.ai_summary, o.ai_matched_trades, o.status,
               ot.code as journey, t.name as trade_name, o.buyer_name,
+              -- 25 Sep client audit follow-up: this route never reconciled
+              -- estimated_value/buyer_name against ai_extracted_facts the way
+              -- the fiche detail route does (see utils/officialFields.ts), so
+              -- a card here could show "Montant non communiqué" while the
+              -- same opportunity's fiche showed the real figure. Selected
+              -- here only to compute that fallback below, then stripped
+              -- before the response goes out - the list payload never
+              -- carried ai_extracted_facts before and doesn't need to.
+              o.ai_extracted_facts, o.raw_data,
               -- R02: the resolved nature (AI value when classified, notice-wording
               -- fallback otherwise, NULL when genuinely unreadable) so the result
               -- card can say "Fournitures" out loud instead of the visitor having
@@ -839,6 +848,16 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
        WHERE ${whereClause}`,
       params
     );
+
+    // Same one-value-per-official-data-point pass the fiche detail route
+    // runs, so a result card never disagrees with its own fiche (25 Sep
+    // audit follow-up). ai_extracted_facts/raw_data were only selected to
+    // compute this and are never part of the list payload.
+    for (const row of listResult.rows) {
+      reconcileOfficialFields(row);
+      delete row.ai_extracted_facts;
+      delete row.raw_data;
+    }
 
     res.json({
       results: listResult.rows,
