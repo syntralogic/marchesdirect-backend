@@ -690,6 +690,17 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         conditions.push(`o.status = ANY($${idx++}::text[])`);
         params.push(statuses);
       }
+    } else {
+      // Client audit (25 Sep): "Tous" on the public search was labelled
+      // "en cours et nouveaux" but silently included awarded/expired/
+      // cancelled rows too - isolation thermique went 141 (no filter) vs
+      // 74 ("En cours" explicitly picked), i.e. the unfiltered default was
+      // showing closed markets as if they were open to candidature. The
+      // frontend's "Tous" option is a real all-statuses choice for anyone
+      // who wants it (send status=active,expired,awarded,cancelled) - only
+      // the *default*, no-param case changes here, to open-to-candidature
+      // only. Admin's own /api/admin/opportunities route is unaffected.
+      conditions.push(`o.status = 'active'`);
     }
     if (nature) {
       // R02 (contre-audit 15 Sep): "espaces verts" kept returning
