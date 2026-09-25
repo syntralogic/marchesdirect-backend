@@ -3,6 +3,23 @@ import { body, validationResult } from 'express-validator';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { syncLeadToCrm } from '../services/crmSyncService';
+import { toE164French } from '../services/smsService';
+
+// Contre-audit follow-up: crm_leads.phone was stored exactly as typed
+// ("06 00 00 00 00", "0033600000000", "+33 6 00 00 00 00", ...), so the
+// same visitor's number rendered differently everywhere it was displayed
+// (AdminContacts/AdminLeads) and a chargé d'affaires calling it back had to
+// re-read/re-type it. Normalize to E.164 (+33XXXXXXXXX) for storage, but
+// only when it actually looks like a French number - anything else (a
+// foreign number, a typo, stray text) is kept as the visitor typed it,
+// same as before, since this field is informational and not hard-validated
+// (see the phone validator comment above).
+const FR_E164_RE = /^\+33[1-9]\d{8}$/;
+function normalizeLeadPhone(phone: string | undefined | null): string | undefined | null {
+  if (!phone) return phone;
+  const normalized = toE164French(phone);
+  return FR_E164_RE.test(normalized) ? normalized : phone;
+}
 
 const router = Router();
 
@@ -49,9 +66,10 @@ router.post(
 
     try {
       const {
-        brandId, firstName, lastName, email, phone, companyName,
+        brandId, firstName, lastName, email, companyName,
         industryTrade, locationCity, locationRegion, leadSource, message, sessionId,
       } = req.body;
+      const phone = normalizeLeadPhone(req.body.phone);
 
       const result = await db.query(
         `INSERT INTO crm_leads
