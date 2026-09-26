@@ -247,6 +247,60 @@ const startServer = async () => {
     // Supabase project) — no manual psql step required.
     await ensureSchema();
 
+    // 26 Sep fix (Render: "Port scan timeout reached, no open ports
+    // detected" - deploy killed even though the build succeeded and the DB
+    // connected fine). Root cause: app.listen() used to happen at the very
+    // end of this function, after four execFile-spawned maintenance
+    // scripts (seed, region-name backfill, GMT-content reset, editorial
+    // seed) and every cron job's boot-time run had already been kicked
+    // off. That ordering is fine when the DB responds quickly - but this
+    // deploy's own logs show SELECT NOW() taking 4.3s and the schema check
+    // taking 6.5s (both near-instant normally), i.e. the DB itself was
+    // unusually slow/cold-starting - and spawning four more Node
+    // processes that each open their own DB pool right into that
+    // slowness pushed the whole boot sequence past Render's ~90s port-scan
+    // window before app.listen() was ever reached. Render only cares that
+    // *something* is listening on PORT; it has no way to know the rest of
+    // boot is still in progress behind that, so there's no reason for
+    // those one-time maintenance tasks and cron schedules to gate it.
+    // Moving app.listen() here - right after the one thing every request
+    // handler actually needs (schema present) - means Render's port scan
+    // succeeds immediately regardless of how slow the DB or these
+    // fire-and-forget background tasks are; they still run exactly as
+    // before, just after the port is already open instead of before it.
+    const server = app.listen(PORT, () => {
+      logger.info(`🚀 Server running on http://localhost:${PORT}`);
+      logger.info(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
+      logger.info(`🎨 Frontend URL: ${process.env.FRONTEND_URL}`);
+
+      // C08 (contre-audit 15 Sep, correction partielle): the OTP gate on
+      // POST /siret/lead (phoneVerificationService.ts) is fully built, but
+      // isVerificationRequired() quietly defaults to *off* whenever no SMS
+      // provider is configured - by design, so staging/local dev isn't
+      // blocked. The failure mode the audit actually hit was this same
+      // silent default reaching a real deployment: nothing crashes, nothing
+      // errors, leads just go through unverified with no signal anywhere
+      // that the gate is bypassed. A code fix can't supply Twilio/SMS
+      // credentials this environment doesn't have - only surface the gap
+      // loudly enough that whoever deploys this notices it before a client
+      // audit does. Doesn't touch behavior; PHONE_VERIFICATION_REQUIRED
+      // still overrides in either direction exactly as before.
+      if (process.env.NODE_ENV === 'production' && !isVerificationRequired()) {
+        logger.warn(
+          '⚠️  Phone verification (C08) is NOT enforced in production: no SMS provider is configured ' +
+            '(TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN/TWILIO_FROM_NUMBER or SMS_WEBHOOK_URL) and ' +
+            'PHONE_VERIFICATION_REQUIRED is not set to "true". Leads are being accepted with unverified ' +
+            'phone numbers. Set SMS credentials (or PHONE_VERIFICATION_REQUIRED=true once a provider is ' +
+            'in place) to close this.'
+        );
+      } else if (process.env.NODE_ENV === 'production' && !isSmsConfigured() && process.env.PHONE_VERIFICATION_REQUIRED === 'true') {
+        logger.warn(
+          '⚠️  PHONE_VERIFICATION_REQUIRED=true but no SMS provider is configured - every phone ' +
+            'verification request will fail to send, blocking every visitor at the lead gate.'
+        );
+      }
+    });
+
     // Auto-run the demo-data seed script (scripts/seed.js) on every boot,
     // same reasoning as ensureSchema() above: on Render's free tier there's
     // no shell to run `npm run db:seed` by hand, so it has to happen as
@@ -356,40 +410,6 @@ const startServer = async () => {
     require('./jobs/aiProcessing').startAIProcessing();
     require('./jobs/opportunityAlerts').startOpportunityAlerts();
     require('./jobs/crmRetry').startCrmRetrySchedule();
-
-    // Start server
-    const server = app.listen(PORT, () => {
-      logger.info(`🚀 Server running on http://localhost:${PORT}`);
-      logger.info(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-      logger.info(`🎨 Frontend URL: ${process.env.FRONTEND_URL}`);
-
-      // C08 (contre-audit 15 Sep, correction partielle): the OTP gate on
-      // POST /siret/lead (phoneVerificationService.ts) is fully built, but
-      // isVerificationRequired() quietly defaults to *off* whenever no SMS
-      // provider is configured - by design, so staging/local dev isn't
-      // blocked. The failure mode the audit actually hit was this same
-      // silent default reaching a real deployment: nothing crashes, nothing
-      // errors, leads just go through unverified with no signal anywhere
-      // that the gate is bypassed. A code fix can't supply Twilio/SMS
-      // credentials this environment doesn't have - only surface the gap
-      // loudly enough that whoever deploys this notices it before a client
-      // audit does. Doesn't touch behavior; PHONE_VERIFICATION_REQUIRED
-      // still overrides in either direction exactly as before.
-      if (process.env.NODE_ENV === 'production' && !isVerificationRequired()) {
-        logger.warn(
-          '⚠️  Phone verification (C08) is NOT enforced in production: no SMS provider is configured ' +
-            '(TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN/TWILIO_FROM_NUMBER or SMS_WEBHOOK_URL) and ' +
-            'PHONE_VERIFICATION_REQUIRED is not set to "true". Leads are being accepted with unverified ' +
-            'phone numbers. Set SMS credentials (or PHONE_VERIFICATION_REQUIRED=true once a provider is ' +
-            'in place) to close this.'
-        );
-      } else if (process.env.NODE_ENV === 'production' && !isSmsConfigured() && process.env.PHONE_VERIFICATION_REQUIRED === 'true') {
-        logger.warn(
-          '⚠️  PHONE_VERIFICATION_REQUIRED=true but no SMS provider is configured - every phone ' +
-            'verification request will fail to send, blocking every visitor at the lead gate.'
-        );
-      }
-    });
 
     // Client's 20 Sep audit: "10 à 15 secondes... impression d'un site
     // vide" on arrival. Render's free tier spins a web service down after
