@@ -19,14 +19,27 @@ const router = Router();
 // Adding the count here (rather than a second round trip) is what lets the
 // frontend show a real "X opportunités" badge per trade instead of another
 // hand-typed number.
+//
+// 26 Sep client audit, point 4: this badge count and the trade_id search
+// filter (opportunities.ts) must count the same set, or a badge promises
+// results a click can't find. classifyOpportunity only ever writes ONE
+// trade_id (the single highest-confidence match) even when the AI
+// recognised several trades for one notice - every other recognised trade
+// still lives in ai_matched_trades. Counting only o.trade_id = t.id here
+// (as the search filter used to as well) undercounted badges like
+// "Carrelage" (9 vs the 317 a keyword search actually finds) by missing
+// every notice where carrelage was a real but non-primary match.
 router.get('/', async (req: Request, res: Response) => {
   try {
     const result = await db.query(
       `SELECT t.id, t.name, t.slug, t.description, c.code as cpv_code,
-              COUNT(o.id) FILTER (WHERE o.deleted_at IS NULL AND o.status != 'merged')::int AS opportunity_count
+              COUNT(DISTINCT o.id) FILTER (WHERE o.deleted_at IS NULL AND o.status != 'merged')::int AS opportunity_count
        FROM trades t
        LEFT JOIN cpv_codes c ON t.cpv_code_id = c.id
-       LEFT JOIN opportunities o ON o.trade_id = t.id
+       LEFT JOIN opportunities o ON (
+         o.trade_id = t.id
+         OR unaccent(o.ai_matched_trades::text) ILIKE unaccent('%' || t.name || '%')
+       )
        GROUP BY t.id, t.name, t.slug, t.description, c.code
        ORDER BY t.name ASC`
     );

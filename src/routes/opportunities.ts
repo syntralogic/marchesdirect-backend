@@ -574,8 +574,22 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       }
     }
     if (trade_id) {
-      conditions.push(`o.trade_id = $${idx++}`);
+      // Client (26 Sep audit, point 4): "Par la catégorie Carrelage : 9
+      // résultats. En tapant simplement « carrelage » : 317 résultats...
+      // Nettoyage : 134 résultats [par catégorie] contre 1 268 [par mot-clé],
+      // et les 134 sont tous privés alors que la recherche par mot-clé
+      // retrouve aussi des marchés publics." classifyOpportunity
+      // (aiService.ts) keeps every trade the AI actually recognised in
+      // ai_matched_trades, but trade_id only ever stores the single
+      // highest-confidence one - a notice whose primary trade was
+      // classified as something else still lists "Carrelage" or
+      // "Nettoyage" in ai_matched_trades, and a strict trade_id = $X match
+      // silently excluded every one of those. The trade's own name is
+      // fetched in a constant (non-correlated) subquery so it's evaluated
+      // once, not per row.
+      conditions.push(`(o.trade_id = $${idx} OR unaccent(o.ai_matched_trades::text) ILIKE unaccent('%' || (SELECT name FROM trades WHERE id = $${idx}) || '%'))`);
       params.push(trade_id);
+      idx++;
     }
     if (region) {
       // Client's map lets several regions be selected at once (e.g.
