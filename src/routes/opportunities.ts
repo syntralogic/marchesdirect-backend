@@ -1029,20 +1029,34 @@ router.get('/stats/departments', async (req: Request, res: Response) => {
     // one département's count across two rows, which the frontend's map
     // (keyed by code, no normalization applied there) then only picked one
     // of. Grouping on the padded/trimmed code sums them into one row.
+    //
+    // 26 Sep fix: grouping alone wasn't enough - this used to SELECT
+    // MAX(TRIM(location_department)) as the label, which returns the raw
+    // unpadded value ("5"), not the padded key it grouped by ("05"). The
+    // frontend's map keys its counts dictionary by this exact `department`
+    // field and looks it up with GeoJSON's always-padded code ("05"), so
+    // "05" !== "5" silently missed the lookup and the map showed 0/no data
+    // for any département whose rows happened to store an unpadded code -
+    // even though the actual search (department=05) already returned the
+    // correct results via the filter's own padding logic. Now the SELECT
+    // itself computes and returns the same normalized/padded code used in
+    // GROUP BY, so the label always matches what the map looks up.
     // Same reasoning as /stats/regions above: the department filter now
     // keeps NULL-department rows too, so expose that pool separately for
     // the frontend to add to each department's displayed count.
     const [result, unlocatedResult] = await Promise.all([
       db.query(
-        `SELECT MAX(TRIM(location_department)) AS department, COUNT(*)::int AS count
+        `SELECT
+           CASE
+             WHEN TRIM(location_department) ~ '^[0-9]+$' THEN LPAD(TRIM(location_department), 2, '0')
+             ELSE UPPER(TRIM(location_department))
+           END AS department,
+           COUNT(*)::int AS count
          FROM opportunities
          WHERE location_department IS NOT NULL AND location_department != ''
            AND deleted_at IS NULL
            AND status = 'active'
-         GROUP BY CASE
-           WHEN TRIM(location_department) ~ '^[0-9]+$' THEN LPAD(TRIM(location_department), 2, '0')
-           ELSE UPPER(TRIM(location_department))
-         END
+         GROUP BY 1
          ORDER BY count DESC`
       ),
       db.query(
