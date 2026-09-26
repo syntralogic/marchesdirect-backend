@@ -599,14 +599,31 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       // side.
       const regions = region.split(',').map(r => r.trim()).filter(Boolean);
       if (regions.length > 0) {
-        // A NULL location_region is not a non-match - it's an
-        // un-geocoded row (BOAMP never sends region, TED only sends
-        // country code) that would otherwise be silently dropped the
-        // moment a visitor picks any region/department filter, tanking
-        // the result count against what the map total promised. Same
-        // pattern the `nature` filter already uses below.
+        // BUG (26 Sep, client report "ek element select karne pe 9200+ data
+        // show hota hy, pura map select karne pe sirf 11k+" - i.e. a single
+        // region looked bigger than the whole country): the "OR
+        // o.location_region IS NULL" below was added (see the removed
+        // comment) so a single region/department filter wouldn't silently
+        // drop un-geocoded rows. But a NULL location_region row isn't "in"
+        // any one region - it's in ALL of them at once under this OR, so
+        // every individual region search pulled in the ENTIRE nationwide
+        // un-located pool (data.location_region genuinely NULL for a large
+        // share of rows - BOAMP never sends region, TED only sends country
+        // code), not just its own real matches. That's why a single region
+        // could out-count the true, unfiltered, nationwide total: its badge
+        // was (its own small real count) + (the whole country's un-located
+        // pool), while "select every region" sends no region filter at all
+        // (see HomePage's buildSearchUrl "all selected" branch) and so
+        // never double-counts that same pool. The result: most of what a
+        // single-region search actually showed was unrelated, un-located
+        // opportunities from anywhere in France, not real matches for that
+        // region - "asli data nahi, fake/unrelated data". A region/
+        // department/city filter must only match rows that are actually
+        // resolved to it; un-located rows remain visible (once, not
+        // duplicated per zone) in the unfiltered/"whole map" view exactly
+        // like before, since no location condition is added there at all.
         conditions.push(
-          `(unaccent(o.location_region) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p)) OR o.location_region IS NULL)`
+          `unaccent(o.location_region) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p))`
         );
         params.push(regions.map(r => `%${r}%`));
       }
@@ -650,10 +667,11 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         // "Angouleme", "Angoulême") - ILIKE folds case but not accents, so a
         // city picked with its accent missed unaccented rows and vice versa.
         // Same unaccent() treatment the region filter already has.
-        // Same NULL-inclusion as the region filter above - an
-        // un-geocoded row shouldn't be dropped just because a city
-        // filter is active.
-        conditions.push(`(unaccent(o.location_city) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p)) OR o.location_city IS NULL)`);
+        // No NULL-inclusion here (see the region filter's 26 Sep fix above
+        // for why): an un-geocoded row isn't "in" this city, so folding it
+        // in only floods a specific-city search with unrelated nationwide
+        // results the way the region/department filters did.
+        conditions.push(`unaccent(o.location_city) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p))`);
         params.push(cities.map(c => `%${c}%`));
       }
     }
@@ -679,8 +697,9 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
           departmentVariants.add(d.padStart(3, '0'));
           departmentVariants.add(d.replace(/^0+/, '') || d);
         }
-        // Same NULL-inclusion as the region/city filters above.
-        conditions.push(`(UPPER(TRIM(o.location_department)) = ANY($${idx++}::text[]) OR o.location_department IS NULL)`);
+        // No NULL-inclusion here (26 Sep fix - see the region filter above):
+        // an un-geocoded row isn't "in" this département either.
+        conditions.push(`UPPER(TRIM(o.location_department)) = ANY($${idx++}::text[])`);
         params.push(Array.from(departmentVariants));
       }
     }
@@ -985,12 +1004,13 @@ router.get('/stats/regions', async (req: Request, res: Response) => {
     // normalized key here means there is exactly one row per region to begin
     // with, so summing happens once, in SQL, instead of depending on every
     // caller to fold duplicates correctly.
-    // The search filter above now deliberately keeps opportunities whose
-    // region is NULL (un-geocoded rows) when a region is selected - see the
-    // region filter's "OR o.location_region IS NULL" fix. Return that same
-    // unknown-location pool separately so the map's per-region number can
-    // include it (an unknown-location row isn't assignable to any single
-    // region in SQL, so it can't just be folded into one of the rows below).
+    // unlocatedCount below is returned for reference only - as of the 26
+    // Sep fix, the region search filter no longer folds these un-geocoded
+    // rows into a single region's results (an unlocated row isn't "in" any
+    // one region, so doing that inflated every single-region search with
+    // the entire nationwide un-located pool - see the region filter's 26
+    // Sep comment). The frontend must NOT add this back into any one
+    // region's displayed count.
     const [result, unlocatedResult] = await Promise.all([
       db.query(
         `SELECT MAX(location_region) AS region, COUNT(*)::int AS count
@@ -1041,9 +1061,9 @@ router.get('/stats/departments', async (req: Request, res: Response) => {
     // correct results via the filter's own padding logic. Now the SELECT
     // itself computes and returns the same normalized/padded code used in
     // GROUP BY, so the label always matches what the map looks up.
-    // Same reasoning as /stats/regions above: the department filter now
-    // keeps NULL-department rows too, so expose that pool separately for
-    // the frontend to add to each department's displayed count.
+    // Same reasoning as /stats/regions above: unlocatedCount is returned
+    // for reference only and must NOT be added back into any one
+    // department's displayed count (26 Sep fix).
     const [result, unlocatedResult] = await Promise.all([
       db.query(
         `SELECT
