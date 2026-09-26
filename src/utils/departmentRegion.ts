@@ -175,3 +175,64 @@ export function extractDepartmentCode(raw: any): string | null {
   }
   return null;
 }
+
+// Corsica's two departments (2A/2B) both start "20" as a postal-code
+// prefix, so a bare "20XXX" can't be told apart from that pattern alone -
+// DEPARTMENT_TO_REGION only has one Corse entry either way (both map to
+// the same region), so this is a non-issue for region resolution, but
+// normalizeDepartmentCode/regionForDepartmentCode would need the real
+// INSEE code (2A/2B) to resolve a bare "20" - handled below by trying "20"
+// directly against DEPARTMENT_TO_REGION, which does carry a "20" key.
+//
+// Last-resort fallback for opportunities whose structured department/city
+// fields are all empty (extractDepartmentCode above found nothing) - some
+// DECP/BOAMP records still carry a postal code inside the free-text
+// address/objet fields even when the dedicated department column is
+// blank. A bare 5-digit run is NOT enough on its own to trust (invoice
+// amounts, SIRET fragments, years padded with digits, etc. all look like
+// digits too) - this only matches a postal-code SHAPE actually anchored to
+// an address: immediately followed by a capitalized French place-name
+// token (the universal "CP VILLE" convention, e.g. "31000 Toulouse",
+// "75015 Paris"), which plain numeric noise never is. Scans a handful of
+// address-shaped fields first (most likely to actually be an address);
+// only falls through to the full free-text blob as a last resort, and
+// only the FIRST match is used - never guesses among several conflicting
+// hits in the same text.
+const POSTAL_CODE_WITH_PLACE_RE = /\b(\d{5})\s+([A-ZÀ-Ü][A-Za-zÀ-ÿ'-]+)/;
+const CODES_NEEDING_NO_PLACE_ANCHOR = new Set(['00000', '99999']);
+
+function firstPlausibleDepartmentFromText(text: string | undefined | null): string | null {
+  if (!text) return null;
+  const match = POSTAL_CODE_WITH_PLACE_RE.exec(text);
+  if (!match) return null;
+  const code = match[1];
+  if (CODES_NEEDING_NO_PLACE_ANCHOR.has(code)) return null; // obviously not real
+  const dept2 = code.slice(0, 2);
+  const dept3 = code.slice(0, 3); // overseas (971, 972, ...)
+  return normalizeDepartmentCode(dept3) || normalizeDepartmentCode(dept2);
+}
+
+export function extractDepartmentCodeFromFreeText(raw: any): string | null {
+  if (!raw) return null;
+  if (typeof raw === 'string') return firstPlausibleDepartmentFromText(raw);
+  if (typeof raw !== 'object') return null;
+
+  const f = raw.fields || raw;
+  // Address-shaped fields first, in rough order of how likely each
+  // connector is to actually populate one - a real hit here is far more
+  // trustworthy than one found by scanning the whole objet/description.
+  const addressLikeFields = [
+    f.adresse, f.adresse_acheteur, f.adresseAcheteur, f.lieuExecution?.libelle,
+    f.lieu_execution, f.lieuExecution, f.adresse_execution,
+  ];
+  for (const field of addressLikeFields) {
+    const hit = firstPlausibleDepartmentFromText(typeof field === 'string' ? field : undefined);
+    if (hit) return hit;
+  }
+
+  // Last resort: the notice's own title/description text.
+  const objetLike = [f.objet, f.titulaire, f.description, f.resume].find(
+    (v): v is string => typeof v === 'string' && v.length > 0
+  );
+  return firstPlausibleDepartmentFromText(objetLike);
+}

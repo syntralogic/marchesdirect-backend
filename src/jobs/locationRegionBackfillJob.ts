@@ -18,7 +18,7 @@
 
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
-import { extractDepartmentCode, normalizeDepartmentCode, regionForDepartmentCode } from '../utils/departmentRegion';
+import { extractDepartmentCode, extractDepartmentCodeFromFreeText, normalizeDepartmentCode, regionForDepartmentCode } from '../utils/departmentRegion';
 import { trackJob } from '../utils/jobTracker';
 
 const CHUNK_SIZE = 500;
@@ -50,7 +50,13 @@ export async function runLocationRegionBackfillBatch(limit = 8000): Promise<{ re
 
   for (const row of rows) {
     const deptFromRaw = extractDepartmentCode(row.raw_data);
-    const dept = normalizeDepartmentCode(row.location_department) || deptFromRaw;
+    // Structured fields first (extractDepartmentCode); only when that
+    // finds nothing does this reach into free-text address/objet fields
+    // (see extractDepartmentCodeFromFreeText's own comment for the
+    // false-positive guard - it requires a postal-code-shaped run
+    // anchored to a capitalized place name, never a bare digit run).
+    const deptFromFreeText = deptFromRaw ? null : extractDepartmentCodeFromFreeText(row.raw_data);
+    const dept = normalizeDepartmentCode(row.location_department) || deptFromRaw || deptFromFreeText;
     const region = regionForDepartmentCode(dept);
     if (region) {
       resolved.push({ id: row.id, region, dept });
