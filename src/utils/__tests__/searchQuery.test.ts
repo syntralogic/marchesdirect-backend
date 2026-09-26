@@ -69,6 +69,15 @@ describe('synonymsOf (référentiel de synonymes/abréviations)', () => {
     expect(synonymsOf('bordeaux')).toEqual([]);
     expect(synonymsOf('')).toEqual([]);
   });
+
+  it('client report (25 Sep): a short prefix ("fen") of "fenetre"/"fenetres" resolves the same as the full word', () => {
+    expect(synonymsOf('fen')).toEqual(['menuiserie']);
+    expect(synonymsOf('etanch')).toEqual(['etancheur']);
+  });
+
+  it('does not prefix-match below the 3-char floor', () => {
+    expect(synonymsOf('fe')).toEqual([]);
+  });
 });
 
 describe('isTradeWord (title/AI-classification gate for a métier word)', () => {
