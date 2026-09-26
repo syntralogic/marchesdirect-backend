@@ -8,7 +8,7 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { deduplicateOpportunities } from './deduplicationService';
 import { v4 as uuid } from 'uuid';
-import { regionForDepartmentCode, normalizeDepartmentCode, normalizeRegionName } from '../utils/departmentRegion';
+import { regionForDepartmentCode, normalizeDepartmentCode, normalizeRegionName, extractDepartmentCodeFromFreeText } from '../utils/departmentRegion';
 import { buildOfficialUrl } from '../utils/officialUrl';
 import { decodeHtmlEntities, truncateForColumn } from '../utils/textSanitize';
 
@@ -193,6 +193,15 @@ export const normalizeBoampRecord = (record: any) => {
   const f = record.fields ? record.fields : record; // tolerate either shape
   const buyerName = firstDefined(f, ['nomacheteur', 'denominationacheteur', 'acheteur_nom', 'nom_acheteur']);
   const sourceReference = f.idweb || f.id || record.recordid;
+  // 25 Sep audit ("location jin pe nahi hai unka kuch karo"): f.departement
+  // is blank on a real slice of BOAMP records even though the notice text
+  // itself often still names a place with a postal code ("31000 Toulouse"
+  // inside adresse_acheteur or the objet). Only used when the structured
+  // field is empty - never overrides a real f.departement value - and only
+  // matches a postal-code-shaped run anchored to a place name (see
+  // extractDepartmentCodeFromFreeText's own comment), so this doesn't
+  // start guessing departments from stray digits in a budget or a SIRET.
+  const departmentFromText = f.departement ? null : extractDepartmentCodeFromFreeText(record);
   return {
     source_reference: sourceReference,
     official_url: buildOfficialUrl('boamp', sourceReference, record),
@@ -225,8 +234,8 @@ export const normalizeBoampRecord = (record: any) => {
     // casing mismatches) instead of storing the raw string; falls through
     // to the department-derived region when f.region doesn't resolve to
     // anything recognized, same as when it's blank.
-    location_region: normalizeRegionName(f.region) || regionForDepartmentCode(f.departement) || null,
-    location_department: normalizeDepartmentCode(f.departement) || f.departement || null,
+    location_region: normalizeRegionName(f.region) || regionForDepartmentCode(f.departement || departmentFromText) || null,
+    location_department: normalizeDepartmentCode(f.departement) || f.departement || departmentFromText || null,
     buyer_name: buyerName,
     raw: record,
   };
@@ -601,6 +610,15 @@ const normalizeDecpRecord = (record: any) => {
 
   const department = normalizeDepartmentCode(rawLocationCode);
   const region = regionForDepartmentCode(rawLocationCode);
+  // Same free-text fallback as the BOAMP normalizer above, for the slice
+  // of DECP rows where none of the structured location columns resolved
+  // (rawLocationCode empty/unrecognized) but lieuExecution.nom or the
+  // objet text still carries a postal code anchored to a place name.
+  const departmentFromText = department
+    ? null
+    : extractDepartmentCodeFromFreeText([rawLocationName, record.objet].filter(Boolean).join(' '));
+  const resolvedDepartment = department || departmentFromText;
+  const resolvedRegion = region || regionForDepartmentCode(resolvedDepartment);
 
   return {
     source_reference: record.uid || record.id,
@@ -617,8 +635,8 @@ const normalizeDecpRecord = (record: any) => {
     // does. location_city stays null too - a department/region code alone
     // doesn't give a real city name, and guessing one would be inventing data.
     location_city: rawLocationName,
-    location_region: region,
-    location_department: department,
+    location_region: resolvedRegion,
+    location_department: resolvedDepartment,
     buyer_name: null,
     status: 'awarded',
     // No confirmed stable per-notice public URL for DECP (see officialUrl.ts) -
