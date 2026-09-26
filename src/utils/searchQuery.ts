@@ -89,7 +89,23 @@ export const TRADE_KEYWORD_SYNONYMS: Record<string, string[]> = {
   paysagisme: ['espaces', 'verts'],
 };
 
-export const synonymsOf = (w: string): string[] => TRADE_KEYWORD_SYNONYMS[foldAccents(w).toLowerCase()] || [];
+export const synonymsOf = (w: string): string[] => {
+  const folded = foldAccents(w).toLowerCase();
+  if (TRADE_KEYWORD_SYNONYMS[folded]) return TRADE_KEYWORD_SYNONYMS[folded];
+  // Client audit (25 Sep): "fen" (a genuine prefix of "fenetre"/"fenetres")
+  // returned nothing at all - only the full word matched, so a visitor who
+  // stopped typing partway through got no help. A short (>=3 char, to
+  // avoid over-matching on something like "co") fragment that is a prefix
+  // of one or more référentiel keys now resolves to the union of those
+  // keys' synonyms, same as typing the full word would.
+  if (folded.length >= 3) {
+    const matchingKeys = Object.keys(TRADE_KEYWORD_SYNONYMS).filter((k) => k.startsWith(folded));
+    if (matchingKeys.length > 0) {
+      return Array.from(new Set(matchingKeys.flatMap((k) => TRADE_KEYWORD_SYNONYMS[k])));
+    }
+  }
+  return [];
+};
 
 // Client report (25 Sep): searching "elec" (or "Électricité", which folds
 // to the same lookup) surfaced "électronique" notices - unrelated to the
