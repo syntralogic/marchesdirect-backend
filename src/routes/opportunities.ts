@@ -985,16 +985,31 @@ router.get('/stats/regions', async (req: Request, res: Response) => {
     // normalized key here means there is exactly one row per region to begin
     // with, so summing happens once, in SQL, instead of depending on every
     // caller to fold duplicates correctly.
-    const result = await db.query(
-      `SELECT MAX(location_region) AS region, COUNT(*)::int AS count
-       FROM opportunities
-       WHERE location_region IS NOT NULL AND location_region != ''
-         AND deleted_at IS NULL
-         AND status = 'active'
-       GROUP BY lower(unaccent(trim(location_region)))
-       ORDER BY count DESC`
-    );
-    res.json({ regions: result.rows });
+    // The search filter above now deliberately keeps opportunities whose
+    // region is NULL (un-geocoded rows) when a region is selected - see the
+    // region filter's "OR o.location_region IS NULL" fix. Return that same
+    // unknown-location pool separately so the map's per-region number can
+    // include it (an unknown-location row isn't assignable to any single
+    // region in SQL, so it can't just be folded into one of the rows below).
+    const [result, unlocatedResult] = await Promise.all([
+      db.query(
+        `SELECT MAX(location_region) AS region, COUNT(*)::int AS count
+         FROM opportunities
+         WHERE location_region IS NOT NULL AND location_region != ''
+           AND deleted_at IS NULL
+           AND status = 'active'
+         GROUP BY lower(unaccent(trim(location_region)))
+         ORDER BY count DESC`
+      ),
+      db.query(
+        `SELECT COUNT(*)::int AS count
+         FROM opportunities
+         WHERE location_region IS NULL
+           AND deleted_at IS NULL
+           AND status = 'active'`
+      ),
+    ]);
+    res.json({ regions: result.rows, unlocatedCount: unlocatedResult.rows[0]?.count ?? 0 });
   } catch (err: any) {
     logger.error('Region stats error:', err);
     res.status(500).json({ error: 'Failed to load region stats' });
@@ -1014,19 +1029,31 @@ router.get('/stats/departments', async (req: Request, res: Response) => {
     // one département's count across two rows, which the frontend's map
     // (keyed by code, no normalization applied there) then only picked one
     // of. Grouping on the padded/trimmed code sums them into one row.
-    const result = await db.query(
-      `SELECT MAX(TRIM(location_department)) AS department, COUNT(*)::int AS count
-       FROM opportunities
-       WHERE location_department IS NOT NULL AND location_department != ''
-         AND deleted_at IS NULL
-         AND status = 'active'
-       GROUP BY CASE
-         WHEN TRIM(location_department) ~ '^[0-9]+$' THEN LPAD(TRIM(location_department), 2, '0')
-         ELSE UPPER(TRIM(location_department))
-       END
-       ORDER BY count DESC`
-    );
-    res.json({ departments: result.rows });
+    // Same reasoning as /stats/regions above: the department filter now
+    // keeps NULL-department rows too, so expose that pool separately for
+    // the frontend to add to each department's displayed count.
+    const [result, unlocatedResult] = await Promise.all([
+      db.query(
+        `SELECT MAX(TRIM(location_department)) AS department, COUNT(*)::int AS count
+         FROM opportunities
+         WHERE location_department IS NOT NULL AND location_department != ''
+           AND deleted_at IS NULL
+           AND status = 'active'
+         GROUP BY CASE
+           WHEN TRIM(location_department) ~ '^[0-9]+$' THEN LPAD(TRIM(location_department), 2, '0')
+           ELSE UPPER(TRIM(location_department))
+         END
+         ORDER BY count DESC`
+      ),
+      db.query(
+        `SELECT COUNT(*)::int AS count
+         FROM opportunities
+         WHERE location_department IS NULL
+           AND deleted_at IS NULL
+           AND status = 'active'`
+      ),
+    ]);
+    res.json({ departments: result.rows, unlocatedCount: unlocatedResult.rows[0]?.count ?? 0 });
   } catch (err: any) {
     logger.error('Department stats error:', err);
     res.status(500).json({ error: 'Failed to load department stats' });
