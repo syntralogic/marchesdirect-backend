@@ -979,14 +979,24 @@ router.get('/stats/counts', async (req: Request, res: Response) => {
 // for the interactive map on /zones.
 //
 // 25 Sep audit follow-up: "map says 4 194 for Nouvelle-Aquitaine, but
-// 'Voir les opportunités' lands on a search showing 285." Root cause: this
-// route used to count every status (awarded/expired/cancelled/merged
-// included), while GET / - the search the button links to - defaults to
-// status='active' only since this file's earlier point-4 fix. Same
+// 'Voir les opportunités' lands on a search showing 285." Root cause at the
+// time: this route counted every status while GET / - the search the
+// button links to - defaulted to status='active' only, so this was made to
+// count status='active' only too, matching that default.
+//
+// 26 Sep re-fix: the button's link was separately changed (HomePage's
+// buildSearchUrl) to always send status=all for a region/department click-
+// through, specifically so closed markets wouldn't be hidden from the
+// result list - but this route stayed active-only, which reopened the same
 // "counter must describe the same filtered set as the list it links to"
-// rule as the other counter fixes in this file, so this now counts
-// status='active' only too, matching exactly what the button's search
-// will show.
+// mismatch this route exists to prevent, just in the other direction (badge
+// now undercounts what the list actually shows). Counting every non-merged
+// status here, to match status=all's real scope, is what keeps the two in
+// agreement again. 'merged' stays excluded - see the merged-status comment
+// on the main search route above; it's deduplicationService.ts's internal
+// marker, not a real-world tender status, so it was never part of any
+// "sab dikhna chahiye" ask and must stay hidden here exactly as it does in
+// the list this feeds.
 router.get('/stats/regions', async (req: Request, res: Response) => {
   try {
     // G13 (contre-audit 15 Sep): "carte vs liste count discrepancy (Grand
@@ -1017,7 +1027,7 @@ router.get('/stats/regions', async (req: Request, res: Response) => {
          FROM opportunities
          WHERE location_region IS NOT NULL AND location_region != ''
            AND deleted_at IS NULL
-           AND status = 'active'
+           AND COALESCE(status, '') != 'merged'
          GROUP BY lower(unaccent(trim(location_region)))
          ORDER BY count DESC`
       ),
@@ -1026,7 +1036,7 @@ router.get('/stats/regions', async (req: Request, res: Response) => {
          FROM opportunities
          WHERE location_region IS NULL
            AND deleted_at IS NULL
-           AND status = 'active'`
+           AND COALESCE(status, '') != 'merged'`
       ),
     ]);
     res.json({ regions: result.rows, unlocatedCount: unlocatedResult.rows[0]?.count ?? 0 });
@@ -1037,9 +1047,10 @@ router.get('/stats/regions', async (req: Request, res: Response) => {
 });
 
 // GET /api/opportunities/stats/departments - same, grouped by French
-// department (numeric code, e.g. "33" for Gironde). Same "count only
-// status='active', to match the list this feeds" rule as /stats/regions
-// above (25 Sep audit follow-up: map-vs-list count mismatch).
+// department (numeric code, e.g. "33" for Gironde). Same "count every
+// non-merged status, to match the list this feeds" rule as /stats/regions
+// above (26 Sep re-fix: the region/department click-through sends
+// status=all, so the badge counts every status too, not just 'active').
 router.get('/stats/departments', async (req: Request, res: Response) => {
   try {
     // Same fix as /stats/regions just above, for the same reason: raw
@@ -1075,7 +1086,7 @@ router.get('/stats/departments', async (req: Request, res: Response) => {
          FROM opportunities
          WHERE location_department IS NOT NULL AND location_department != ''
            AND deleted_at IS NULL
-           AND status = 'active'
+           AND COALESCE(status, '') != 'merged'
          GROUP BY 1
          ORDER BY count DESC`
       ),
@@ -1084,7 +1095,7 @@ router.get('/stats/departments', async (req: Request, res: Response) => {
          FROM opportunities
          WHERE location_department IS NULL
            AND deleted_at IS NULL
-           AND status = 'active'`
+           AND COALESCE(status, '') != 'merged'`
       ),
     ]);
     res.json({ departments: result.rows, unlocatedCount: unlocatedResult.rows[0]?.count ?? 0 });
