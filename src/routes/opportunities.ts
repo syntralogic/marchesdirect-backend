@@ -985,12 +985,41 @@ const extractSourceUrl = (rawData: any): string | null => {
 // 2026-09-09 - closed/awarded rows are labeled by the frontend now
 // instead of being excluded), so this can never disagree with what
 // clicking through to a category actually shows.
+//
+// 26 Sep client audit (point 3, remaining part flagged in 971d601's own
+// commit message): the HeroCounters "Marchés publics" tile links to
+// ?status=TousStatuts and correctly shows this same all-statuses total -
+// but the OpportunityPaths tile right below it (same title, same count)
+// links to /parcours instead, whose guided journey is - by design, see
+// e01238b's "le marché lui-même reste ouvert" - active-only and never
+// shows closed/awarded markets. That tile was promising the all-statuses
+// number for a destination that only ever shows the active-only one,
+// which is exactly the "chiffre annoncé doit suivre la même règle que la
+// liste ouverte" mismatch this client audit is about, just for a
+// different tile than the one 971d601 already fixed. Rather than change
+// /parcours's deliberate active-only scope, this adds an optional
+// `status` filter so a caller can ask for the active-only cut of the same
+// counts - no `status` param keeps returning today's all-statuses total,
+// unchanged, for HeroCounters/the map.
 router.get('/stats/counts', async (req: Request, res: Response) => {
   try {
+    const { status } = req.query as Record<string, string>;
+    const conditions: string[] = [];
+    const params: any[] = [];
+    if (status) {
+      const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
+      if (statuses.length > 0) {
+        conditions.push(`status = ANY($1::text[])`);
+        params.push(statuses);
+      }
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const result = await db.query(
       `SELECT opportunity_type AS journey, COUNT(*)::int AS count
        FROM opportunity_search_index
-       GROUP BY opportunity_type`
+       ${where}
+       GROUP BY opportunity_type`,
+      params
     );
     const byJourney: Record<string, number> = {};
     let total = 0;
