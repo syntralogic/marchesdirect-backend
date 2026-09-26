@@ -717,6 +717,15 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         params.push(Array.from(departmentVariants));
       }
     }
+    // Client (26 Sep audit, point 10): "le site accepte 100 000 € minimum
+    // et 10 000 € maximum, puis affiche zéro résultat sans expliquer
+    // l'erreur." An inverted range isn't "no opportunities happen to
+    // match" - it's a range that can never match anything, and deserves a
+    // real error instead of a silently empty list indistinguishable from a
+    // genuine no-results search.
+    if (min_value && max_value && parseFloat(min_value) > parseFloat(max_value)) {
+      return res.status(400).json({ error: 'Le montant minimum doit être inférieur ou égal au montant maximum.' });
+    }
     if (min_value) {
       conditions.push(`o.estimated_value >= $${idx++}`);
       params.push(min_value);
@@ -823,7 +832,19 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       ? `ts_rank(${searchVectorExpr}, to_tsquery('french', unaccent($${tsRankParamIdx}))) DESC, `
       : '';
     let orderClause = `${relevanceTiebreak}${DEFAULT_ORDER}`;
-    if (sort === 'recent') {
+    if (sort === 'deadline') {
+      // Client (26 Sep audit, point 10): "climatisation" search, "Échéance
+      // proche (défaut)" selected, a 28 septembre notice appeared AFTER a
+      // 7 octobre one. Root cause: 'deadline' fell through to the same
+      // branch as no sort at all, which - whenever a text query was
+      // present - put the relevance tiebreak (ts_rank) AHEAD of the
+      // deadline, so two notices with different relevance scores were
+      // never actually compared by date first. A visitor who explicitly
+      // chose "closest deadline" gets pure chronological order, full stop -
+      // relevance has no business ranking it ahead of the one thing this
+      // sort promises.
+      orderClause = DEFAULT_ORDER;
+    } else if (sort === 'recent') {
       orderClause = `o.publication_date DESC NULLS LAST, o.id ASC`;
     } else if (sort === 'match') {
       // Relevance only means something with a text query to rank against;
