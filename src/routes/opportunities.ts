@@ -980,11 +980,23 @@ const extractSourceUrl = (rawData: any): string | null => {
 // for the homepage/dashboard counters. Client's report (WhatsApp): three
 // different numbers appeared across the homepage (~3,421, hardcoded),
 // dashboard (~2,940) and search (46,000+), with no way to tell what each
-// one represented. Uses opportunity_search_index with the exact same
-// scope the main search route uses (deadline-based hiding removed
-// 2026-09-09 - closed/awarded rows are labeled by the frontend now
-// instead of being excluded), so this can never disagree with what
-// clicking through to a category actually shows.
+// one represented.
+//
+// 27 Sep fix (client report: "Marchés publics" tile fell to 9 775 while the
+// general search - no filters - showed 72 173): this used to read from
+// opportunity_search_index to match the main search route's scope, but the
+// main search route (see its own 20 Sep comment above, "Reading straight
+// off `opportunities` instead removes that ceiling") was switched to read
+// straight off the `opportunities` base table and never came back here to
+// match. Since then this route was silently counting off the materialized
+// view instead - correct only exactly as of its last successful
+// REFRESH/rebuild, and free to drift arbitrarily far behind the live table
+// in between (a missed/failed cron refresh on Render's free tier, or the
+// view simply lagging a fast-growing table). Reading the same base table
+// with the same conditions as the search route is what "can never disagree
+// with what clicking through to a category actually shows" actually
+// requires now - matching /stats/regions and /stats/departments, which
+// already made this same switch.
 //
 // 26 Sep client audit (point 3, remaining part flagged in 971d601's own
 // commit message): the HeroCounters "Marchés publics" tile links to
@@ -1004,21 +1016,26 @@ const extractSourceUrl = (rawData: any): string | null => {
 router.get('/stats/counts', async (req: Request, res: Response) => {
   try {
     const { status } = req.query as Record<string, string>;
-    const conditions: string[] = [];
+    // Same base conditions as the main search route (deleted_at + the
+    // 'merged' exclusion - deduplicationService.ts's internal marker for
+    // the losing side of a duplicate pair, never a real-world status) so
+    // this can never disagree with what an unfiltered search shows.
+    const conditions: string[] = ["o.deleted_at IS NULL", "COALESCE(o.status, '') != 'merged'"];
     const params: any[] = [];
     if (status) {
       const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
       if (statuses.length > 0) {
-        conditions.push(`status = ANY($1::text[])`);
+        conditions.push(`o.status = ANY($1::text[])`);
         params.push(statuses);
       }
     }
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const where = `WHERE ${conditions.join(' AND ')}`;
     const result = await db.query(
-      `SELECT opportunity_type AS journey, COUNT(*)::int AS count
-       FROM opportunity_search_index
+      `SELECT ot.code AS journey, COUNT(*)::int AS count
+       FROM opportunities o
+       LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
        ${where}
-       GROUP BY opportunity_type`,
+       GROUP BY ot.code`,
       params
     );
     const byJourney: Record<string, number> = {};
