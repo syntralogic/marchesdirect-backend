@@ -1,4 +1,4 @@
-import { tradeMatchStrength, criteriaFromFacts, sirenFromSiret } from '../matchScoreService';
+import { tradeMatchStrength, criteriaFromFacts, sirenFromSiret, baseRequiredDocs } from '../matchScoreService';
 
 // Ticket C04: "score de correspondance excessif sur des activités sans
 // rapport (92%, 100%)". In the personalized branch the cause was a 5-char
@@ -45,6 +45,42 @@ describe('tradeMatchStrength', () => {
 // spacing/punctuation never matched the digits-only SIREN key that
 // /api/siret/lookup caches Pappers/INSEE data under, so the fiche's company
 // card could show an activity that this match score could never see.
+// 3rd client audit, point 8: "assurance décennale" on a book-acquisition
+// dossier, standard bâtiment justificatifs on a biomedical-maintenance one -
+// required documents must follow the market's actual nature, not assume travaux.
+describe('baseRequiredDocs', () => {
+  it('asks for RC décennale on a travaux market (and when nature is unknown)', () => {
+    const labels = baseRequiredDocs('public_procurement', null, 'travaux').map((d) => d.label);
+    expect(labels).toContain('Assurance décennale');
+    expect(baseRequiredDocs('public_procurement', null, null).map((d) => d.label)).toContain('Assurance décennale');
+  });
+
+  it('does not ask for RC décennale on a fournitures market (acquisition de livres)', () => {
+    const docs = baseRequiredDocs('public_procurement', null, 'fournitures');
+    const labels = docs.map((d) => d.label);
+    expect(labels).not.toContain('Assurance décennale');
+    expect(labels.some((l) => l.includes('responsabilité civile professionnelle'))).toBe(true);
+    expect(labels.some((l) => l.includes('livraison'))).toBe(true);
+  });
+
+  it('does not ask for RC décennale on a services market (biomedical maintenance)', () => {
+    const docs = baseRequiredDocs('public_procurement', null, 'services');
+    const labels = docs.map((d) => d.label);
+    expect(labels).not.toContain('Assurance décennale');
+    expect(labels.some((l) => l.includes('prestation comparable'))).toBe(true);
+  });
+
+  it('asks for a mission reference, not a chantier one, on an études market', () => {
+    const labels = baseRequiredDocs('public_procurement', null, 'etudes').map((d) => d.label);
+    expect(labels.some((l) => l.includes('mission comparable'))).toBe(true);
+  });
+
+  it('still names the trade-specific qualification when a trade is known, regardless of nature', () => {
+    const labels = baseRequiredDocs('public_procurement', 'Peinture', 'fournitures').map((d) => d.label);
+    expect(labels).toContain('Qualification Peinture ou équivalent');
+  });
+});
+
 describe('sirenFromSiret', () => {
   it('strips spaces from a grouped SIRET', () => {
     expect(sirenFromSiret('123 456 789 00012')).toBe('123456789');
