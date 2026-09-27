@@ -4,6 +4,7 @@ import {
   reconcileOfficialFields,
   extractRawProcedureCode,
   parseDeadlineTimeOfDay,
+  extractRawDeadlineTimeOfDay,
 } from '../officialFields';
 
 // 25 Sep client audit (école Michelet): header said "Montant non communiqué"
@@ -116,6 +117,49 @@ describe('reconcileOfficialFields', () => {
     };
     reconcileOfficialFields(opp);
     expect(opp.deadline_time).toBeNull();
+  });
+
+  // 2nd 27 Sep client audit, point 5: Épernay showed a bare date ("5
+  // octobre") while the BOAMP notice itself states 12h - extractOpportunityFacts
+  // strips the deadline to a bare date before the AI ever sees it, so
+  // submission_deadline.value alone can't carry a time. The raw feed's own
+  // datelimitereponse field wins instead, same "structured field over AI
+  // free text" rule as procedure_type above.
+  it('lets the raw feed deadline timestamp win over an AI reading with no time', () => {
+    const opp: any = {
+      estimated_value: null,
+      buyer_name: null,
+      deadline: '2026-10-05T00:00:00.000Z',
+      raw_data: { datelimitereponse: '2026-10-05T12:00:00+00:00' },
+      ai_extracted_facts: { submission_deadline: { value: '5 octobre 2026', available: true } },
+    };
+    reconcileOfficialFields(opp);
+    expect(opp.deadline_time).toBe('12h00');
+  });
+  it('treats a raw feed 00:00:00 as no time stated, not a real midnight deadline', () => {
+    const opp: any = {
+      estimated_value: null,
+      buyer_name: null,
+      deadline: '2026-09-29T00:00:00.000Z',
+      raw_data: { datelimitereponse: '2026-09-29T00:00:00+00:00' },
+      ai_extracted_facts: { submission_deadline: { value: 'avant le 29 septembre 2026 à 16h00', available: true } },
+    };
+    reconcileOfficialFields(opp);
+    // Falls back to the AI reading, since the raw field's own 00:00 here
+    // isn't a real stated time.
+    expect(opp.deadline_time).toBe('16h00');
+  });
+});
+
+describe('extractRawDeadlineTimeOfDay', () => {
+  it('reads the literal HH:MM off the raw feed timestamp, ignoring any offset', () => {
+    expect(extractRawDeadlineTimeOfDay({ datelimitereponse: '2026-09-29T16:00:00+00:00' })).toEqual({ hours: 16, minutes: 0 });
+    expect(extractRawDeadlineTimeOfDay({ fields: { datelimitereponse: '2026-10-05T12:00:00+02:00' } })).toEqual({ hours: 12, minutes: 0 });
+  });
+  it('returns null for a bare midnight placeholder, no field, or malformed input', () => {
+    expect(extractRawDeadlineTimeOfDay({ datelimitereponse: '2026-09-29T00:00:00+00:00' })).toBeNull();
+    expect(extractRawDeadlineTimeOfDay({ fields: {} })).toBeNull();
+    expect(extractRawDeadlineTimeOfDay(null)).toBeNull();
   });
 });
 

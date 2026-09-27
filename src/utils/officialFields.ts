@@ -129,10 +129,57 @@ export function parseDeadlineTimeOfDay(text: unknown): { hours: number; minutes:
   return { hours, minutes };
 }
 
+// 2nd 27 Sep client audit, point 5: "l'heure limite de réponse doit être
+// affichée lorsqu'elle est connue" - Épernay (BOAMP notice states 12h) and
+// Gironde (BOAMP notice states 16h) both showed a bare date on the fiche.
+// Root cause: extractOpportunityFacts (aiService.ts) deliberately truncates
+// opp.deadline down to a bare "YYYY-MM-DD" (deadlineText) before it's ever
+// shown to the model, specifically to stop a raw Date.toString() leaking
+// into the prompt - so facts.submission_deadline essentially never states
+// a time on its own, and parseDeadlineTimeOfDay above almost never has
+// anything to find. But BOAMP's own Opendatasoft feed already publishes
+// the officially stated hour as part of `datelimitereponse` itself (e.g.
+// "2026-10-05T12:00:00+00:00" - confirmed against BOAMP's documented feed
+// shape), preserved untouched in raw_data. Read the literal HH:MM digits
+// off that string directly - no Date object, no server/DB timezone
+// round-trip, same "read the structured field as-is" reasoning as
+// extractRawProcedureCode above - rather than trying to derive it from the
+// deadline column itself (which is what the original 25 Sep pass here
+// explicitly avoided, for exactly the timezone-guessing risk this sidesteps).
+const RAW_DATA_DEADLINE_KEYS = ['datelimitereponse', 'date_limite_reponse'];
+
+export function extractRawDeadlineTimeOfDay(rawData: unknown): { hours: number; minutes: number } | null {
+  if (!rawData || typeof rawData !== 'object') return null;
+  const fields = (rawData as any).fields || rawData;
+  for (const key of RAW_DATA_DEADLINE_KEYS) {
+    const v = (fields as any)?.[key];
+    if (typeof v !== 'string') continue;
+    const m = v.match(/T(\d{2}):(\d{2}):\d{2}/);
+    if (!m) continue;
+    const hours = Number(m[1]);
+    const minutes = Number(m[2]);
+    if (!Number.isFinite(hours) || hours > 23 || minutes > 59) continue;
+    // A bare "00:00:00" is BOAMP's own placeholder for "no time specified"
+    // on this field, not a stated midnight deadline - treating it as real
+    // would invent a time the notice never actually gave.
+    if (hours === 0 && minutes === 0) continue;
+    return { hours, minutes };
+  }
+  return null;
+}
+
 export function reconcileDeadlineTime(opp: any): void {
-  const facts = opp?.ai_extracted_facts;
   opp.deadline_time = null;
-  if (!facts || typeof facts !== 'object' || !opp.deadline) return;
+  if (!opp.deadline) return;
+  const fromRaw = extractRawDeadlineTimeOfDay(opp.raw_data);
+  if (fromRaw) {
+    opp.deadline_time = `${String(fromRaw.hours).padStart(2, '0')}h${String(fromRaw.minutes).padStart(2, '0')}`;
+    return;
+  }
+  // Fallback for sources without that structured field (PLACE, private
+  // tenders, sous-traitance) - same AI free-text reading as before.
+  const facts = opp?.ai_extracted_facts;
+  if (!facts || typeof facts !== 'object') return;
   const parsed = facts.submission_deadline?.available
     ? parseDeadlineTimeOfDay(facts.submission_deadline.value)
     : null;
