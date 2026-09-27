@@ -525,6 +525,36 @@ router.post(
     }
 
     const { sessionId, phone, email, opportunityId } = req.body;
+    // This whole handler used to run with no top-level try/catch. Express
+    // 4 (this app's version) does NOT route an unhandled rejection from an
+    // async handler to errorHandler.ts on its own - an unexpected DB hiccup
+    // anywhere below (a dropped connection, a pool timeout) just left the
+    // request hanging until the client's own timeout, which axios then
+    // surfaces with no response body at all. getApiErrorMessage's
+    // data?.message / data?.error checks both need a response to read, so
+    // that case falls through to its generic fallback - exactly the
+    // unexplained "L'enregistrement de vos coordonnées a échoué" the 25
+    // Sep audit reported on a listing where the same phone/email had just
+    // worked moments before on a different one. This wraps the path that
+    // actually gates leadCaptured (existing-row check, phone verification,
+    // the UPDATE) so a transient failure now gets a real JSON 500 the
+    // visitor's existing "réessayer" button can act on, instead of a bare
+    // timeout. The dossier-email and CRM-linking blocks further down
+    // already had their own non-fatal try/catch and are unaffected.
+    try {
+      return await handleLeadCapture(req as AuthRequest, res, { sessionId, phone, email, opportunityId });
+    } catch (err) {
+      logger.error('POST /siret/lead failed:', err);
+      return res.status(500).json({ error: "L'enregistrement de vos coordonnées a échoué. Réessayez dans un instant." });
+    }
+  }
+);
+
+async function handleLeadCapture(
+  req: AuthRequest,
+  res: Response,
+  { sessionId, phone, email, opportunityId }: { sessionId: string; phone: string; email: string; opportunityId?: string }
+) {
 
     const existing = await db.query('SELECT id, siret, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
     if (existing.rows.length === 0) {
@@ -623,8 +653,7 @@ router.post(
     }
 
     res.json({ leadCaptured: true, dossierEmailed });
-  }
-);
+}
 
 // Shared by GET /lead/dossier-pdf and POST /lead/resend below: re-derives the
 // same PrefilledDossierInput the /lead endpoint used to send the first email,
