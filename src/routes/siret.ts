@@ -823,78 +823,92 @@ router.post(
     const ip = req.ip;
     const isAuthenticated = !!req.user;
 
-    // Demo shortcut - checked before the key-configured gate, and before
-    // treating the query as a name-search, so it works identically whether
-    // or not PAPPERS_API_KEY/INSEE_API_KEY are set.
-    if (query.trim() === DEMO_SIRET) {
+    // 27 Sep audit, point 6 (Épernay: "La vérification du SIRET a échoué"
+    // for a SIRET that had worked moments before): this whole handler had
+    // no top-level try/catch, and `throw err` a few lines below re-threw
+    // anything that wasn't the throttle case straight out of a raw async
+    // Express-4 handler - which does NOT route an unhandled rejection to
+    // errorHandler.ts on its own. A transient DB/Pappers/INSEE hiccup left
+    // the request hanging until the client timed out with no response body
+    // at all, exactly the same bug class the 25 Sep fix already covered
+    // for POST /siret/lead. Wrapping the whole body the same way.
+    try {
+      // Demo shortcut - checked before the key-configured gate, and before
+      // treating the query as a name-search, so it works identically whether
+      // or not PAPPERS_API_KEY/INSEE_API_KEY are set.
+      if (query.trim() === DEMO_SIRET) {
+        await db.query(
+          `INSERT INTO siret_lookups (session_id, siret, company_data)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
+          [sessionId, DEMO_SIRET, JSON.stringify(DEMO_COMPANY)]
+        );
+        return res.json({ companyKnown: true, siret: DEMO_SIRET, company: DEMO_COMPANY });
+      }
+
+      const pappersKey = process.env.PAPPERS_API_KEY;
+      const inseeKey = process.env.INSEE_API_KEY;
+      if (!pappersKey && !inseeKey) {
+        return res.status(501).json({
+          error: 'company_lookup_not_configured',
+          message: "La reconnaissance d'entreprise n'est pas encore configurée.",
+        });
+      }
+
+      // Free-text name -> candidates list, no lookup/cache/throttle yet.
+      if (!/^\d{14}$/.test(query)) {
+        if (!pappersKey) {
+          return res.status(400).json({
+            error: 'name_search_not_configured',
+            message: "La recherche par nom d'entreprise n'est pas disponible pour le moment. Indiquez le numéro de SIRET (14 chiffres).",
+          });
+        }
+        let candidates: CompanyCandidate[] = [];
+        try {
+          candidates = await searchCompaniesByName(query, pappersKey);
+        } catch (err: any) {
+          logger.error('Pappers company-name search error:', err.response?.data || err.message);
+          return res.status(502).json({ error: 'siret_lookup_failed', message: 'La recherche a échoué. Réessayez.' });
+        }
+        if (candidates.length === 0) {
+          return res.status(404).json({ error: 'siret_not_found', message: "Aucune entreprise trouvée pour ce nom. Essayez avec le numéro de SIRET." });
+        }
+        return res.json({ companyKnown: false, candidates });
+      }
+
+      // Direct 14-digit SIRET - unambiguous, resolve immediately (protected
+      // by the same cache/throttle as /confirm).
+      let result: { company: CompanyData | null; notFound: boolean };
+      try {
+        result = await resolveAndCacheCompany(query, pappersKey, inseeKey, ip, sessionId, isAuthenticated);
+      } catch (err) {
+        if (err instanceof SiretThrottleError) {
+          return res.status(429).json({
+            error: 'company_lookup_throttled',
+            message: "Vous avez déjà consulté deux entreprises différentes. Créez un compte pour continuer vos recherches.",
+          });
+        }
+        throw err;
+      }
+      if (!result.company) {
+        if (result.notFound) {
+          return res.status(404).json({ error: 'siret_not_found', message: 'Aucune entreprise trouvée pour ce SIRET.' });
+        }
+        return res.status(502).json({ error: 'siret_lookup_failed', message: "La vérification du SIRET a échoué. Réessayez." });
+      }
+
       await db.query(
         `INSERT INTO siret_lookups (session_id, siret, company_data)
          VALUES ($1, $2, $3)
          ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
-        [sessionId, DEMO_SIRET, JSON.stringify(DEMO_COMPANY)]
+        [sessionId, query, JSON.stringify(result.company)]
       );
-      return res.json({ companyKnown: true, siret: DEMO_SIRET, company: DEMO_COMPANY });
-    }
 
-    const pappersKey = process.env.PAPPERS_API_KEY;
-    const inseeKey = process.env.INSEE_API_KEY;
-    if (!pappersKey && !inseeKey) {
-      return res.status(501).json({
-        error: 'company_lookup_not_configured',
-        message: "La reconnaissance d'entreprise n'est pas encore configurée.",
-      });
-    }
-
-    // Free-text name -> candidates list, no lookup/cache/throttle yet.
-    if (!/^\d{14}$/.test(query)) {
-      if (!pappersKey) {
-        return res.status(400).json({
-          error: 'name_search_not_configured',
-          message: "La recherche par nom d'entreprise n'est pas disponible pour le moment. Indiquez le numéro de SIRET (14 chiffres).",
-        });
-      }
-      let candidates: CompanyCandidate[] = [];
-      try {
-        candidates = await searchCompaniesByName(query, pappersKey);
-      } catch (err: any) {
-        logger.error('Pappers company-name search error:', err.response?.data || err.message);
-        return res.status(502).json({ error: 'siret_lookup_failed', message: 'La recherche a échoué. Réessayez.' });
-      }
-      if (candidates.length === 0) {
-        return res.status(404).json({ error: 'siret_not_found', message: "Aucune entreprise trouvée pour ce nom. Essayez avec le numéro de SIRET." });
-      }
-      return res.json({ companyKnown: false, candidates });
-    }
-
-    // Direct 14-digit SIRET - unambiguous, resolve immediately (protected
-    // by the same cache/throttle as /confirm).
-    let result: { company: CompanyData | null; notFound: boolean };
-    try {
-      result = await resolveAndCacheCompany(query, pappersKey, inseeKey, ip, sessionId, isAuthenticated);
+      res.json({ companyKnown: true, siret: query, company: result.company });
     } catch (err) {
-      if (err instanceof SiretThrottleError) {
-        return res.status(429).json({
-          error: 'company_lookup_throttled',
-          message: "Vous avez déjà consulté deux entreprises différentes. Créez un compte pour continuer vos recherches.",
-        });
-      }
-      throw err;
+      logger.error('POST /siret/lookup failed:', err);
+      res.status(500).json({ error: 'siret_lookup_failed', message: 'La vérification du SIRET a échoué. Réessayez.' });
     }
-    if (!result.company) {
-      if (result.notFound) {
-        return res.status(404).json({ error: 'siret_not_found', message: 'Aucune entreprise trouvée pour ce SIRET.' });
-      }
-      return res.status(502).json({ error: 'siret_lookup_failed', message: "La vérification du SIRET a échoué. Réessayez." });
-    }
-
-    await db.query(
-      `INSERT INTO siret_lookups (session_id, siret, company_data)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
-      [sessionId, query, JSON.stringify(result.company)]
-    );
-
-    res.json({ companyKnown: true, siret: query, company: result.company });
   }
 );
 
@@ -918,49 +932,57 @@ router.post(
     const ip = req.ip;
     const isAuthenticated = !!req.user;
 
-    if (siret === DEMO_SIRET) {
+    // 27 Sep audit, point 6: same fix as /lookup above - no top-level
+    // try/catch meant `throw err` below could escape a raw async Express-4
+    // handler and hang the request instead of returning a clean error.
+    try {
+      if (siret === DEMO_SIRET) {
+        await db.query(
+          `INSERT INTO siret_lookups (session_id, siret, company_data)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
+          [sessionId, DEMO_SIRET, JSON.stringify(DEMO_COMPANY)]
+        );
+        return res.json({ companyKnown: true, siret: DEMO_SIRET, company: DEMO_COMPANY });
+      }
+
+      const pappersKey = process.env.PAPPERS_API_KEY;
+      const inseeKey = process.env.INSEE_API_KEY;
+      if (!pappersKey && !inseeKey) {
+        return res.status(501).json({ error: 'company_lookup_not_configured', message: "La reconnaissance d'entreprise n'est pas encore configurée." });
+      }
+
+      let result: { company: CompanyData | null; notFound: boolean };
+      try {
+        result = await resolveAndCacheCompany(siret, pappersKey, inseeKey, ip, sessionId, isAuthenticated);
+      } catch (err) {
+        if (err instanceof SiretThrottleError) {
+          return res.status(429).json({
+            error: 'company_lookup_throttled',
+            message: "Vous avez déjà consulté deux entreprises différentes. Créez un compte pour continuer vos recherches.",
+          });
+        }
+        throw err;
+      }
+      if (!result.company) {
+        if (result.notFound) {
+          return res.status(404).json({ error: 'siret_not_found', message: 'Aucune entreprise trouvée pour ce SIRET.' });
+        }
+        return res.status(502).json({ error: 'siret_lookup_failed', message: "La vérification du SIRET a échoué. Réessayez." });
+      }
+
       await db.query(
         `INSERT INTO siret_lookups (session_id, siret, company_data)
          VALUES ($1, $2, $3)
          ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
-        [sessionId, DEMO_SIRET, JSON.stringify(DEMO_COMPANY)]
+        [sessionId, siret, JSON.stringify(result.company)]
       );
-      return res.json({ companyKnown: true, siret: DEMO_SIRET, company: DEMO_COMPANY });
-    }
 
-    const pappersKey = process.env.PAPPERS_API_KEY;
-    const inseeKey = process.env.INSEE_API_KEY;
-    if (!pappersKey && !inseeKey) {
-      return res.status(501).json({ error: 'company_lookup_not_configured', message: "La reconnaissance d'entreprise n'est pas encore configurée." });
-    }
-
-    let result: { company: CompanyData | null; notFound: boolean };
-    try {
-      result = await resolveAndCacheCompany(siret, pappersKey, inseeKey, ip, sessionId, isAuthenticated);
+      res.json({ companyKnown: true, siret, company: result.company });
     } catch (err) {
-      if (err instanceof SiretThrottleError) {
-        return res.status(429).json({
-          error: 'company_lookup_throttled',
-          message: "Vous avez déjà consulté deux entreprises différentes. Créez un compte pour continuer vos recherches.",
-        });
-      }
-      throw err;
+      logger.error('POST /siret/confirm failed:', err);
+      res.status(500).json({ error: 'siret_lookup_failed', message: "La vérification du SIRET a échoué. Réessayez." });
     }
-    if (!result.company) {
-      if (result.notFound) {
-        return res.status(404).json({ error: 'siret_not_found', message: 'Aucune entreprise trouvée pour ce SIRET.' });
-      }
-      return res.status(502).json({ error: 'siret_lookup_failed', message: "La vérification du SIRET a échoué. Réessayez." });
-    }
-
-    await db.query(
-      `INSERT INTO siret_lookups (session_id, siret, company_data)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
-      [sessionId, siret, JSON.stringify(result.company)]
-    );
-
-    res.json({ companyKnown: true, siret, company: result.company });
   }
 );
 
