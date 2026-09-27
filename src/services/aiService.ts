@@ -1468,6 +1468,22 @@ export const generateAnalysisSectionsForOpportunities = async (limit: number = 5
     // on the on-demand path in routes/opportunities.ts; without this here
     // too, a row that got saved empty once would never be retried by this
     // batch job either.
+    //
+    // 2nd 27 Sep client audit, point 1 ("les trois accordéons doivent être
+    // présents sur toutes les annonces... y compris aux annonces déjà
+    // présentes"): this query used to also require
+    // `description IS NOT NULL AND description != ''`, so any row with a
+    // blank/thin description - some editorial private-tender/sous-traitance
+    // rows, some terse BOAMP notices - was permanently skipped by this cron,
+    // forever stuck on the no-accordion fallback. The on-demand path
+    // (ensureAnalysisSectionsGenerated, triggered on first fiche view) never
+    // had this restriction, and generateOpportunityAnalysisSections below
+    // already builds its prompt from title + raw_data + location too, with
+    // an explicit instruction to say the info isn't specified rather than
+    // invent it - so a blank description was never actually a reason
+    // generation would fail, just a reason this batch job wouldn't attempt
+    // it. Dropped the filter so this cron backfills every unfinished row
+    // the same way the on-demand path already does.
     `SELECT id FROM opportunities
      WHERE (
        ai_analysis_sections_status IS NULL
@@ -1479,7 +1495,6 @@ export const generateAnalysisSectionsForOpportunities = async (limit: number = 5
          AND coalesce(ai_analysis_sections->>'entreprises', '') = ''
        )
      )
-       AND description IS NOT NULL AND description != ''
      ORDER BY created_at DESC
      LIMIT $1`,
     [limit]
