@@ -1,4 +1,4 @@
-import { tokenizeQuery, stemOf, synonymsOf, isTradeWord, tsqueryAlternatives, matchTermsOf, FR_STOPWORDS } from '../searchQuery';
+import { tokenizeQuery, stemOf, synonymsOf, isTradeWord, tsqueryAlternatives, matchTermsOf, FR_STOPWORDS, domainMismatchExclusion, domainMismatchExclusionSqlPattern } from '../searchQuery';
 
 // 20 Sep client audit ("valider sur l'ensemble des métiers... préparer des
 // tests avec plusieurs formulations et localisations... conserver ces
@@ -131,6 +131,38 @@ describe('tsqueryAlternatives (what a word actually expands to in the search)', 
 
   it('client audit (27 Sep): "climaticien" now expands to itself, its (unhelpful) stem, and "climatisation"', () => {
     expect(tsqueryAlternatives('climaticien').sort()).toEqual(['climaticien:*', 'climatic:*', 'climatisation:*'].sort());
+  });
+});
+
+describe('domainMismatchExclusion (27 Sep client audit, point 3: keyword hit, wrong domain)', () => {
+  it('"cvc"/"ventilation" reject a biomedical-equipment notice, not a real HVAC one', () => {
+    const rule = domainMismatchExclusion('cvc');
+    expect(rule).not.toBeNull();
+    expect(rule!.test('maintenance des equipements biomedicaux, ventilation medicale')).toBe(true);
+    expect(rule!.test('remplacement de la chaudiere et des unites de ventilation du gymnase')).toBe(false);
+  });
+
+  it('"electricien" rejects a commodity energy-supply notice, not real trade work', () => {
+    const rule = domainMismatchExclusion('electricien');
+    expect(rule).not.toBeNull();
+    expect(rule!.test("fourniture et acheminement d'electricite pour les fournisseurs d'electricite")).toBe(true);
+    expect(rule!.test('mise en conformite electrique du tableau general basse tension')).toBe(false);
+  });
+
+  it('returns null for a word with no domain-mismatch rule', () => {
+    expect(domainMismatchExclusion('peintre')).toBeNull();
+    expect(domainMismatchExclusion('bordeaux')).toBeNull();
+  });
+
+  it('the SQL pattern converts \\b to Postgres\'s \\y and stays otherwise identical', () => {
+    const pattern = domainMismatchExclusionSqlPattern('cvc');
+    expect(pattern).not.toBeNull();
+    expect(pattern).not.toContain('\\b');
+    expect(pattern).toContain('\\y');
+  });
+
+  it('null SQL pattern for a word with no rule', () => {
+    expect(domainMismatchExclusionSqlPattern('peintre')).toBeNull();
   });
 });
 

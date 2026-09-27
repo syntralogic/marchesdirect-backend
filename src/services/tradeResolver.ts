@@ -86,6 +86,46 @@ async function loadTrades(): Promise<TradeRow[]> {
   return tradeCache.rows;
 }
 
+// ============================================================================
+// PER-LOT TITLE OVERRIDE
+//
+// Client audit (27 Sep), point 4: a lot notice titled "Lot 1 : Plâtrerie -
+// Peinture - Menuiserie bois" (Le Havre, chauffage urbain tender) surfaced
+// under a CVC search even though its own title names three unrelated
+// trades. Cause: BOAMP/DECP tenders routinely repeat the SAME overall
+// project description on every lot's row (only the title differs lot by
+// lot), and classifyOpportunity() (aiService.ts) reads title+description
+// together - so a lot whose OWN object is plâtrerie/peinture/menuiserie can
+// still pick up "chauffage urbain" from the shared description and get
+// tagged with the CVC trade in ai_matched_trades.
+//
+// When a title explicitly names a lot, what follows the "Lot N :" marker is
+// this row's own stated object and is the one thing that can't be
+// contaminated by another lot's or the whole tender's wording - it should
+// always be trusted over anything pulled from the description. Kept
+// separate from resolveTradeFromText() above (which reads the whole
+// title+description and is deliberately conservative/best-effort): this is
+// a narrow, structural pattern match on the title alone, used to OVERRIDE a
+// classification rather than merely supply one when none exists.
+const LOT_TITLE_RE = /^\s*lot\s*[\dA-Z]+\s*[:\-\u2013\u2014]\s*(.+)$/i;
+
+/** The trade slugs a "Lot N : ..." title names for itself, or [] if the
+ * title doesn't have that shape (or names nothing recognisable). */
+export function extractLotTradeSlugs(title: string | null | undefined): string[] {
+  const m = LOT_TITLE_RE.exec(String(title || '').trim());
+  if (!m) return [];
+  return extractTradeSlugs(m[1]);
+}
+
+/** Canonical trade rows for a set of slugs, in no particular order -
+ * used to turn extractLotTradeSlugs()'s output back into real trade ids. */
+export async function findTradesBySlugs(slugs: string[]): Promise<ResolvedTrade[]> {
+  if (slugs.length === 0) return [];
+  const wanted = new Set(slugs);
+  const trades = await loadTrades();
+  return trades.filter((t) => t.slug && wanted.has(t.slug)).map((t) => ({ id: t.id, name: t.name }));
+}
+
 export async function findTradeByName(rawName: string): Promise<ResolvedTrade | null> {
   const name = fold(rawName).trim();
   if (!name) return null;

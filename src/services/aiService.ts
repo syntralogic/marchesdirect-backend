@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { findTradeByName, resolveTradeFromText } from './tradeResolver';
+import { findTradeByName, resolveTradeFromText, extractLotTradeSlugs, findTradesBySlugs } from './tradeResolver';
 import { db } from '../config/database';
 import { reconcileOfficialFields } from '../utils/officialFields';
 import { logger } from '../utils/logger';
@@ -1109,6 +1109,28 @@ Estimated Value: ${opp.estimated_value || 'Not specified'}`;
     if (tradeIds.length === 0) {
       const inferred = await resolveTradeFromText(opp.title, opp.description);
       if (inferred) tradeIds.push({ id: inferred.id, confidence: 0.6, name: inferred.name });
+    }
+
+    // 27 Sep client audit, point 4: this row's own "Lot N : ..." title (when
+    // it has that shape) is the one thing that can't be contaminated by the
+    // shared project-level description another lot's wording bled in from -
+    // see extractLotTradeSlugs in tradeResolver.ts. Anything the AI/fallback
+    // pass above found that isn't one of the lot's own named trades is
+    // dropped; if that empties the list, the lot's own trades are used
+    // directly rather than leaving trade_id/ai_matched_trades wrong.
+    const lotTradeSlugs = extractLotTradeSlugs(opp.title);
+    if (lotTradeSlugs.length > 0) {
+      const lotTrades = await findTradesBySlugs(lotTradeSlugs);
+      if (lotTrades.length > 0) {
+        const lotTradeIds = new Set(lotTrades.map((t) => t.id));
+        const keptFromAi = tradeIds.filter((t) => lotTradeIds.has(t.id));
+        tradeIds.length = 0;
+        if (keptFromAi.length > 0) {
+          tradeIds.push(...keptFromAi);
+        } else {
+          for (const t of lotTrades) tradeIds.push({ id: t.id, confidence: 0.75, name: t.name });
+        }
+      }
     }
 
     // Find CPV code

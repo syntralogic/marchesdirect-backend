@@ -144,6 +144,50 @@ export function matchTermsOf(w: string): string[] {
   return [...(includeRaw ? [foldAccents(w)] : []), ...(stem ? [stem] : []), ...syns];
 }
 
+// Client audit (27 Sep), point 3: a literal keyword hit landing in a
+// completely different domain than the trade being searched - not a
+// spelling/synonym gap (the référentiel above), the word really is the
+// right word, but the surrounding market is unrelated:
+//  - "CVC"/"climatisation"/"ventilation" also matched a biomedical
+//    equipment-maintenance market ("ventilation médicale" = respiratory
+//    equipment, not building air handling) - "ventilation" is a genuine
+//    French homonym between the two.
+//  - "électricien"/"électricité" also matched commodity energy-supply
+//    notices ("fourniture et acheminement d'électricité", "fournisseurs
+//    d'électricité") - markets for electricity resellers/suppliers, not
+//    for the trade that installs or repairs electrical systems.
+// A word-level fix can't tell these apart - what's wrong is the phrase
+// around the word, so each rule pairs the trade's own trigger words with a
+// phrase that means "this hit doesn't count here". Kept as an exclusion
+// (AND NOT) rather than a smarter synonym: the keyword match is genuine,
+// only the domain is wrong.
+const DOMAIN_MISMATCH_RULES: Array<{ triggers: Set<string>; exclude: RegExp }> = [
+  {
+    triggers: new Set(['cvc', 'climatisation', 'climaticien', 'clim', 'chauffage', 'chauffagiste', 'chaudiere', 'ventilation', 'vmc']),
+    exclude: /\b(biomedical|biomedicale|biomedicaux|dispositifs?\s+medicaux|equipements?\s+medicaux|materiels?\s+medicaux|materiel\s+medical|respirateurs?|bloc\s+operatoire|reanimation)\b/,
+  },
+  {
+    triggers: new Set(['electricite', 'electricien', 'elec']),
+    exclude: /\b(fourniture\s+(et\s+acheminement\s+)?d'?electricite|acheminement\s+d'?energie|achat\s+d'?electricite|fournisseurs?\s+d'?electricite|marche\s+de\s+l'?energie|contrat\s+de\s+fourniture\s+d'?(electricite|energie|gaz))\b/,
+  },
+];
+
+/** The exclusion regex a query word's domain-mismatch rule uses (folded,
+ * lowercase, `\b`-delimited), or null if the word has no such rule. */
+export function domainMismatchExclusion(w: string): RegExp | null {
+  const folded = foldAccents(w).toLowerCase();
+  const rule = DOMAIN_MISMATCH_RULES.find((r) => r.triggers.has(folded));
+  return rule ? rule.exclude : null;
+}
+
+// Postgres regex flavour has no \b - same conversion as naturePrestation.ts's
+// toPgPattern, duplicated here (it's one line) rather than exported across
+// modules for a single use.
+export function domainMismatchExclusionSqlPattern(w: string): string | null {
+  const re = domainMismatchExclusion(w);
+  return re ? re.source.replace(/\\b/g, '\\y') : null;
+}
+
 const TRADE_CONCEPT_TOKENS = new Set(
   Object.values(TRADE_KEYWORD_SYNONYMS).flat().concat(Object.keys(TRADE_KEYWORD_SYNONYMS))
 );

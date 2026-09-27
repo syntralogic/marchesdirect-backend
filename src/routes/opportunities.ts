@@ -5,7 +5,7 @@ import { logger } from '../utils/logger';
 import { reconcileOfficialFields } from '../utils/officialFields';
 import type { RefineAnswers } from '../services/matchEngine';
 import { naturePrestationLateral, NATURE_VALUES } from '../utils/naturePrestation';
-import { tokenizeQuery, tsqueryAlternatives, isTradeWord, matchTermsOf } from '../utils/searchQuery';
+import { tokenizeQuery, tsqueryAlternatives, isTradeWord, matchTermsOf, domainMismatchExclusionSqlPattern } from '../utils/searchQuery';
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts, generateOpportunityAnalysisSections } from '../services/aiService';
 import { ingestOpportunityDocuments } from '../services/documentIngestionService';
 import { computeMatchScore } from '../services/matchScoreService';
@@ -542,7 +542,22 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
           if (isTradeWord(w)) {
             const titleIdx = idx++;
             params.push(patterns);
-            wordConds.push(`(unaccent(o.title) ILIKE ANY($${titleIdx}::text[]) OR ${tradeCond})`);
+            let cond = `(unaccent(o.title) ILIKE ANY($${titleIdx}::text[]) OR ${tradeCond})`;
+            // Client audit (27 Sep, point 3): "CVC"/"ventilation" matching a
+            // biomedical-equipment market, "électricien" matching a
+            // commodity energy-supply market - see domainMismatchExclusion
+            // in searchQuery.ts. A genuine keyword/trade hit is still
+            // rejected when the notice's own text names one of these
+            // unrelated domains, checked over title+description together
+            // since it's the surrounding phrase (often in the body) that
+            // gives the domain away, not just the title.
+            const mismatchPattern = domainMismatchExclusionSqlPattern(w);
+            if (mismatchPattern) {
+              const mismatchIdx = idx++;
+              params.push(mismatchPattern);
+              cond = `((${cond}) AND NOT (lower(unaccent(o.title || ' ' || COALESCE(o.description, ''))) ~ $${mismatchIdx}))`;
+            }
+            wordConds.push(cond);
           } else {
             const wordTsIdx = idx++;
             // Reuses tsqueryAlternatives (the same helper the ORDER BY
