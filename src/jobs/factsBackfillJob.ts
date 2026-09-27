@@ -45,6 +45,15 @@ const NEEDS_BACKFILL_QUERY = `
       -- "Critères de notation" card: selection_criteria added later,
       -- free-tier. Rows extracted before this catch up here too.
       OR ai_extracted_facts->'selection_criteria' IS NULL
+      -- 2nd 27 Sep client audit, point 7 ("le privé et la sous-traitance...
+      -- préparer les champs nécessaires"): scope_details/intervention_calendar/
+      -- constraints_expectations were added after the fields above - a real
+      -- (non-editorial) opportunity extracted before that addition has
+      -- these three keys missing entirely, same catch-up story as
+      -- contract_duration/selection_criteria just above.
+      OR ai_extracted_facts->'scope_details' IS NULL
+      OR ai_extracted_facts->'intervention_calendar' IS NULL
+      OR ai_extracted_facts->'constraints_expectations' IS NULL
     )
   -- Was ORDER BY created_at DESC: this query catches BOTH brand-new
   -- opportunities and older ones still missing newer fields, and the

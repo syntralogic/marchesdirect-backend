@@ -1413,7 +1413,13 @@ Location: ${opp.location_city}, ${opp.location_region}`;
 export const generateOpportunityAnalysisSections = async (
   opportunityId: string
 ): Promise<{ presentation: string; conditions: string; entreprises: string }> => {
-  const oppResult = await db.query('SELECT * FROM opportunities WHERE id = $1', [opportunityId]);
+  const oppResult = await db.query(
+    `SELECT o.*, ds.code AS source_code, t.name AS trade_name FROM opportunities o
+     LEFT JOIN data_sources ds ON o.source_id = ds.id
+     LEFT JOIN trades t ON o.trade_id = t.id
+     WHERE o.id = $1`,
+    [opportunityId]
+  );
   if (oppResult.rows.length === 0) {
     throw new Error(`Opportunity ${opportunityId} not found`);
   }
@@ -1438,25 +1444,42 @@ export const generateOpportunityAnalysisSections = async (
   // its own given input. Pulling the already-persisted facts in here and
   // telling the model they're confirmed (not to be second-guessed or
   // contradicted) closes both cases without a second source of truth.
+  //
+  // 2nd 27 Sep client audit, point 7 ("le privé et la sous-traitance...
+  // préparer les champs nécessaires... afficher ces données dans les
+  // trois accordéons"): scope_details/intervention_calendar/
+  // constraints_expectations already exist in ai_extracted_facts (25 Sep
+  // audit, point 10 - see that field's own comment on
+  // ExtractedOpportunityFacts) specifically so quantités/calendrier
+  // d'intervention/contraintes could be shown for private-tender and
+  // sous-traitance listings while the buyer identity stays locked. But
+  // this prompt never saw them either, same exact gap as point 3 above -
+  // an already-known quantity or intervention constraint could be
+  // omitted or (worse) contradicted by a freshly re-derived guess instead
+  // of being faithfully reused. Added to the same confirmed-facts
+  // mechanism right below, not a separate one.
   const facts = (opp.ai_extracted_facts || {}) as Record<string, { value?: string; available?: boolean } | undefined>;
   const factText = (f?: { value?: string; available?: boolean }): string =>
     f && f.available && f.value ? f.value : 'non communiqué(e)';
   const confirmedFactsBlock = `Contract Duration (déjà confirmée): ${factText(facts.contract_duration)}
 Allotment / Lots (déjà confirmé): ${factText(facts.allotment)}
 Submission Method (déjà confirmée): ${factText(facts.submission_method)}
-Technical Visit (déjà confirmée): ${factText(facts.technical_visit)}`;
+Technical Visit (déjà confirmée): ${factText(facts.technical_visit)}
+Scope Details / Quantités (déjà confirmé): ${factText(facts.scope_details)}
+Intervention Calendar (déjà confirmé): ${factText(facts.intervention_calendar)}
+Constraints & Expectations (déjà confirmé): ${factText(facts.constraints_expectations)}`;
 
   const systemPrompt = `Tu es un analyste de marchés publics/privés français. À partir de la fiche source ci-dessous, rédige exactement 3 sections destinées à 3 accordéons fixes sur la page d'une opportunité. Chaque section fait 2 à 5 phrases, en français courant, texte brut (aucun markdown, aucun titre répété dans le texte).
 
-1. presentation ("Présentation du marché") : l'objet du marché, les prestations demandées, le périmètre de la mission, et - si la source les précise - le nombre/l'objet des lots et la zone d'intervention.
-2. conditions ("Conditions et points à vérifier") : calendrier (dates clés, durée du contrat), exigences, critères de sélection, modalités de dépôt, visite éventuelle, contraintes à connaître avant de candidater, et - si la source les précise - les plafonds de commande (montant ou quantité maximum par lot et/ou par période sur un accord-cadre à bons de commande). Un plafond de commande est un maximum, jamais un montant garanti : ne le présente jamais comme le budget du marché.
+1. presentation ("Présentation du marché") : l'objet du marché, les prestations demandées, le périmètre de la mission, les équipements/surfaces/quantités connues (voir Scope Details ci-dessous si renseigné), et - si la source les précise - le nombre/l'objet des lots et la zone d'intervention.
+2. conditions ("Conditions et points à vérifier") : calendrier (dates clés, durée du contrat, calendrier d'intervention - voir Intervention Calendar ci-dessous si renseigné), exigences, critères de sélection, modalités de dépôt, visite éventuelle, contraintes à connaître avant de candidater (voir Constraints & Expectations ci-dessous si renseigné), et - si la source les précise - les plafonds de commande (montant ou quantité maximum par lot et/ou par période sur un accord-cadre à bons de commande). Un plafond de commande est un maximum, jamais un montant garanti : ne le présente jamais comme le budget du marché.
 3. entreprises ("Entreprises concernées") : les métiers et profils d'entreprises concernés par ce marché, ainsi que les qualifications/attestations/certifications explicitement demandées, avec leur catégorie précise quand la source la donne. Décris uniquement le type d'entreprise auquel ce marché correspond a priori (taille, secteur, spécialité) - ne certifie jamais qu'une entreprise est éligible, puisque l'éligibilité réelle dépend de critères que tu ne peux pas vérifier.
 
-RÈGLE STRICTE : n'utilise que ce qui est réellement présent dans la source ci-dessous. Si une section manque d'information dans la source (ex : aucune exigence mentionnée, aucun montant), dis-le explicitement dans cette section plutôt que d'inventer un contenu plausible.
+RÈGLE STRICTE : n'utilise que ce qui est réellement présent dans la source ci-dessous. Si une section manque d'information dans la source (ex : aucune exigence mentionnée, aucun montant, quantité non précisée), dis-le explicitement dans cette section plutôt que d'inventer un contenu plausible.
 
 RÈGLE STRICTE : n'utilise jamais "probablement"/"sans doute"/"sûrement" pour une information que la source énonce clairement (nombre de lots, attestation ou catégorie de qualification exigée, etc.) - reprends-la telle quelle. Réserve ces formulations aux cas où la source elle-même reste imprécise.
 
-RÈGLE DE COHÉRENCE : les champs marqués "(déjà confirmée)" ou "(déjà confirmé)" ci-dessous (Deadline, Estimated Value, Contract Duration, Allotment, Submission Method, Technical Visit) ont déjà été extraits et vérifiés depuis la même source pour d'autres parties de la fiche. Si l'un de ces champs a une valeur autre que "non communiqué(e)", tu DOIS la reprendre fidèlement dans la section concernée et ne jamais écrire qu'elle est absente, non précisée ou non communiquée - ce serait une contradiction avec le reste de la fiche.`;
+RÈGLE DE COHÉRENCE : les champs marqués "(déjà confirmée)" ou "(déjà confirmé)" ci-dessous (Deadline, Estimated Value, Contract Duration, Allotment, Submission Method, Technical Visit, Scope Details / Quantités, Intervention Calendar, Constraints & Expectations) ont déjà été extraits et vérifiés depuis la même source pour d'autres parties de la fiche. Si l'un de ces champs a une valeur autre que "non communiqué(e)", tu DOIS la reprendre fidèlement dans la section concernée et ne jamais écrire qu'elle est absente, non précisée ou non communiquée - ce serait une contradiction avec le reste de la fiche.`;
 
   const userMessage = `Title: ${opp.title}
 Description: ${opp.description || ''}
@@ -1465,6 +1488,48 @@ Estimated Value (déjà confirmée): ${estimatedValueText}
 ${confirmedFactsBlock}
 Location: ${opp.location_city || ''}, ${opp.location_region || ''}
 Raw source payload: ${opp.raw_data ? extractRawDataContext(opp.raw_data, 2000) : '{}'}`;
+
+  // 2nd 27 Sep client audit, point 7: an editorial (source_code
+  // 'editorial_catalog') private-tender/sous-traitance row's scope/
+  // calendar/constraints text is already deterministic, hand-authored
+  // content (scripts/seedEditorialListings.js), never "a real notice this
+  // still needs to interpret" - there is no raw source text for a paid
+  // Claude call to add anything by re-reading, only risk (a paraphrase
+  // that drifts from what was actually prepared, or a failure whenever
+  // the account's Anthropic credits are exhausted - see this file's other
+  // exhausted-credits comment - leaving these rows permanently stuck on
+  // "Analyse en cours de génération" for content that was fully ready the
+  // whole time). Composing the 3 sections directly from the already-
+  // confirmed facts here is not a fallback/lesser path for these rows,
+  // it's the correct one: guaranteed to faithfully reflect the quantities/
+  // intervention calendar/constraints that were the whole point of
+  // preparing those fields in ai_extracted_facts, with zero risk of the
+  // point-3-style contradiction a re-derivation could introduce, and no
+  // dependency on API availability for content that was never AI-sourced
+  // in the first place.
+  if (opp.source_code === 'editorial_catalog') {
+    const join = (...parts: Array<string | undefined>): string =>
+      parts.filter(p => p && p !== 'non communiqué(e)').join(' ') || 'Non précisé pour cette annonce.';
+    // required_qualifications is deliberately always "not available" on an
+    // editorial row (see seedEditorialListings.js's own comment: no real
+    // DCE to name a specific attestation from) - falling back to the
+    // trade itself here rather than a blank accordion, since which trade a
+    // listing is filed under IS a real, known fact about it (trade_id),
+    // just not an AI-derived one.
+    const entreprisesText = factText(facts.required_qualifications) !== 'non communiqué(e)'
+      ? factText(facts.required_qualifications)
+      : (opp.trade_name ? `Ce marché concerne les entreprises du secteur : ${opp.trade_name}.` : undefined);
+    const safeSections = {
+      presentation: join(factText(facts.scope_details)),
+      conditions: join(factText(facts.intervention_calendar), factText(facts.constraints_expectations)),
+      entreprises: join(entreprisesText),
+    };
+    await db.query(
+      'UPDATE opportunities SET ai_analysis_sections = $1, ai_analysis_sections_status = $2, ai_analysis_sections_error = NULL WHERE id = $3',
+      [JSON.stringify(safeSections), 'generated', opportunityId]
+    );
+    return safeSections;
+  }
 
   try {
     // Switched from "ask for raw JSON in the system prompt" to a forced

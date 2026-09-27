@@ -103,6 +103,12 @@ async function main() {
         -- extracted before this - even ones that already have
         -- team_size_estimate/key_risks/contract_duration - catch up here.
         OR ai_extracted_facts->'selection_criteria' IS NULL
+        -- 2nd 27 Sep client audit, point 7: kept in sync with
+        -- factsBackfillJob.ts's own copy of this same query - see its
+        -- comment for why.
+        OR ai_extracted_facts->'scope_details' IS NULL
+        OR ai_extracted_facts->'intervention_calendar' IS NULL
+        OR ai_extracted_facts->'constraints_expectations' IS NULL
       )
     -- Oldest-first, kept in sync with jobs/factsBackfillJob.ts: on-demand
     -- extraction (routes/opportunities.ts) already handles anything a
