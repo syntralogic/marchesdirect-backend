@@ -714,11 +714,17 @@ router.get('/lead/dossier-pdf', async (req: AuthRequest, res: Response) => {
   if (!sessionId || !opportunityId) {
     return res.status(400).json({ error: 'sessionId et opportunityId requis.' });
   }
-  const result = await loadPrefilledDossierInput(sessionId, opportunityId);
-  if ('error' in result) {
-    return res.status(409).json({ error: result.error, message: "Confirmez d'abord vos coordonnées pour accéder à ce document." });
-  }
+  // 27 Sep audit, point 3: two download attempts produced no file at all
+  // in the browser, not even an error - because loadPrefilledDossierInput's
+  // two db.query calls sat outside any try/catch, so a transient DB hiccup
+  // was an unhandled rejection escaping a raw async Express-4 handler
+  // (same class of bug as /siret/lookup and /siret/confirm above). Only
+  // the PDF-generation step itself had a safety net.
   try {
+    const result = await loadPrefilledDossierInput(sessionId, opportunityId);
+    if ('error' in result) {
+      return res.status(409).json({ error: result.error, message: "Confirmez d'abord vos coordonnées pour accéder à ce document." });
+    }
     const pdf = await generatePrefilledDossierPdf(result.input);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'attachment; filename="dossier-pre-rempli.pdf"');
@@ -744,12 +750,20 @@ router.post(
       return res.status(400).json({ error: errors.array()[0].msg });
     }
     const { sessionId, opportunityId } = req.body;
-    const result = await loadPrefilledDossierInput(sessionId, opportunityId);
-    if ('error' in result) {
-      return res.status(409).json({ error: result.error, message: "Confirmez d'abord vos coordonnées pour recevoir ce document." });
+    // Same fix as GET /lead/dossier-pdf above - no top-level try/catch here
+    // meant a DB hiccup during "Me le renvoyer" hung instead of returning
+    // a clean error.
+    try {
+      const result = await loadPrefilledDossierInput(sessionId, opportunityId);
+      if ('error' in result) {
+        return res.status(409).json({ error: result.error, message: "Confirmez d'abord vos coordonnées pour recevoir ce document." });
+      }
+      const sent = await sendPrefilledDossierEmail(result.email, result.input);
+      res.json({ sent });
+    } catch (err) {
+      logger.error('Prefilled dossier resend error:', err);
+      res.status(500).json({ error: "Échec de l'envoi. Réessayez dans un instant." });
     }
-    const sent = await sendPrefilledDossierEmail(result.email, result.input);
-    res.json({ sent });
   }
 );
 
