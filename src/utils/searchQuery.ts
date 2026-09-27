@@ -156,6 +156,9 @@ export function matchTermsOf(w: string): string[] {
 //    notices ("fourniture et acheminement d'électricité", "fournisseurs
 //    d'électricité") - markets for electricity resellers/suppliers, not
 //    for the trade that installs or repairs electrical systems.
+//  - "voirie"/"vrd" also matched a bare snow-clearing-equipment rental
+//    notice ("location de matériel de déneigement sans chauffeur") -
+//    a matériel/fourniture market, not the voirie trade doing roadwork.
 // A word-level fix can't tell these apart - what's wrong is the phrase
 // around the word, so each rule pairs the trade's own trigger words with a
 // phrase that means "this hit doesn't count here". Kept as an exclusion
@@ -169,6 +172,16 @@ const DOMAIN_MISMATCH_RULES: Array<{ triggers: Set<string>; exclude: RegExp }> =
   {
     triggers: new Set(['electricite', 'electricien', 'elec']),
     exclude: /\b(fourniture\s+(et\s+acheminement\s+)?d'?electricite|acheminement\s+d'?energie|achat\s+d'?electricite|fournisseurs?\s+d'?electricite|marche\s+de\s+l'?energie|contrat\s+de\s+fourniture\s+d'?(electricite|energie|gaz))\b/,
+  },
+  {
+    // 3rd client audit, point 6: "la location de matériel de déneigement
+    // sans chauffeur est rattachée simplement à la voirie" - a bare
+    // equipment-rental notice (no labour, no roadwork itself) getting
+    // pulled in by a "voirie"/"vrd" search purely because déneigement
+    // (snow clearing) is loosely voirie-adjacent. Renting out the machine
+    // is a matériel/fourniture market, not the voirie trade doing the work.
+    triggers: new Set(['voirie', 'vrd']),
+    exclude: /\b(location\s+(?:de\s+)?materiels?\s+(?:de\s+)?deneigement(?:\s+sans\s+chauffeur)?|deneigement\s+sans\s+chauffeur)\b/,
   },
 ];
 
