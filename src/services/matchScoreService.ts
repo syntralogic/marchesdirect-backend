@@ -4,6 +4,7 @@ import { reconcileOfficialFields } from '../utils/officialFields';
 import { extractTradeSlugs } from './tradeResolver';
 import { geocodeCity } from './geocodingService';
 import { evaluateMatch, tradeSlugsForCompany, MatchCriterion, RefineAnswers, CompanyProfile } from './matchEngine';
+import { inferNaturePrestation, isNaturePrestation, NaturePrestation } from '../utils/naturePrestation';
 
 // ============================================================================
 // OPPORTUNITY MATCH SCORE
@@ -108,22 +109,56 @@ export function criteriaFromFacts(facts: any): CriterionWeight[] {
 
 // Baseline documents every opportunity type expects, plus a trade-specific
 // certification line when the opportunity has a known trade.
-function baseRequiredDocs(journey: string, tradeName: string | null): { label: string; note: string; documentType: string }[] {
+//
+// 3rd client audit, point 8: "le dossier d'acquisition de livres propose une
+// assurance décennale" and "le dossier biomédical reprend des justificatifs
+// standard du bâtiment" - this list used to be hardcoded around a travaux/
+// bâtiment market (RC décennale + qualification de lot + référence de
+// chantier) regardless of what the market actually is. L'assurance
+// décennale is a construction-liability cover specific to bâtiment/travaux
+// under French law (art. 1792 du Code civil) - requiring it on a book
+// purchase or an equipment-maintenance contract isn't just noise, it's
+// factually the wrong document. Docs now follow the résolved nature de la
+// prestation (nature_prestation when the AI classifier has it, else the
+// same title/description heuristic already used to demote fournitures/
+// études in search results - see utils/naturePrestation.ts) instead of
+// assuming every market is a chantier.
+export function baseRequiredDocs(
+  journey: string,
+  tradeName: string | null,
+  nature: NaturePrestation | null
+): { label: string; note: string; documentType: string }[] {
+  const isWorks = nature === 'travaux' || nature === 'mixte' || nature === null;
   const docs = [
     { label: 'Kbis de moins de 3 mois', note: 'Pièce à préparer (liste indicative, à confirmer dans le règlement de consultation).', documentType: 'kbis' },
-    { label: 'Assurance décennale', note: 'Pièce à préparer (liste indicative, à confirmer dans le règlement de consultation).', documentType: 'insurance' },
   ];
+  docs.push(
+    isWorks
+      ? { label: 'Assurance décennale', note: 'Pièce à préparer (liste indicative, à confirmer dans le règlement de consultation).', documentType: 'insurance' }
+      : { label: 'Assurance responsabilité civile professionnelle', note: 'Pièce à préparer (liste indicative, à confirmer dans le règlement de consultation).', documentType: 'insurance' }
+  );
   if (journey === 'public_procurement') {
     docs.push({ label: 'Attestations fiscale et sociale', note: 'Pièces généralement demandées pour un marché public.', documentType: 'certificate' });
   }
+  const qualificationLabel = tradeName
+    ? `Qualification ${tradeName} ou équivalent`
+    : nature === 'fournitures' ? 'Conformité et fiches techniques des produits proposés'
+    : nature === 'etudes' ? 'Qualification professionnelle (ex. OPQIBI) ou équivalent'
+    : nature === 'services' ? 'Qualification ou agrément propre à la prestation'
+    : 'Qualification professionnelle du lot';
   docs.push({
-    label: tradeName ? `Qualification ${tradeName} ou équivalent` : 'Qualification professionnelle du lot',
+    label: qualificationLabel,
     note: 'Pièce à préparer (liste indicative, à confirmer dans le règlement de consultation).',
     documentType: 'certificate',
   });
-  docs.push({ label: 'Référence récente sur un chantier comparable', note: 'Un projet similaire réalisé dans les 3 dernières années.', documentType: 'reference' });
+  const referenceLabel = nature === 'fournitures' ? 'Référence récente de livraison comparable'
+    : nature === 'etudes' ? 'Référence récente de mission comparable'
+    : nature === 'services' ? 'Référence récente de prestation comparable'
+    : 'Référence récente sur un chantier comparable';
+  docs.push({ label: referenceLabel, note: 'Un projet similaire réalisé dans les 3 dernières années.', documentType: 'reference' });
   return docs;
 }
+
 
 
 // Whole-word overlap between the company's declared sector and the trade the
@@ -353,7 +388,11 @@ export const computeMatchScore = async (
   // Eligibility checklist - if we know the company, actually check its
   // documents/certifications on file; otherwise every line is just shown as
   // "to prepare" with no check mark (met: null).
-  const requiredDocs = baseRequiredDocs(journey, opp.trade_name);
+  const requiredDocs = baseRequiredDocs(
+    journey,
+    opp.trade_name,
+    (isNaturePrestation(opp.nature_prestation) ? opp.nature_prestation : null) || inferNaturePrestation(opp.title, opp.description)
+  );
   const eligibility: EligibilityItem[] = [];
   if (companyId) {
     const docsResult = await db.query(
