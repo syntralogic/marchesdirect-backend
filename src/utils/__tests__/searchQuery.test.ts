@@ -78,6 +78,11 @@ describe('synonymsOf (référentiel de synonymes/abréviations)', () => {
   it('does not prefix-match below the 3-char floor', () => {
     expect(synonymsOf('fe')).toEqual([]);
   });
+
+  it('client audit (27 Sep): "climaticien" resolves to climatisation, not just "clim"/"cvc"', () => {
+    expect(synonymsOf('climaticien')).toEqual(['climatisation']);
+    expect(synonymsOf('Climaticien')).toEqual(['climatisation']);
+  });
 });
 
 describe('isTradeWord (title/AI-classification gate for a métier word)', () => {
@@ -122,6 +127,10 @@ describe('tsqueryAlternatives (what a word actually expands to in the search)', 
 
   it('a non-ambiguous abbreviation like "clim" is unaffected', () => {
     expect(tsqueryAlternatives('Clim')).toContain('Clim:*');
+  });
+
+  it('client audit (27 Sep): "climaticien" now expands to itself, its (unhelpful) stem, and "climatisation"', () => {
+    expect(tsqueryAlternatives('climaticien').sort()).toEqual(['climaticien:*', 'climatic:*', 'climatisation:*'].sort());
   });
 });
 
