@@ -64,6 +64,16 @@ export const TRADE_KEYWORD_SYNONYMS: Record<string, string[]> = {
   ite: ['isolation', 'exterieur'],
   iti: ['isolation', 'interieur'],
   clim: ['climatisation'],
+  // Client audit (27 Sep): "climaticien" (48 résultats en marchés publics
+  // devenant 4, dont des marchés étrangers sans rapport, dès qu'on tape le
+  // métier plutôt que la prestation) found almost nothing, unlike "clim"/
+  // "climatisation" above. Cause: stemOf's agent-suffix stripping cuts
+  // "climaticien" down to "climatic" (the "ien" suffix, not "icien"), which
+  // shares no substring with "climatisation" - so neither the synonym table
+  // nor the stemmer bridged the two. An explicit entry, same pattern as
+  // "electricien"/"plombier"/"chauffagiste" below, fixes it directly rather
+  // than trying to special-case the stemmer's suffix list.
+  climaticien: ['climatisation'],
   cvc: ['climatisation', 'chauffage', 'ventilation'],
   vmc: ['ventilation'],
   pac: ['pompe', 'chaleur'],
