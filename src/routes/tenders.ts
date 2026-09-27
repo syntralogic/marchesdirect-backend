@@ -48,7 +48,25 @@ router.get('/bids/mine', async (req: AuthRequest, res: Response) => {
     }
 
     const result = await db.query(
+      // 3rd client audit, point 10 ("25 % dans le dossier contre 20 %
+      // dans le tableau de bord"): the dashboard card computed its own
+      // percentage from a coarse status->pct map (draft=20, in_progress=60,
+      // submitted/awarded/lost=100) while the fiche's own dossier-progress
+      // block computes doneCount/4 from actual document state (preview,
+      // documents prepared, dossier generated, dépôt effectué) - the two
+      // were structurally different formulas over the same bid_responses
+      // row and could never agree except at 100%. Expose the same
+      // presence booleans the fiche already derives so the dashboard can
+      // use the identical 4-step formula instead of a second, divergent one.
       `SELECT br.id, br.status, br.submission_deadline, br.submitted_at, br.total_bid_amount,
+              (
+                (br.dc1_text IS NOT NULL AND br.dc1_text != '')
+                OR (br.dc2_text IS NOT NULL AND br.dc2_text != '')
+                OR (br.dume_text IS NOT NULL AND br.dume_text != '')
+                OR (br.engagement_act_text IS NOT NULL AND br.engagement_act_text != '')
+                OR (br.pricing_schedule_json IS NOT NULL AND jsonb_array_length(br.pricing_schedule_json) > 0)
+              ) AS documents_prepared,
+              (br.technical_memo_text IS NOT NULL AND br.technical_memo_text != '') AS dossier_generated,
               o.id as opportunity_id, o.title, o.deadline, o.location_city
        FROM bid_responses br
        JOIN tenders t ON br.tender_id = t.id
