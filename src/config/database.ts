@@ -1200,6 +1200,33 @@ const applyIncrementalMigrations = async (): Promise<void> => {
      'Annonces rédigées en interne (non scrapées) pour les rubriques Appels d''offres privés et Sous-traitance, en attendant un flux réel. Voir scripts/seedEditorialListings.ts.')
     ON CONFLICT (code) DO NOTHING
   `);
+
+  // Client (26 Sep audit, point 8): "Bordeaux, 200 km" surfaced a notice
+  // whose own fiche says "Lieu : Ville de Saint Etienne" - geocodingService.ts
+  // now rejects a low-confidence api-adresse.data.gouv.fr match (a garbled
+  // city name resolving to some unrelated, wrongly-nearby commune) instead
+  // of trusting whatever it returned. That fix only guards geocodeCity's
+  // FUTURE calls though - any opportunity already geocoded before this
+  // threshold existed keeps whatever wrong coordinates it got, forever,
+  // since geocodingBackfillJob.ts only ever re-processes rows where
+  // location_latitude IS NULL. location_geocode_verified marks a row as
+  // "geocoded under the confidence check" (set by the backfill job itself,
+  // see its own comment); anything with coordinates but not yet verified
+  // gets those coordinates cleared here so the backfill job re-geocodes it
+  // properly. Excludes the (0,0) sentinel deliberately - those rows are
+  // already excluded from every radius search regardless, so there's
+  // nothing to gain by spending an API call re-confirming they're
+  // unresolvable. Safe to run on every boot: once a row is re-geocoded (or
+  // was never wrongly-geocoded to begin with), it's marked verified and
+  // this UPDATE stops matching it - converges to a no-op, doesn't loop.
+  await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS location_geocode_verified BOOLEAN DEFAULT FALSE`);
+  await step(`
+    UPDATE opportunities
+    SET location_latitude = NULL, location_longitude = NULL
+    WHERE location_geocode_verified IS NOT TRUE
+      AND location_latitude IS NOT NULL
+      AND NOT (location_latitude = 0 AND location_longitude = 0)
+  `);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old

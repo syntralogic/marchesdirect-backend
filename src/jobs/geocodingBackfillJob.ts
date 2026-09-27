@@ -65,7 +65,7 @@ export async function runGeocodingBackfillBatch(): Promise<{ geocoded: number; f
         // departments never get cross-applied to each other's coordinates.
         const updateResult = await db.query(
           `UPDATE opportunities
-           SET location_latitude = $1, location_longitude = $2, updated_at = NOW()
+           SET location_latitude = $1, location_longitude = $2, location_geocode_verified = TRUE, updated_at = NOW()
            WHERE location_city = $3
              AND location_department IS NOT DISTINCT FROM $4
              AND location_latitude IS NULL`,
@@ -83,7 +83,7 @@ export async function runGeocodingBackfillBatch(): Promise<{ geocoded: number; f
       try {
         await db.query(
           `UPDATE opportunities
-           SET location_latitude = 0, location_longitude = 0, updated_at = NOW()
+           SET location_latitude = 0, location_longitude = 0, location_geocode_verified = TRUE, updated_at = NOW()
            WHERE location_city = $1
              AND location_department IS NOT DISTINCT FROM $2
              AND location_latitude IS NULL`,
