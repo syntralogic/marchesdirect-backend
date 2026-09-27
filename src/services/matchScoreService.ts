@@ -180,6 +180,22 @@ const departmentFromPostal = (postal: string | null | undefined): string | null 
   return p.startsWith('97') || p.startsWith('98') ? p.slice(0, 3) : p.slice(0, 2);
 };
 
+// 27 Sep client audit, point 7 (CLIM+): the fiche's company card showed the
+// activity fetched fresh via /api/siret/lookup, while this match score's own
+// cache lookup came back empty for the same company - so the métier read
+// "non rattaché" next to a card that had just displayed it. Root cause: the
+// /lookup route always sanitizes the SIRET to digits-only before deriving a
+// SIREN (`v.replace(/\D/g, '')`), so every cache row is keyed by a clean
+// 9-digit SIREN - but companies.siret itself is stored from PUT /me with no
+// sanitization at all, so a company whose profile SIRET has spacing/punctuation
+// (the common French "123 456 789 00012" or "123.456.789.00012" grouping)
+// only had its spaces stripped here, not the separators, and never matched
+// the clean key the cache was actually stored under.
+export const sirenFromSiret = (siret: string | null | undefined): string | null => {
+  const digits = String(siret || '').replace(/\D/g, '');
+  return digits.length >= 9 ? digits.slice(0, 9) : null;
+};
+
 const toNumber = (v: any): number | null => (v == null || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
 
 // Builds the company side of the comparison. A registered account uses its
@@ -194,8 +210,9 @@ async function loadCompanyProfile(companyId: string | null | undefined, sessionI
     if (!c) return null;
     let ape: string | null = null;
     let apeActivity: string | null = null;
-    if (c.siret && String(c.siret).length >= 9) {
-      const cached = await db.query('SELECT company_data FROM company_lookup_cache WHERE siren = $1', [String(c.siret).replace(/\s/g, '').slice(0, 9)]);
+    const siren = sirenFromSiret(c.siret);
+    if (siren) {
+      const cached = await db.query('SELECT company_data FROM company_lookup_cache WHERE siren = $1', [siren]);
       ape = cached.rows[0]?.company_data?.ape || null;
       apeActivity = cached.rows[0]?.company_data?.activity || null;
     }

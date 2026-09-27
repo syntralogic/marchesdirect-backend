@@ -1,4 +1,4 @@
-import { tradeMatchStrength, criteriaFromFacts } from '../matchScoreService';
+import { tradeMatchStrength, criteriaFromFacts, sirenFromSiret } from '../matchScoreService';
 
 // Ticket C04: "score de correspondance excessif sur des activités sans
 // rapport (92%, 100%)". In the personalized branch the cause was a 5-char
@@ -38,6 +38,32 @@ describe('tradeMatchStrength', () => {
     const circular: any = {};
     circular.self = circular;
     expect(tradeMatchStrength('Peinture', 'Second œuvre', circular)).toBe('none');
+  });
+});
+
+// 27 Sep client audit, point 7 (CLIM+): a company's own SIRET stored with
+// spacing/punctuation never matched the digits-only SIREN key that
+// /api/siret/lookup caches Pappers/INSEE data under, so the fiche's company
+// card could show an activity that this match score could never see.
+describe('sirenFromSiret', () => {
+  it('strips spaces from a grouped SIRET', () => {
+    expect(sirenFromSiret('123 456 789 00012')).toBe('123456789');
+  });
+
+  it('strips dots and hyphens too', () => {
+    expect(sirenFromSiret('123.456.789.00012')).toBe('123456789');
+    expect(sirenFromSiret('123-456-789-00012')).toBe('123456789');
+  });
+
+  it('accepts an already-clean SIRET or bare SIREN', () => {
+    expect(sirenFromSiret('12345678900012')).toBe('123456789');
+    expect(sirenFromSiret('123456789')).toBe('123456789');
+  });
+
+  it('returns null when there is not enough to form a SIREN', () => {
+    expect(sirenFromSiret(null)).toBeNull();
+    expect(sirenFromSiret('')).toBeNull();
+    expect(sirenFromSiret('1234')).toBeNull();
   });
 });
 

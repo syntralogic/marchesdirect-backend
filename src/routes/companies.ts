@@ -39,8 +39,17 @@ router.put('/me', async (req: AuthRequest, res: Response) => {
 
     for (const field of fields) {
       if (req.body[field] !== undefined) {
+        // 27 Sep client audit, point 7: a SIRET saved here with spacing or
+        // punctuation ("123 456 789 00012") never matched the clean
+        // digits-only SIREN that /api/siret/lookup caches company data
+        // under, so this company's own métier could never be resolved from
+        // its cached Pappers/INSEE activity - sanitize the same way that
+        // route already does its own input.
+        const value = field === 'siret' && typeof req.body[field] === 'string'
+          ? req.body[field].replace(/\D/g, '')
+          : req.body[field];
         updates.push(`${field} = $${idx++}`);
-        params.push(req.body[field]);
+        params.push(value);
       }
     }
 
