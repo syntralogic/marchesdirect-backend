@@ -323,6 +323,17 @@ router.post('/bid/:bidId/generate', requireActiveSubscription, async (req: AuthR
     ]);
 
     const company = companyResult.rows[0];
+    if (!company) {
+      // Companies without a profile row (edge case, e.g. an incomplete test
+      // account) crashed here reading company.name below with an opaque
+      // 500 and no indication of what was actually wrong - 3rd client
+      // audit, point 9: "le profil de test étant incomplet, il faut
+      // préciser les informations manquantes".
+      return res.status(400).json({
+        error: 'company_profile_missing',
+        message: 'Complétez le profil de votre entreprise avant de générer ce dossier.',
+      });
+    }
     const availableDocTypes = documentsResult.rows.map((d) => d.document_type);
 
     // Required documents for a standard French public tender response, merged
@@ -452,6 +463,12 @@ router.post('/bid/:bidId/generate-forms', requireActiveSubscription, async (req:
 
     const companyResult = await db.query('SELECT * FROM companies WHERE id = $1', [req.user!.companyId]);
     const company = companyResult.rows[0];
+    if (!company) {
+      return res.status(400).json({
+        error: 'company_profile_missing',
+        message: 'Complétez le profil de votre entreprise avant de générer ce dossier.',
+      });
+    }
     const signatoryName = (req.user!.firstName || req.user!.lastName)
       ? `${req.user!.firstName || ''} ${req.user!.lastName || ''}`.trim()
       : 'non renseigne';
