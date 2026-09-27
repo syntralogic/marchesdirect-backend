@@ -34,15 +34,41 @@ import { logger } from '../utils/logger';
  */
 export const mergeExactDuplicates = async (): Promise<number> => {
   try {
+    // 27 Sep client audit, point 8: consultation "2026-38EP" (Épernay, CVC
+    // maintenance) surfaced three times - the client themselves confirmed
+    // two of the three fiches shared the same title, buyer and échéance.
+    // Those two should have been caught by this exact-match pass already,
+    // so something about a straight `=` comparison let a genuinely
+    // identical pair through:
+    //  - title/buyer_name: two ingestions of the SAME notice (a connector
+    //    re-run, or the same tender re-surfacing via a second open-data
+    //    feed) don't always re-typeset it byte-for-byte - accents encoded
+    //    differently, doubled internal whitespace, a trailing space one
+    //    feed drops and the other keeps. lower(trim(...)) alone still
+    //    treats those as different groups.
+    //  - deadline: stored as a timestamp, but a "date de remise des plis"
+    //    is a calendar date - two feeds can legitimately parse the exact
+    //    same stated deadline into 2026-10-05T00:00:00 vs
+    //    2026-10-05T22:00:00 depending on which timezone/EOD convention
+    //    each parser assumes, which a strict `=` treats as different.
+    // unaccent()+collapsed-whitespace on title/buyer_name and truncating
+    // deadline to the day closes both gaps. estimated_value is left as a
+    // strict comparison on purpose - it's the signal that keeps a genuine
+    // update (a rectificatif that revises the montant) or a different lot
+    // of the same tender from being folded into this same group; per the
+    // client's own ask ("en distinguant ses éventuelles mises à jour et ses
+    // lots"), only rows identical on every field that matters to a visitor
+    // get merged here, so a real update or lot - which will differ on at
+    // least one of these - simply won't form a group and stays visible.
     const groups = await db.query(`
       SELECT array_agg(id ORDER BY created_at ASC) AS ids
       FROM opportunities
       WHERE deleted_at IS NULL AND status NOT IN ('cancelled', 'expired', 'merged')
       GROUP BY
-        lower(trim(title)),
-        deadline,
+        regexp_replace(lower(unaccent(trim(title))), '\\s+', ' ', 'g'),
+        date_trunc('day', deadline),
         estimated_value,
-        lower(trim(COALESCE(buyer_name, '')))
+        regexp_replace(lower(unaccent(trim(COALESCE(buyer_name, '')))), '\\s+', ' ', 'g')
       HAVING COUNT(*) > 1
       LIMIT 500
     `);

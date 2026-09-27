@@ -117,6 +117,40 @@ export function extractLotTradeSlugs(title: string | null | undefined): string[]
   return extractTradeSlugs(m[1]);
 }
 
+// ============================================================================
+// KEYWORDS FOR A TRADE (métier category browsing)
+//
+// 27 Sep client audit, point 7: "Nettoyage" browsed as a category showed 134
+// (all private) results, while typing "nettoyage" in the search box found
+// 147 more, public, notices too. Cause: the category/métier filter
+// (opportunities.ts's trade_id condition) only ever matches o.trade_id or
+// ai_matched_trades - both are ONLY ever written by classifyOpportunity(),
+// an AI call that runs asynchronously, in small batches, well after a notice
+// is first ingested (see aiProcessing.ts). BOAMP/PLACE ingest thousands of
+// public notices per run; until the batch job catches up, a freshly-ingested
+// public notice sits at ai_classification_status='not_analyzed' - invisible
+// to any métier filter - while the free-text search (q param) matches
+// straight off title/description and finds it immediately. That backlog
+// skews public listings specifically (private/tender sources are lower
+// volume, so their queue drains faster), which is exactly the "toutes
+// privées" symptom reported.
+//
+// keywordsForSlugs() exposes the same KEYWORD_TRADE_SLUG vocabulary
+// classifyOpportunity's own text-inference already trusts, so the category
+// filter can fall back to a direct keyword hit on title/description - the
+// same standard this route already applies to a manually-typed word - for
+// exactly the not-yet-classified rows the AI hasn't reached yet, without
+// waiting on the batch job or inventing a second classification vocabulary.
+export function keywordsForSlug(slug: string): string[] {
+  return Object.keys(KEYWORD_TRADE_SLUG).filter((k) => KEYWORD_TRADE_SLUG[k] === slug);
+}
+
+export function keywordsForSlugs(slugs: string[]): string[] {
+  const found = new Set<string>();
+  for (const slug of slugs) for (const kw of keywordsForSlug(slug)) found.add(kw);
+  return [...found];
+}
+
 /** Canonical trade rows for a set of slugs, in no particular order -
  * used to turn extractLotTradeSlugs()'s output back into real trade ids. */
 export async function findTradesBySlugs(slugs: string[]): Promise<ResolvedTrade[]> {

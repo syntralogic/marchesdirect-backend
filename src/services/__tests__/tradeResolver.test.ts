@@ -1,4 +1,4 @@
-import { findTradeByName, resolveTradeFromText, extractLotTradeSlugs, findTradesBySlugs } from '../tradeResolver';
+import { findTradeByName, resolveTradeFromText, extractLotTradeSlugs, findTradesBySlugs, keywordsForSlug, keywordsForSlugs } from '../tradeResolver';
 
 jest.mock('../../config/database', () => ({
   db: {
@@ -81,5 +81,28 @@ describe('findTradesBySlugs', () => {
 
   it('returns [] for an empty input without querying', async () => {
     expect(await findTradesBySlugs([])).toEqual([]);
+  });
+});
+
+// 27 Sep client audit, point 7: category browsing ("Nettoyage") must find
+// the same notices a keyword search for that word does, even before the AI
+// classification batch job has reached them.
+describe('keywordsForSlug / keywordsForSlugs', () => {
+  it('returns every keyword that maps to a given trade slug', () => {
+    expect(keywordsForSlug('nettoyage').sort()).toEqual(['nettoyage', 'proprete'].sort());
+    expect(keywordsForSlug('cvc').sort()).toEqual(
+      ['chauffage', 'ventilation', 'climatisation', 'cvc', 'chaudiere', 'chauffagiste', 'frigorifique'].sort()
+    );
+  });
+
+  it('returns [] for a slug with no keyword entry', () => {
+    expect(keywordsForSlug('does-not-exist')).toEqual([]);
+  });
+
+  it('merges and dedupes keywords across several slugs', () => {
+    const keywords = keywordsForSlugs(['nettoyage', 'espaces-verts']);
+    expect(keywords).toContain('nettoyage');
+    expect(keywords).toContain('paysager');
+    expect(new Set(keywords).size).toBe(keywords.length);
   });
 });
