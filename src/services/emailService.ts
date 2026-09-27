@@ -26,7 +26,19 @@ interface EmailPayload {
   attachments?: EmailAttachment[];
 }
 
-export const sendEmail = async ({ to, subject, html, attachments }: EmailPayload): Promise<void> => {
+// Passage concordance -> dossier, point 5 (27 Sep audit): "Un message
+// 'Dossier envoyé' affiché sur le site ne suffit pas à valider ce
+// fonctionnement." This was more than a testing gap - it was a real bug:
+// sendEmail used to return void, so a caller telling the frontend
+// "dossierEmailed: true" only meant "no exception was thrown", which is
+// also true of the no-API-key branch above that never actually calls
+// Resend. A visitor with a correctly-processed request could see "Votre
+// dossier vient d'être envoyé" while nothing was sent to their inbox,
+// silently, whenever RESEND_API_KEY isn't set in this environment.
+// Returning a real boolean - true only once Resend's API has accepted the
+// request - lets prefilledDossierService (and any future caller) report
+// delivery honestly instead of conflating "didn't throw" with "was sent".
+export const sendEmail = async ({ to, subject, html, attachments }: EmailPayload): Promise<boolean> => {
   const apiKey = process.env.RESEND_API_KEY;
   const from = process.env.EMAIL_FROM || 'Marchés Direct <onboarding@resend.dev>';
 
@@ -36,7 +48,7 @@ export const sendEmail = async ({ to, subject, html, attachments }: EmailPayload
     // magic-link feature silently doing nothing.
     const attachmentNote = attachments?.length ? ` [${attachments.length} attachment(s): ${attachments.map(a => a.filename).join(', ')}]` : '';
     logger.warn(`EMAIL (not sent - no RESEND_API_KEY configured) to=${to} subject="${subject}"${attachmentNote}\n${html}`);
-    return;
+    return false;
   }
 
   try {
@@ -58,6 +70,7 @@ export const sendEmail = async ({ to, subject, html, attachments }: EmailPayload
       const body = await res.text();
       throw new Error(`Resend API ${res.status}: ${body}`);
     }
+    return true;
   } catch (err) {
     logger.error(`Failed to send email to ${to}:`, err);
     throw err;

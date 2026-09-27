@@ -100,13 +100,17 @@ export async function sendPrefilledDossierEmail(
       <p>Vous pouvez retrouver ce document et la suite de votre accompagnement à tout moment depuis la page "Votre dossier" de cette opportunité.</p>
       <p>— L'équipe Marchés Direct</p>
     `;
-    await sendEmail({
+    // 27 Sep audit, point 5: propagate the real Resend result instead of
+    // returning true just because sendEmail didn't throw - see the comment
+    // in emailService.ts. A misconfigured/no-op send (no RESEND_API_KEY)
+    // now correctly reports dossierEmailed: false to the caller, instead of
+    // the site claiming "Dossier envoyé" for a message nobody received.
+    return await sendEmail({
       to,
       subject: `Votre dossier pré-rempli - ${input.opportunityTitle}`,
       html,
       attachments: [{ filename: 'dossier-pre-rempli.pdf', content: pdf }],
     });
-    return true;
   } catch (err) {
     logger.error('Prefilled dossier email failed (non-fatal):', err);
     return false;
