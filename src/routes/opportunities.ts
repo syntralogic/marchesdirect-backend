@@ -574,8 +574,19 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       }
     }
     if (trade_id) {
-      conditions.push(`o.trade_id = $${idx++}`);
-      params.push(trade_id);
+      // 26 Sep: the homepage's métier search lets a visitor pick several
+      // métiers at once (Électricité + Étanchéité + Peinture) and expects an
+      // OR - a listing matching any one of them, never duplicated (trade_id
+      // is a single scalar column per opportunity, so IN(...) can't produce
+      // duplicate rows). A lone id keeps working exactly as before.
+      const ids = String(trade_id).split(',').map((v) => v.trim()).filter(Boolean);
+      if (ids.length === 1) {
+        conditions.push(`o.trade_id = $${idx++}`);
+        params.push(ids[0]);
+      } else if (ids.length > 1) {
+        conditions.push(`o.trade_id = ANY($${idx++}::int[])`);
+        params.push(ids.map(Number));
+      }
     }
     if (region) {
       // Client's map lets several regions be selected at once (e.g.
