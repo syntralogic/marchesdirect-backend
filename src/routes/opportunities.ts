@@ -379,6 +379,24 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     // about undoing deduplication. Without this, merged duplicates that
     // were already fixed once (see dedup commit) silently reappear here.
     const conditions: string[] = ["o.deleted_at IS NULL", "COALESCE(o.status, '') != 'merged'"];
+    // 27 Sep client report, point 5: "France entière" surfacing
+    // Roumanie/Espagne/Italie notices. TED (joined via data_sources below)
+    // is the one connector that isn't France-only by construction - every
+    // other source (BOAMP/PLACE/DECP/Batiweb) only ever fetches French
+    // notices in the first place, so this only ever restricts TED rows,
+    // never the others. Applied unconditionally (not just in the
+    // no-region/no-department "select all" branch) so a region/department/
+    // radius search can't accidentally surface a foreign TED row either -
+    // TED never sets location_region/department anyway (see its own
+    // location_region comment in dataCollectionService.ts), so this is the
+    // only lever that can exclude it. 'FR'/'FRA' both accepted since TED's
+    // buyer-country isn't stored in one single canonical ISO form (see
+    // location_country's own comment there) - a NULL location_country on a
+    // TED row (not yet backfilled/re-fetched with the 27 Sep fix, or
+    // genuinely unknown) is treated as unconfirmed and excluded rather
+    // than assumed French, the same "don't guess, exclude the unconfirmed
+    // one" call already made for the geocoding score check.
+    conditions.push("(ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))");
     const params: any[] = [];
     let idx = 1;
     // Captured when the q filter below builds its tsvector/tsquery match,
@@ -971,6 +989,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
        FROM opportunities o
        LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
        LEFT JOIN trades t ON o.trade_id = t.id
+       LEFT JOIN data_sources ds ON o.source_id = ds.id
        ${naturePrestationLateral('o')}
        WHERE ${whereClause}
        ORDER BY ${orderClause}
@@ -983,6 +1002,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
        FROM opportunities o
        LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
        LEFT JOIN trades t ON o.trade_id = t.id
+       LEFT JOIN data_sources ds ON o.source_id = ds.id
        ${naturePrestationLateral('o')}
        WHERE ${whereClause}`,
       params
@@ -1077,7 +1097,14 @@ router.get('/stats/counts', async (req: Request, res: Response) => {
     // 'merged' exclusion - deduplicationService.ts's internal marker for
     // the losing side of a duplicate pair, never a real-world status) so
     // this can never disagree with what an unfiltered search shows.
-    const conditions: string[] = ["o.deleted_at IS NULL", "COALESCE(o.status, '') != 'merged'"];
+    // 27 Sep client report, point 5: same TED-only country guard as the
+    // main search route above, kept here too so these hero-tile totals
+    // never promise a count the (now-filtered) list can't actually show.
+    const conditions: string[] = [
+      "o.deleted_at IS NULL",
+      "COALESCE(o.status, '') != 'merged'",
+      "(ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))",
+    ];
     const params: any[] = [];
     if (status) {
       const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
@@ -1091,6 +1118,7 @@ router.get('/stats/counts', async (req: Request, res: Response) => {
       `SELECT ot.code AS journey, COUNT(*)::int AS count
        FROM opportunities o
        LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+       LEFT JOIN data_sources ds ON o.source_id = ds.id
        ${where}
        GROUP BY ot.code`,
       params

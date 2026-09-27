@@ -71,6 +71,65 @@ const OLD_TO_NEW_REGION: Record<string, string> = {
 const stripAccents = (s: string): string =>
   s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
+// 27 Sep client report, point 6: a "climatisation" search under France
+// entière surfaced a Gironde préfecture maintenance notice; selecting the
+// Gironde department made it disappear. Root cause: some sources (PLACE's
+// undocumented API shape, some BOAMP notices, buyer/profil-acheteur text)
+// give the department as its official NAME ("Gironde") rather than its
+// INSEE code ("33") - normalizeDepartmentCode only ever recognized codes,
+// so a name fell through every normalization attempt and got stored
+// verbatim (see normalizeBoampRecord: `normalizeDepartmentCode(f.departement)
+// || f.departement || ...`). The name then sat in location_department
+// looking populated, but never matched the code-based ANY(...) the
+// department filter builds (opportunities.ts) - visible with no filter,
+// invisible the moment a department was actually selected. Official INSEE
+// department name -> code table (101 départements: 96 metropolitan +
+// Corse split into 2A/2B + 5 overseas), keyed the same
+// lowercased/unaccented way as CURRENT_REGION_BY_KEY above so accent/case
+// differences in source data don't matter either.
+const DEPARTMENT_NAME_TO_CODE: Record<string, string> = {
+  'ain': '01', 'aisne': '02', 'allier': '03', 'alpes-de-haute-provence': '04',
+  'hautes-alpes': '05', 'alpes-maritimes': '06', 'ardeche': '07', 'ardennes': '08',
+  'ariege': '09', 'aube': '10', 'aude': '11', 'aveyron': '12',
+  'bouches-du-rhone': '13', 'calvados': '14', 'cantal': '15', 'charente': '16',
+  'charente-maritime': '17', 'cher': '18', 'correze': '19',
+  'corse-du-sud': '2A', 'haute-corse': '2B',
+  "cote-d'or": '21', 'cote-dor': '21', 'cotes-darmor': '22', "cotes-d'armor": '22',
+  'creuse': '23', 'dordogne': '24', 'doubs': '25', 'drome': '26', 'eure': '27',
+  'eure-et-loir': '28', 'finistere': '29', 'gard': '30', 'haute-garonne': '31',
+  'gers': '32', 'gironde': '33', 'herault': '34', 'ille-et-vilaine': '35',
+  'indre': '36', 'indre-et-loire': '37', 'isere': '38', 'jura': '39',
+  'landes': '40', 'loir-et-cher': '41', 'loire': '42', 'haute-loire': '43',
+  'loire-atlantique': '44', 'loiret': '45', 'lot': '46', 'lot-et-garonne': '47',
+  'lozere': '48', 'maine-et-loire': '49', 'manche': '50', 'marne': '51',
+  'haute-marne': '52', 'mayenne': '53', 'meurthe-et-moselle': '54', 'meuse': '55',
+  'morbihan': '56', 'moselle': '57', 'nievre': '58', 'nord': '59', 'oise': '60',
+  'orne': '61', 'pas-de-calais': '62', 'puy-de-dome': '63',
+  'pyrenees-atlantiques': '64', 'hautes-pyrenees': '65', 'pyrenees-orientales': '66',
+  'bas-rhin': '67', 'haut-rhin': '68', 'rhone': '69', 'haute-saone': '70',
+  'saone-et-loire': '71', 'sarthe': '72', 'savoie': '73', 'haute-savoie': '74',
+  'paris': '75', 'seine-maritime': '76', 'seine-et-marne': '77', 'yvelines': '78',
+  'deux-sevres': '79', 'somme': '80', 'tarn': '81', 'tarn-et-garonne': '82',
+  'var': '83', 'vaucluse': '84', 'vendee': '85', 'vienne': '86',
+  'haute-vienne': '87', 'vosges': '88', 'yonne': '89', 'territoire de belfort': '90',
+  'territoire-de-belfort': '90', 'essonne': '91', 'hauts-de-seine': '92',
+  'seine-saint-denis': '93', 'val-de-marne': '94', "val-d'oise": '95', 'val-doise': '95',
+  'guadeloupe': '971', 'martinique': '972', 'guyane': '973', 'la reunion': '974',
+  'reunion': '974', 'mayotte': '976',
+};
+
+// Some sources prefix the name ("Département de la Gironde", "Dept.
+// Gironde") instead of sending it bare - strip the common French
+// department-word prefixes before the name-table lookup so those still
+// resolve instead of only matching the exact bare name.
+const DEPARTMENT_PREFIX_RE = /^(departement|dept\.?|dpt\.?)\s+(de\s+la|de\s+l'|de\s+l|du|des|de|d')\s+/;
+
+function departmentCodeFromName(raw: string): string | null {
+  let key = stripAccents(raw.trim().toLowerCase());
+  key = key.replace(DEPARTMENT_PREFIX_RE, '').trim();
+  return DEPARTMENT_NAME_TO_CODE[key] || null;
+}
+
 // Canonical current region names, keyed by their own lowercased/unaccented
 // form - lets a source's own accenting/casing quirks (confirmed real,
 // see seed.js above) resolve to the correct current name too, not just
@@ -113,6 +172,11 @@ export function regionForDepartmentCode(raw: string | null | undefined): string 
 
   if (DEPARTMENT_TO_REGION[code]) return DEPARTMENT_TO_REGION[code];
 
+  // A department NAME rather than a code ("Gironde" instead of "33") - see
+  // DEPARTMENT_NAME_TO_CODE's comment above for why sources send this.
+  const byName = departmentCodeFromName(String(raw));
+  if (byName && DEPARTMENT_TO_REGION[byName]) return DEPARTMENT_TO_REGION[byName];
+
   // Overseas department padded to 3 digits ("971" etc.) sometimes arrives
   // as "1" from a numeric column that dropped the leading zeros.
   if (/^\d{1,3}$/.test(code)) {
@@ -140,6 +204,15 @@ export function normalizeDepartmentCode(raw: string | null | undefined): string 
   const code = String(raw).trim().toUpperCase();
 
   if (DEPARTMENT_TO_REGION[code]) return code;
+
+  // A department NAME rather than a code - see DEPARTMENT_NAME_TO_CODE's
+  // comment above. Checked before the numeric-shape branches below since a
+  // name never matches those patterns anyway, but ordering it first keeps
+  // this function's two forks (code-shaped vs name-shaped input) visually
+  // separate.
+  const byName = departmentCodeFromName(String(raw));
+  if (byName) return byName;
+
   if (/^\d{1,3}$/.test(code)) {
     const padded3 = code.padStart(3, '0');
     if (DEPARTMENT_TO_REGION[padded3]) return padded3;
