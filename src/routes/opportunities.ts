@@ -1012,8 +1012,28 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     // runs, so a result card never disagrees with its own fiche (25 Sep
     // audit follow-up). ai_extracted_facts/raw_data were only selected to
     // compute this and are never part of the list payload.
+    //
+    // 2nd 27 Sep client audit, point 8: "un retour aux résultats publics a
+    // affiché une erreur de chargement", cause not identifiable from the
+    // browser. reconcileOfficialFields ran here with no per-row isolation -
+    // unlike every other per-item enrichment step in this file
+    // (ensureFactsExtracted, ensureAnalysisSectionsGenerated, ensureClassified,
+    // ensureSummaryGenerated all already isolate their own failures), one
+    // malformed row (an unexpected ai_extracted_facts/raw_data shape from
+    // whichever source produced it - BOAMP/PLACE/TED/DECP each have their
+    // own quirks) threw and took the ENTIRE page of results down with it.
+    // "Marchés publics" is by far this platform's largest and most
+    // heterogeneous dataset (real government feeds vs. the small curated
+    // Appels d'offres/Sous-traitance demo listings) - exactly why a visitor
+    // would hit this there and not on the other two journeys. Isolating it
+    // per row means one bad row now just keeps its raw (un-reconciled)
+    // column values instead of failing the other 99.
     for (const row of listResult.rows) {
-      reconcileOfficialFields(row);
+      try {
+        reconcileOfficialFields(row);
+      } catch (err) {
+        logger.warn(`reconcileOfficialFields failed for opportunity ${row.id} in a list response: ${err instanceof Error ? err.message : err}`);
+      }
       delete row.ai_extracted_facts;
       delete row.raw_data;
     }
@@ -1029,7 +1049,13 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     logger.error('Opportunities search error:', err);
-    res.status(500).json({ error: 'Failed to search opportunities' });
+    // 2nd 27 Sep audit, point 8: same fix as the fiche detail route's own
+    // 27 Sep audit point 6 - this used to send only `error` (a raw English
+    // string), which getApiErrorMessage on the frontend falls back to
+    // verbatim when no `message` is present, so a visitor whose results
+    // page failed to load saw "Failed to search opportunities" rather than
+    // French copy.
+    res.status(500).json({ error: 'search_failed', message: 'Impossible de charger les opportunités. Réessayez.' });
   }
 });
 
@@ -1409,7 +1435,22 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     opportunity.ai_analysis_sections = analysisSections;
     // One value per official data point across header, details and score
     // (see utils/officialFields.ts).
-    reconcileOfficialFields(opportunity);
+    //
+    // 2nd 27 Sep client audit, point 8: a fiche ("Vallespir") that failed
+    // to load, still failing after a reload - unlike the other enrichment
+    // calls just above (ensureFactsExtracted etc., all already isolate
+    // their own failures - see their own try/catch), an exception here
+    // took the whole detail request down every single time, which is
+    // exactly the "still fails after reload" symptom of a genuinely bad
+    // row rather than a transient blip. Same isolation as the list route's
+    // own per-row reconcileOfficialFields call just above in this file -
+    // a fiche that hits this now still renders with its raw column values
+    // instead of a dead end.
+    try {
+      reconcileOfficialFields(opportunity);
+    } catch (err) {
+      logger.warn(`reconcileOfficialFields failed for opportunity ${opportunity.id} on its own detail view: ${err instanceof Error ? err.message : err}`);
+    }
     await ensureTradeResolved(opportunity);
     kickOffDocumentIngestionIfPending(opportunity.id, opportunity.dce_documents_status);
 
