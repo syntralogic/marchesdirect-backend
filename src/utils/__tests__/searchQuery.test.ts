@@ -149,6 +149,14 @@ describe('domainMismatchExclusion (27 Sep client audit, point 3: keyword hit, wr
     expect(rule!.test('mise en conformite electrique du tableau general basse tension')).toBe(false);
   });
 
+  it('"voirie"/"vrd" reject a bare snow-clearing-equipment rental notice, not real roadwork (3rd client audit, point 6)', () => {
+    const rule = domainMismatchExclusion('voirie');
+    expect(rule).not.toBeNull();
+    expect(rule!.test('location de materiel de deneigement sans chauffeur')).toBe(true);
+    expect(rule!.test('refection de voirie et reseaux divers du lotissement')).toBe(false);
+    expect(domainMismatchExclusion('vrd')).not.toBeNull();
+  });
+
   it('returns null for a word with no domain-mismatch rule', () => {
     expect(domainMismatchExclusion('peintre')).toBeNull();
     expect(domainMismatchExclusion('bordeaux')).toBeNull();
