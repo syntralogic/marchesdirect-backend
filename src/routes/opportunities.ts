@@ -1372,7 +1372,11 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     res.json(opportunity);
   } catch (err: any) {
     logger.error('Opportunity detail error:', err);
-    res.status(500).json({ error: 'Failed to fetch opportunity' });
+    // 27 Sep audit, point 6: this raw English string was reaching the
+    // visitor verbatim via getApiErrorMessage (which prefers data.message,
+    // then data.error) - same fix pattern as company_lookup_throttled
+    // below: machine code in `error`, the actual French text in `message`.
+    res.status(500).json({ error: 'opportunity_fetch_failed', message: 'Impossible de charger cette annonce. Réessayez.' });
   }
 });
 
