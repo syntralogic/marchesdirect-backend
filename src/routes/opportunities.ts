@@ -574,18 +574,28 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       }
     }
     if (trade_id) {
-      // 26 Sep: the homepage's métier search lets a visitor pick several
-      // métiers at once (Électricité + Étanchéité + Peinture) and expects an
-      // OR - a listing matching any one of them, never duplicated (trade_id
-      // is a single scalar column per opportunity, so IN(...) can't produce
-      // duplicate rows). A lone id keeps working exactly as before.
-      const ids = String(trade_id).split(',').map((v) => v.trim()).filter(Boolean);
+      // Merges two same-day fixes:
+      // - 26 Sep client audit (point 4): "Carrelage : 9 résultats, en tapant
+      //   « carrelage » : 317" - classifyOpportunity (aiService.ts) keeps
+      //   every trade the AI recognised in ai_matched_trades, but trade_id
+      //   only ever stores the single highest-confidence one, so a strict
+      //   trade_id = $X silently excluded every notice whose PRIMARY trade
+      //   was something else. Matching ai_matched_trades too closes that gap.
+      // - 26 Sep spec: the homepage's métier search lets a visitor pick
+      //   several métiers at once (Électricité + Étanchéité + Peinture) - an
+      //   OR across them, never duplicated (o.trade_id is a single scalar
+      //   column, so ANY(...) can't produce duplicate rows by itself).
+      const ids = String(trade_id).split(',').map((v) => v.trim()).filter(Boolean).map(Number).filter((n) => Number.isFinite(n));
       if (ids.length === 1) {
-        conditions.push(`o.trade_id = $${idx++}`);
+        conditions.push(`(o.trade_id = $${idx} OR unaccent(o.ai_matched_trades::text) ILIKE unaccent('%' || (SELECT name FROM trades WHERE id = $${idx}) || '%'))`);
         params.push(ids[0]);
+        idx++;
       } else if (ids.length > 1) {
-        conditions.push(`o.trade_id = ANY($${idx++}::int[])`);
-        params.push(ids.map(Number));
+        conditions.push(
+          `(o.trade_id = ANY($${idx}::int[]) OR EXISTS (SELECT 1 FROM trades tr WHERE tr.id = ANY($${idx}::int[]) AND unaccent(o.ai_matched_trades::text) ILIKE unaccent('%' || tr.name || '%')))`
+        );
+        params.push(ids);
+        idx++;
       }
     }
     if (region) {
@@ -714,6 +724,15 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         params.push(Array.from(departmentVariants));
       }
     }
+    // Client (26 Sep audit, point 10): "le site accepte 100 000 € minimum
+    // et 10 000 € maximum, puis affiche zéro résultat sans expliquer
+    // l'erreur." An inverted range isn't "no opportunities happen to
+    // match" - it's a range that can never match anything, and deserves a
+    // real error instead of a silently empty list indistinguishable from a
+    // genuine no-results search.
+    if (min_value && max_value && parseFloat(min_value) > parseFloat(max_value)) {
+      return res.status(400).json({ error: 'Le montant minimum doit être inférieur ou égal au montant maximum.' });
+    }
     if (min_value) {
       conditions.push(`o.estimated_value >= $${idx++}`);
       params.push(min_value);
@@ -820,7 +839,19 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       ? `ts_rank(${searchVectorExpr}, to_tsquery('french', unaccent($${tsRankParamIdx}))) DESC, `
       : '';
     let orderClause = `${relevanceTiebreak}${DEFAULT_ORDER}`;
-    if (sort === 'recent') {
+    if (sort === 'deadline') {
+      // Client (26 Sep audit, point 10): "climatisation" search, "Échéance
+      // proche (défaut)" selected, a 28 septembre notice appeared AFTER a
+      // 7 octobre one. Root cause: 'deadline' fell through to the same
+      // branch as no sort at all, which - whenever a text query was
+      // present - put the relevance tiebreak (ts_rank) AHEAD of the
+      // deadline, so two notices with different relevance scores were
+      // never actually compared by date first. A visitor who explicitly
+      // chose "closest deadline" gets pure chronological order, full stop -
+      // relevance has no business ranking it ahead of the one thing this
+      // sort promises.
+      orderClause = DEFAULT_ORDER;
+    } else if (sort === 'recent') {
       orderClause = `o.publication_date DESC NULLS LAST, o.id ASC`;
     } else if (sort === 'match') {
       // Relevance only means something with a text query to rank against;
@@ -956,17 +987,63 @@ const extractSourceUrl = (rawData: any): string | null => {
 // for the homepage/dashboard counters. Client's report (WhatsApp): three
 // different numbers appeared across the homepage (~3,421, hardcoded),
 // dashboard (~2,940) and search (46,000+), with no way to tell what each
-// one represented. Uses opportunity_search_index with the exact same
-// scope the main search route uses (deadline-based hiding removed
-// 2026-09-09 - closed/awarded rows are labeled by the frontend now
-// instead of being excluded), so this can never disagree with what
-// clicking through to a category actually shows.
+// one represented.
+//
+// 27 Sep fix (client report: "Marchés publics" tile fell to 9 775 while the
+// general search - no filters - showed 72 173): this used to read from
+// opportunity_search_index to match the main search route's scope, but the
+// main search route (see its own 20 Sep comment above, "Reading straight
+// off `opportunities` instead removes that ceiling") was switched to read
+// straight off the `opportunities` base table and never came back here to
+// match. Since then this route was silently counting off the materialized
+// view instead - correct only exactly as of its last successful
+// REFRESH/rebuild, and free to drift arbitrarily far behind the live table
+// in between (a missed/failed cron refresh on Render's free tier, or the
+// view simply lagging a fast-growing table). Reading the same base table
+// with the same conditions as the search route is what "can never disagree
+// with what clicking through to a category actually shows" actually
+// requires now - matching /stats/regions and /stats/departments, which
+// already made this same switch.
+//
+// 26 Sep client audit (point 3, remaining part flagged in 971d601's own
+// commit message): the HeroCounters "Marchés publics" tile links to
+// ?status=TousStatuts and correctly shows this same all-statuses total -
+// but the OpportunityPaths tile right below it (same title, same count)
+// links to /parcours instead, whose guided journey is - by design, see
+// e01238b's "le marché lui-même reste ouvert" - active-only and never
+// shows closed/awarded markets. That tile was promising the all-statuses
+// number for a destination that only ever shows the active-only one,
+// which is exactly the "chiffre annoncé doit suivre la même règle que la
+// liste ouverte" mismatch this client audit is about, just for a
+// different tile than the one 971d601 already fixed. Rather than change
+// /parcours's deliberate active-only scope, this adds an optional
+// `status` filter so a caller can ask for the active-only cut of the same
+// counts - no `status` param keeps returning today's all-statuses total,
+// unchanged, for HeroCounters/the map.
 router.get('/stats/counts', async (req: Request, res: Response) => {
   try {
+    const { status } = req.query as Record<string, string>;
+    // Same base conditions as the main search route (deleted_at + the
+    // 'merged' exclusion - deduplicationService.ts's internal marker for
+    // the losing side of a duplicate pair, never a real-world status) so
+    // this can never disagree with what an unfiltered search shows.
+    const conditions: string[] = ["o.deleted_at IS NULL", "COALESCE(o.status, '') != 'merged'"];
+    const params: any[] = [];
+    if (status) {
+      const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
+      if (statuses.length > 0) {
+        conditions.push(`o.status = ANY($1::text[])`);
+        params.push(statuses);
+      }
+    }
+    const where = `WHERE ${conditions.join(' AND ')}`;
     const result = await db.query(
-      `SELECT opportunity_type AS journey, COUNT(*)::int AS count
-       FROM opportunity_search_index
-       GROUP BY opportunity_type`
+      `SELECT ot.code AS journey, COUNT(*)::int AS count
+       FROM opportunities o
+       LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+       ${where}
+       GROUP BY ot.code`,
+      params
     );
     const byJourney: Record<string, number> = {};
     let total = 0;
