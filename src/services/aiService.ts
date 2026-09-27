@@ -1376,18 +1376,43 @@ export const generateOpportunityAnalysisSections = async (
     ? `${Number(opp.estimated_value).toLocaleString('fr-FR', { maximumFractionDigits: 0 })} EUR`
     : 'non communiqué';
 
+  // 2nd 27 Sep client audit, point 3 ("des informations se contredisent
+  // dans une même fiche"): Épernay's "conditions" accordion said duration
+  // wasn't specified while the page's own "Détails du dossier" block (fed
+  // by extractOpportunityFacts's contract_duration, a separate AI call
+  // with its own, fuller pass over the source) showed 2 years; a
+  // Saint-Étienne fiche's accordion said no amount was specified even
+  // though the page header showed 1 600 000 €. Root cause: this prompt
+  // never saw contract_duration (or the other already-extracted facts) at
+  // all, and even for estimated_value - which it DID already receive below
+  // - nothing told the model that value was to be treated as settled
+  // rather than re-derived, so it could still write "non précisé" against
+  // its own given input. Pulling the already-persisted facts in here and
+  // telling the model they're confirmed (not to be second-guessed or
+  // contradicted) closes both cases without a second source of truth.
+  const facts = (opp.ai_extracted_facts || {}) as Record<string, { value?: string; available?: boolean } | undefined>;
+  const factText = (f?: { value?: string; available?: boolean }): string =>
+    f && f.available && f.value ? f.value : 'non communiqué(e)';
+  const confirmedFactsBlock = `Contract Duration (déjà confirmée): ${factText(facts.contract_duration)}
+Allotment / Lots (déjà confirmé): ${factText(facts.allotment)}
+Submission Method (déjà confirmée): ${factText(facts.submission_method)}
+Technical Visit (déjà confirmée): ${factText(facts.technical_visit)}`;
+
   const systemPrompt = `Tu es un analyste de marchés publics/privés français. À partir de la fiche source ci-dessous, rédige exactement 3 sections destinées à 3 accordéons fixes sur la page d'une opportunité. Chaque section fait 2 à 5 phrases, en français courant, texte brut (aucun markdown, aucun titre répété dans le texte).
 
 1. presentation ("Présentation du marché") : l'objet du marché, les prestations demandées et le périmètre de la mission.
-2. conditions ("Conditions et points à vérifier") : calendrier (dates clés), exigences, critères de sélection et contraintes à connaître avant de candidater.
+2. conditions ("Conditions et points à vérifier") : calendrier (dates clés, durée du contrat), exigences, critères de sélection, modalités de dépôt, visite éventuelle et contraintes à connaître avant de candidater.
 3. entreprises ("Entreprises concernées") : les métiers et profils d'entreprises concernés par ce marché. Décris uniquement le type d'entreprise auquel ce marché correspond a priori (taille, secteur, spécialité) - ne certifie jamais qu'une entreprise est éligible, puisque l'éligibilité réelle dépend de critères que tu ne peux pas vérifier.
 
-RÈGLE STRICTE : n'utilise que ce qui est réellement présent dans la source ci-dessous. Si une section manque d'information dans la source (ex : aucune exigence mentionnée, aucun montant), dis-le explicitement dans cette section plutôt que d'inventer un contenu plausible.`;
+RÈGLE STRICTE : n'utilise que ce qui est réellement présent dans la source ci-dessous. Si une section manque d'information dans la source (ex : aucune exigence mentionnée, aucun montant), dis-le explicitement dans cette section plutôt que d'inventer un contenu plausible.
+
+RÈGLE DE COHÉRENCE : les champs marqués "(déjà confirmée)" ou "(déjà confirmé)" ci-dessous (Deadline, Estimated Value, Contract Duration, Allotment, Submission Method, Technical Visit) ont déjà été extraits et vérifiés depuis la même source pour d'autres parties de la fiche. Si l'un de ces champs a une valeur autre que "non communiqué(e)", tu DOIS la reprendre fidèlement dans la section concernée et ne jamais écrire qu'elle est absente, non précisée ou non communiquée - ce serait une contradiction avec le reste de la fiche.`;
 
   const userMessage = `Title: ${opp.title}
 Description: ${opp.description || ''}
-Deadline: ${deadlineText}
-Estimated Value: ${estimatedValueText}
+Deadline (déjà confirmée): ${deadlineText}
+Estimated Value (déjà confirmée): ${estimatedValueText}
+${confirmedFactsBlock}
 Location: ${opp.location_city || ''}, ${opp.location_region || ''}
 Raw source payload: ${opp.raw_data ? extractRawDataContext(opp.raw_data, 2000) : '{}'}`;
 
