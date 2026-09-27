@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { suggestPhrases } from '../services/tradeSuggestions';
 
 const router = Router();
 
@@ -34,6 +35,34 @@ router.get('/', async (req: Request, res: Response) => {
   } catch (err: any) {
     logger.error('Trades list error:', err);
     res.status(500).json({ error: 'Failed to fetch trades' });
+  }
+});
+
+// GET /api/trades/suggestions?q=... - "Rechercher par métier ou secteur
+// d'activité" autocomplete (26 Sep spec). Must come before /:slug below, or
+// a request for /suggestions would be swallowed as slug="suggestions".
+router.get('/suggestions', async (req: Request, res: Response) => {
+  try {
+    const q = String(req.query.q || '');
+    const phrases = suggestPhrases(q);
+    if (phrases.length === 0) return res.json([]);
+    const slugs = [...new Set(phrases.map((p) => p.tradeSlug))];
+    const result = await db.query(
+      `SELECT id, slug, name FROM trades WHERE slug = ANY($1::text[])`,
+      [slugs]
+    );
+    const bySlug = new Map(result.rows.map((r) => [r.slug, r]));
+    const suggestions = phrases
+      .map((p) => {
+        const trade = bySlug.get(p.tradeSlug);
+        if (!trade) return null; // catalog/table drifted apart - skip rather than 500
+        return { label: p.label, tradeId: trade.id, tradeSlug: trade.slug, tradeName: trade.name };
+      })
+      .filter((s): s is NonNullable<typeof s> => s !== null);
+    res.json(suggestions);
+  } catch (err: any) {
+    logger.error('Trade suggestions error:', err);
+    res.status(500).json({ error: 'Failed to fetch trade suggestions' });
   }
 });
 
