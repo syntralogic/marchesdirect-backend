@@ -9,7 +9,7 @@ import { tokenizeQuery, tsqueryAlternatives, isTradeWord, matchTermsOf, domainMi
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts, generateOpportunityAnalysisSections } from '../services/aiService';
 import { ingestOpportunityDocuments } from '../services/documentIngestionService';
 import { computeMatchScore } from '../services/matchScoreService';
-import { resolveTradeFromText } from '../services/tradeResolver';
+import { resolveTradeFromText, keywordsForSlugs } from '../services/tradeResolver';
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { geocodeCity } from '../services/geocodingService';
 import { optionalAuth, authenticate, requireRole, AuthRequest } from '../middleware/auth';
@@ -601,16 +601,51 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       //   OR across them, never duplicated (o.trade_id is a single scalar
       //   column, so ANY(...) can't produce duplicate rows by itself).
       const ids = String(trade_id).split(',').map((v) => v.trim()).filter(Boolean).map(Number).filter((n) => Number.isFinite(n));
-      if (ids.length === 1) {
-        conditions.push(`(o.trade_id = $${idx} OR unaccent(o.ai_matched_trades::text) ILIKE unaccent('%' || (SELECT name FROM trades WHERE id = $${idx}) || '%'))`);
-        params.push(ids[0]);
+      if (ids.length > 0) {
+        // 27 Sep client audit, point 7: "Nettoyage" browsed as a category
+        // showed 134 results, all private, while typing "nettoyage" in the
+        // search box found 147 more, public. trade_id/ai_matched_trades are
+        // only ever written by classifyOpportunity(), an async AI batch job
+        // that lags well behind ingestion on high-volume public sources
+        // (BOAMP/PLACE) - see aiProcessing.ts. A category click must not
+        // silently depend on that backlog having cleared, so - same as the
+        // free-text word search a few lines above already does - this also
+        // falls back to a direct keyword hit on title/description for
+        // whichever real trades were picked, catching not-yet-classified
+        // rows the AI hasn't reached yet. domainMismatchExclusionSqlPattern
+        // keeps this from reopening the point-3 fix above (e.g. "CVC" still
+        // must not pull in biomedical-ventilation markets just because the
+        // word "ventilation" appears in their title/description).
+        const slugsResult = await db.query('SELECT slug FROM trades WHERE id = ANY($1::int[])', [ids]);
+        const slugs = slugsResult.rows.map((r) => r.slug).filter(Boolean);
+        const keywords = keywordsForSlugs(slugs);
+
+        const baseCond = ids.length === 1
+          ? `(o.trade_id = $${idx} OR unaccent(o.ai_matched_trades::text) ILIKE unaccent('%' || (SELECT name FROM trades WHERE id = $${idx}) || '%'))`
+          : `(o.trade_id = ANY($${idx}::int[]) OR EXISTS (SELECT 1 FROM trades tr WHERE tr.id = ANY($${idx}::int[]) AND unaccent(o.ai_matched_trades::text) ILIKE unaccent('%' || tr.name || '%')))`;
+        params.push(ids.length === 1 ? ids[0] : ids);
         idx++;
-      } else if (ids.length > 1) {
-        conditions.push(
-          `(o.trade_id = ANY($${idx}::int[]) OR EXISTS (SELECT 1 FROM trades tr WHERE tr.id = ANY($${idx}::int[]) AND unaccent(o.ai_matched_trades::text) ILIKE unaccent('%' || tr.name || '%')))`
-        );
-        params.push(ids);
-        idx++;
+
+        let fullCond = baseCond;
+        if (keywords.length > 0) {
+          const kwIdx = idx++;
+          params.push(`\\y(${keywords.join('|')})\\y`);
+          let keywordCond = `unaccent(o.title || ' ' || COALESCE(o.description, '')) ~* $${kwIdx}`;
+          // AND-NOT any domain-mismatch exclusion any of these keywords
+          // trigger (deduplicated - the same rule can fire for several
+          // keywords of the same trade, e.g. "chauffage" and "ventilation"
+          // both point at the CVC/biomedical rule).
+          const exclusions = [...new Set(
+            keywords.map((k) => domainMismatchExclusionSqlPattern(k)).filter((p): p is string => !!p)
+          )];
+          for (const excl of exclusions) {
+            const exIdx = idx++;
+            params.push(excl);
+            keywordCond += ` AND unaccent(o.title || ' ' || COALESCE(o.description, '')) !~* $${exIdx}`;
+          }
+          fullCond = `(${baseCond} OR (${keywordCond}))`;
+        }
+        conditions.push(fullCond);
       }
     }
     if (region) {
