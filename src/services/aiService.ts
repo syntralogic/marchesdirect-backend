@@ -81,6 +81,23 @@ function extractRawDataContext(rawData: any, restCap: number = 2500): string {
   if (!rawData) return '{}';
   const descriptions: string[] = [];
   const seen = new Set<string>();
+  // Client audit (27 Sep, "maintenance CVC en Gironde" vs its BOAMP avis):
+  // the fiche hedged "vérifier si plusieurs lots" and "attestation
+  // frigoriste probablement nécessaire" while the source notice stated two
+  // lots and a precise certification category explicitly, and never
+  // surfaced the per-lot/per-période order caps ("plafonds de commande") at
+  // all. These live in structured fields (lots, qualification/certification
+  // categories, montant-maximum-style caps) rather than the free-text
+  // description/objet already prioritized below - on a moderately detailed
+  // notice they sat past `rest`'s positional cutoff, so the model correctly
+  // (per its own "not available" rule) reported them as absent or, where it
+  // only glimpsed a vaguer mention in the surviving description text,
+  // hedged with "probablement" instead of the source's explicit wording.
+  // Surfacing them the same way descriptions already are - by key match,
+  // not position - fixes this for every notice shaped like this, not just
+  // this one Gironde case.
+  const structuredHighlights: string[] = [];
+  const seenStructured = new Set<string>();
   const visit = (node: any) => {
     if (!node || typeof node !== 'object') return;
     if (Array.isArray(node)) {
@@ -97,6 +114,16 @@ function extractRawDataContext(rawData: any, restCap: number = 2500): string {
         if (!seen.has(value)) {
           seen.add(value);
           descriptions.push(value.trim());
+        }
+      } else if (
+        (typeof value === 'string' || typeof value === 'number') &&
+        String(value).trim().length > 1 &&
+        /lot|allotissement|qualification|attestation|certificat|habilitation|plafond|montant.?max/i.test(bareKey)
+      ) {
+        const text = `${bareKey}: ${String(value).trim()}`;
+        if (!seenStructured.has(text)) {
+          seenStructured.add(text);
+          structuredHighlights.push(text);
         }
       } else if (value && typeof value === 'object') {
         visit(value);
@@ -115,6 +142,10 @@ function extractRawDataContext(rawData: any, restCap: number = 2500): string {
   }
   descriptions.sort((a, b) => b.length - a.length);
   const topDescriptions = descriptions.slice(0, 2).join('\n---\n');
+  // Capped separately from the free-text descriptions above and kept short
+  // per entry - this is a handful of lot/qualification/cap fields, not
+  // another prose block, so it shouldn't meaningfully add to per-call cost.
+  const topStructured = structuredHighlights.slice(0, 20).join('\n').slice(0, 1500);
   let full: string;
   try {
     full = JSON.stringify(rawData);
@@ -122,9 +153,11 @@ function extractRawDataContext(rawData: any, restCap: number = 2500): string {
     full = String(rawData);
   }
   const rest = full.substring(0, restCap);
-  return topDescriptions
-    ? `Full description text found in source:\n${topDescriptions}\n\nRest of source payload (truncated):\n${rest}`
-    : rest;
+  const parts: string[] = [];
+  if (topDescriptions) parts.push(`Full description text found in source:\n${topDescriptions}`);
+  if (topStructured) parts.push(`Lot/qualification/order-cap fields found in source (verbatim, use these over anything vaguer in the description above):\n${topStructured}`);
+  parts.push(`Rest of source payload (truncated):\n${rest}`);
+  return parts.join('\n\n');
 }
 
 const callClaudeAPI = async (
@@ -808,6 +841,13 @@ export type ExtractedOpportunityFacts = {
   scope_details: ExtractedFact;
   intervention_calendar: ExtractedFact;
   constraints_expectations: ExtractedFact;
+  // Client audit (27 Sep, "maintenance CVC en Gironde"): the BOAMP avis
+  // stated explicit per-lot/per-période order caps on the accord-cadre.
+  // Kept as its own field rather than folded into estimated_value - a cap
+  // on an accord-cadre à bons de commande is a ceiling, not a guaranteed
+  // amount, and the client was explicit these must never be presented as
+  // one ("sans les confondre avec un budget garanti").
+  order_caps: ExtractedFact;
 };
 
 export const extractOpportunityFacts = async (
@@ -844,6 +884,12 @@ If a field is not present in the source, you MUST return {"value": "not availabl
 for it (or {"value": [], "available": false} for a list field) - never guess, infer, or fill it with a
 plausible-sounding value.
 
+HARD RULE: never hedge a field that the source states plainly (no "probablement"/"sans doute"/"sûrement").
+If the source is explicit - a stated lot count, a named certification/attestation category, an obligatory
+requirement - report it as stated, not as a possibility. Only fall back to "not available" when the source
+is genuinely silent on that field; don't soften an explicit statement into a guess just because it appeared
+in a structured field rather than the main description.
+
 Additionally extract these four fields, same "not available" rule if the source doesn't state them:
 - contract_duration: how long the contract/marché runs once awarded (e.g. "12 mois reconductible 3 fois", "Duree: 24 mois").
 - submission_method: how a candidate must actually submit their bid (e.g. "Depot exclusivement dematerialise via le profil acheteur", "Par courrier recommande avec AR"). Not the deadline itself, the delivery method/channel.
@@ -861,6 +907,7 @@ Also extract, when the source states them:
 - scope_details: the concrete scope/perimeter and quantities of the work (surfaces, quantities, number of units, lots covered) - not a repeat of contract_object, only quantified/perimeter specifics if the source gives them.
 - intervention_calendar: the intended schedule or phasing of the work itself (e.g. "par tranches de livraison", "hors période hivernale") - distinct from submission_deadline, which is the bid deadline, not the work's own calendar.
 - constraints_expectations: site-access, coordination, qualification, or other constraints/expectations on the company carrying out the work (e.g. "intervention en site occupé", "qualification RGE requise") - distinct from required_qualifications when the source separates them, otherwise leave not available rather than duplicating that field.
+- order_caps: for an accord-cadre à bons de commande, any stated ceiling/maximum on order value or quantity per lot and/or per period (e.g. "plafond de 150 000 EUR par lot et par an"). This is a CAP, not a guaranteed amount - phrase the value to make that clear (e.g. "Plafond: ..." rather than just restating the figure), and never copy this into estimated_value or vice versa. Not available if the source states no such ceiling.
 
 Also extract selection_criteria: the award/scoring criteria and their weighting, if explicitly stated
 (e.g. "Critere prix: 40%, Critere valeur technique: 45%, Critere delais: 15%"). Only include criteria the
@@ -902,7 +949,8 @@ Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
   "requirements_detected": {"value": 0, "available": false},
   "scope_details": {"value": "not available", "available": false},
   "intervention_calendar": {"value": "not available", "available": false},
-  "constraints_expectations": {"value": "not available", "available": false}
+  "constraints_expectations": {"value": "not available", "available": false},
+  "order_caps": {"value": "not available", "available": false}
 }`;
 
   // opp.deadline (a TIMESTAMP column) comes back from pg as a native JS
@@ -1400,11 +1448,13 @@ Technical Visit (déjà confirmée): ${factText(facts.technical_visit)}`;
 
   const systemPrompt = `Tu es un analyste de marchés publics/privés français. À partir de la fiche source ci-dessous, rédige exactement 3 sections destinées à 3 accordéons fixes sur la page d'une opportunité. Chaque section fait 2 à 5 phrases, en français courant, texte brut (aucun markdown, aucun titre répété dans le texte).
 
-1. presentation ("Présentation du marché") : l'objet du marché, les prestations demandées et le périmètre de la mission.
-2. conditions ("Conditions et points à vérifier") : calendrier (dates clés, durée du contrat), exigences, critères de sélection, modalités de dépôt, visite éventuelle et contraintes à connaître avant de candidater.
-3. entreprises ("Entreprises concernées") : les métiers et profils d'entreprises concernés par ce marché. Décris uniquement le type d'entreprise auquel ce marché correspond a priori (taille, secteur, spécialité) - ne certifie jamais qu'une entreprise est éligible, puisque l'éligibilité réelle dépend de critères que tu ne peux pas vérifier.
+1. presentation ("Présentation du marché") : l'objet du marché, les prestations demandées, le périmètre de la mission, et - si la source les précise - le nombre/l'objet des lots et la zone d'intervention.
+2. conditions ("Conditions et points à vérifier") : calendrier (dates clés, durée du contrat), exigences, critères de sélection, modalités de dépôt, visite éventuelle, contraintes à connaître avant de candidater, et - si la source les précise - les plafonds de commande (montant ou quantité maximum par lot et/ou par période sur un accord-cadre à bons de commande). Un plafond de commande est un maximum, jamais un montant garanti : ne le présente jamais comme le budget du marché.
+3. entreprises ("Entreprises concernées") : les métiers et profils d'entreprises concernés par ce marché, ainsi que les qualifications/attestations/certifications explicitement demandées, avec leur catégorie précise quand la source la donne. Décris uniquement le type d'entreprise auquel ce marché correspond a priori (taille, secteur, spécialité) - ne certifie jamais qu'une entreprise est éligible, puisque l'éligibilité réelle dépend de critères que tu ne peux pas vérifier.
 
 RÈGLE STRICTE : n'utilise que ce qui est réellement présent dans la source ci-dessous. Si une section manque d'information dans la source (ex : aucune exigence mentionnée, aucun montant), dis-le explicitement dans cette section plutôt que d'inventer un contenu plausible.
+
+RÈGLE STRICTE : n'utilise jamais "probablement"/"sans doute"/"sûrement" pour une information que la source énonce clairement (nombre de lots, attestation ou catégorie de qualification exigée, etc.) - reprends-la telle quelle. Réserve ces formulations aux cas où la source elle-même reste imprécise.
 
 RÈGLE DE COHÉRENCE : les champs marqués "(déjà confirmée)" ou "(déjà confirmé)" ci-dessous (Deadline, Estimated Value, Contract Duration, Allotment, Submission Method, Technical Visit) ont déjà été extraits et vérifiés depuis la même source pour d'autres parties de la fiche. Si l'un de ces champs a une valeur autre que "non communiqué(e)", tu DOIS la reprendre fidèlement dans la section concernée et ne jamais écrire qu'elle est absente, non précisée ou non communiquée - ce serait une contradiction avec le reste de la fiche.`;
 
@@ -1437,9 +1487,9 @@ Raw source payload: ${opp.raw_data ? extractRawDataContext(opp.raw_data, 2000) :
       {
         type: 'object',
         properties: {
-          presentation: { type: 'string', description: 'Présentation du marché : objet, prestations, périmètre (2-5 phrases, texte brut).' },
-          conditions: { type: 'string', description: 'Conditions et points à vérifier : calendrier, exigences, critères, contraintes (2-5 phrases, texte brut).' },
-          entreprises: { type: 'string', description: 'Entreprises concernées : métiers/profils concernés (2-5 phrases, texte brut).' },
+          presentation: { type: 'string', description: 'Présentation du marché : objet, prestations, périmètre, lots si précisés (2-5 phrases, texte brut).' },
+          conditions: { type: 'string', description: 'Conditions et points à vérifier : calendrier, exigences, critères, contraintes, plafonds de commande si précisés (2-5 phrases, texte brut).' },
+          entreprises: { type: 'string', description: 'Entreprises concernées : métiers/profils concernés, qualifications/attestations exigées (2-5 phrases, texte brut).' },
         },
         required: ['presentation', 'conditions', 'entreprises'],
       },
