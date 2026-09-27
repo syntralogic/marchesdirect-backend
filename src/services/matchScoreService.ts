@@ -210,6 +210,9 @@ async function loadCompanyProfile(companyId: string | null | undefined, sessionI
       department: departmentFromPostal(c.address_postal_code), city: c.address_city || null,
       radiusKm: toNumber(c.working_radius_km),
       annualRevenue: toNumber(c.annual_revenue),
+      // A registered account's own declared chiffre d'affaires - never a
+      // third-party estimate.
+      revenueEstimated: false,
       recentReferenceCount: refs.rows.length,
       certificationText: certs.rows.map((x) => x.certification_name).join(' '),
     };
@@ -234,6 +237,7 @@ async function loadCompanyProfile(companyId: string | null | undefined, sessionI
     department, city: d.city || null,
     radiusKm: null,
     annualRevenue: toNumber(d.revenue),
+    revenueEstimated: !!d.revenueEstimated,
     recentReferenceCount: null,
     certificationText: d.rgeOrganisme || '',
   };

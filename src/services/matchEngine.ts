@@ -50,6 +50,10 @@ export interface CompanyProfile {
   city: string | null;
   radiusKm: number | null;
   annualRevenue: number | null;
+  // true when annualRevenue comes from a third-party estimate (e.g. a
+  // Pappers/SIRET lookup marking the figure "estimé") rather than a real
+  // filed amount - an estimate alone must not settle "moyens compatibles".
+  revenueEstimated: boolean;
   recentReferenceCount: number | null;   // null = not known (no account data)
   certificationText: string;             // certifications/labels on file
 }
@@ -149,14 +153,24 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
   }
 
   // --- Zone -----------------------------------------------------------------
+  // 27 Sep client audit, point 4: a company that never declared its rayon
+  // d'intervention was silently given one (100 km) and scored match/mismatch
+  // against it as if the visitor had confirmed it. A distance can still be
+  // shown as information, but it only settles the criterion once the radius
+  // is either the company's own declared value or confirmed by the visitor's
+  // own answer (applied below via `apply`).
   let zone: MatchCriterion = { key: 'zone', label: 'Zone d’intervention', status: 'confirm', factor: 0, weight: WEIGHTS.zone, answered: false, detail: 'Distance non évaluable : localisation de l’entreprise ou du marché inconnue. Précisez votre zone d’intervention.' };
   if (company) {
     if (company.latitude != null && company.longitude != null && market.latitude != null && market.longitude != null) {
       const km = Math.round(distanceKm(Number(company.latitude), Number(company.longitude), Number(market.latitude), Number(market.longitude)));
-      const radius = company.radiusKm || 100;
-      zone = km <= radius
-        ? { ...zone, status: 'match', factor: 1, detail: `Marché à environ ${km} km, dans votre rayon d’intervention de ${radius} km.` }
-        : { ...zone, status: 'mismatch', factor: 0, detail: `Marché à environ ${km} km, au-delà de votre rayon d’intervention de ${radius} km.` };
+      if (company.radiusKm != null) {
+        const radius = company.radiusKm;
+        zone = km <= radius
+          ? { ...zone, status: 'match', factor: 1, detail: `Marché à environ ${km} km, dans votre rayon d’intervention de ${radius} km.` }
+          : { ...zone, status: 'mismatch', factor: 0, detail: `Marché à environ ${km} km, au-delà de votre rayon d’intervention de ${radius} km.` };
+      } else {
+        zone = { ...zone, detail: `Marché à environ ${km} km. Votre rayon d’intervention n’est pas renseigné : précisez-le pour confirmer si cette zone vous convient.` };
+      }
     } else if (company.department && market.department && company.department === market.department) {
       zone = { ...zone, status: 'match', factor: 1, detail: `Le marché se situe dans votre département (${company.department}).` };
     }
@@ -177,11 +191,21 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
   });
 
   // --- Moyens -----------------------------------------------------------------
+  // 27 Sep client audit, point 4: an estimated chiffre d'affaires (third-party
+  // lookup, not a filed figure) was enough on its own to declare "moyens
+  // compatibles" - a mismatch stays reliable either way (the market clearly
+  // exceeds even the estimate), but a match on an estimate alone is only
+  // provisional until the visitor confirms it or a real account figure backs it.
   let moyens: MatchCriterion = { key: 'moyens', label: 'Moyens', status: 'confirm', factor: 0, weight: WEIGHTS.moyens, answered: false, detail: 'Vos moyens humains et matériels ne sont pas connus : à confirmer.' };
   if (company && market.estimatedValue && company.annualRevenue) {
-    moyens = Number(market.estimatedValue) <= Number(company.annualRevenue) * 3
-      ? { ...moyens, status: 'match', factor: 1, detail: 'Montant du marché compatible avec votre chiffre d’affaires (au plus 3 fois).' }
-      : { ...moyens, status: 'mismatch', factor: 0, detail: 'Montant du marché supérieur à 3 fois votre chiffre d’affaires.' };
+    const compatible = Number(market.estimatedValue) <= Number(company.annualRevenue) * 3;
+    if (!compatible) {
+      moyens = { ...moyens, status: 'mismatch', factor: 0, detail: 'Montant du marché supérieur à 3 fois votre chiffre d’affaires.' };
+    } else if (!company.revenueEstimated) {
+      moyens = { ...moyens, status: 'match', factor: 1, detail: 'Montant du marché compatible avec votre chiffre d’affaires (au plus 3 fois).' };
+    } else {
+      moyens = { ...moyens, detail: 'Montant du marché a priori compatible avec le chiffre d’affaires estimé de votre entreprise. Une estimation ne suffit pas à elle seule à confirmer vos moyens : confirmez-le ci-dessous.' };
+    }
   }
   moyens = apply(moyens, answers.capacity, {
     oui: 'Vous avez confirmé disposer des moyens nécessaires.',
