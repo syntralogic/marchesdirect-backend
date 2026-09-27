@@ -70,6 +70,23 @@ export const geocodeCity = async (
     const feature = response.data?.features?.[0];
     const coords = feature?.geometry?.coordinates;
     if (!Array.isArray(coords) || coords.length !== 2) return null;
+    // Client (26 Sep audit, point 8): a "Bordeaux, 200 km" radius search
+    // surfaced a notice whose own fiche says "Lieu : Ville de Saint
+    // Etienne" - hundreds of km outside that radius. api-adresse's
+    // free-text search with limit:1 always returns SOME municipality even
+    // for a poor match (a garbled source city name, a buyer's address
+    // fragment that isn't really a commune name) with no indication of
+    // that beyond a low `properties.score` (0-1 confidence) - which this
+    // never checked, so a low-confidence guess was stored and trusted
+    // exactly like a real match. Below a conservative threshold, treat it
+    // the same as no result at all: the 0,0 sentinel this returns as null
+    // for is EXCLUDED from every radius search (opportunities.ts), so a
+    // location we can't confidently place no longer silently claims one.
+    const score = typeof feature?.properties?.score === 'number' ? feature.properties.score : null;
+    if (score !== null && score < 0.4) {
+      logger.warn(`[geocoding] Low-confidence match for "${q}" (score ${score}) - treating as unresolved`);
+      return null;
+    }
     const [lng, lat] = coords; // GeoJSON order - see file-level note above.
     if (typeof lat !== 'number' || typeof lng !== 'number') return null;
     return { lat, lng };
