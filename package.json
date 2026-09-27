@@ -17,6 +17,9 @@
     "backfill:opportunity-facts": "ts-node --files scripts/backfillOpportunityFacts.ts",
     "backfill:exact-duplicates": "ts-node --files scripts/backfillExactDuplicates.ts",
     "backfill:missing-deadlines": "ts-node --files scripts/backfillMissingDeadlines.ts",
+    "backfill:department-names": "ts-node --files scripts/backfillDepartmentNames.ts",
+    "backfill:location-country": "ts-node --files scripts/backfillLocationCountry.ts",
+    "backfill:reset-geocoded-coordinates": "ts-node --files scripts/resetGeocodedCoordinatesForRevalidation.ts",
     "seed:editorial-listings": "node scripts/seedEditorialListings.js",
     "loadtest:generate": "node scripts/generateSyntheticListings.js",
     "loadtest:run": "node scripts/loadTest.js"

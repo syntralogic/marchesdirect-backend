@@ -864,8 +864,31 @@ export const collectTedData = async (sourceId: number) => {
           // connector out of the French-region facet entirely rather than
           // polluting it with country codes.
           location_region: null,
+          // 27 Sep client report, point 5: "France entière" surfacing
+          // Roumanie/Espagne/Italie notices under a French-procurement
+          // search. buyer-country WAS already being requested from the API
+          // above (see the `fields` list) but never stored anywhere at
+          // all - not even in raw_data, since this object had no `raw` key
+          // (see the fix just below), so historical rows have nothing left
+          // to recover this from and need a genuine re-fetch, not just a
+          // local backfill (see scripts/backfillLocationCountry.ts).
+          // eForms buyer-country commonly comes back as an ISO 3166-1
+          // alpha-3 code ('FRA') rather than alpha-2 - stored as-is
+          // (location_country is VARCHAR(3)) and compared against both
+          // forms wherever it's checked (opportunities.ts), rather than
+          // guessing a single canonical form this API might not actually use.
+          location_country: firstText(item['buyer-country']) || firstText(item.buyerCountry) || null,
           buyer_name: firstText(item['buyer-name']) || firstText(item.buyerName) || null,
           official_url: buildOfficialUrl('ted', tedId, item),
+          // Previously missing on this object (unlike every other
+          // connector's normalizer, which all set `raw:`) - insertOpportunity/
+          // updateOpportunity fall back to JSON.stringify(data.raw || data)
+          // for raw_data, so without this key raw_data silently stored the
+          // already-stripped-down `opportunity` object instead of the real
+          // API response, discarding buyer-country (and everything else not
+          // explicitly read above) permanently instead of just leaving it
+          // unused - the exact gap that made point 5 unrecoverable locally.
+          raw: item,
         };
 
         if (existing.rows.length > 0) {
@@ -922,11 +945,11 @@ const insertOpportunity = async (sourceId: number, data: any) => {
   const result = await db.query(
     `INSERT INTO opportunities 
       (source_id, source_reference, title, description, publication_date, deadline, 
-       estimated_value, location_city, location_region, location_department, buyer_name, opportunity_type_id, 
+       estimated_value, location_city, location_region, location_department, location_country, buyer_name, opportunity_type_id, 
        raw_data, official_url, ai_classification_status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-       (SELECT id FROM opportunity_types WHERE code = $14),
-       $12, $13, 'not_analyzed')
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+       (SELECT id FROM opportunity_types WHERE code = $15),
+       $13, $14, 'not_analyzed')
      RETURNING id`,
     [
       sourceId,
@@ -949,7 +972,27 @@ const insertOpportunity = async (sourceId: number, data: any) => {
       // it, since a source-specific string PLACE (undocumented shape) sends
       // is still better shown as-is than dropped to null outright.
       truncateForColumn(normalizeRegionName(data.location_region || data.region) || data.location_region || data.region || null, 255),
-      truncateForColumn(data.location_department || null, 100),
+      // 27 Sep client report, point 6: same "centralize the normalization
+      // instead of trusting each source" reasoning as location_region right
+      // above, applied to location_department - it used to skip
+      // normalizeDepartmentCode() entirely and store PLACE/other sources'
+      // raw value verbatim, so a department NAME ("Gironde") sat in this
+      // column looking populated but never matched the department filter's
+      // code-based lookup (see departmentRegion.ts's DEPARTMENT_NAME_TO_CODE
+      // for the full root cause). normalizeDepartmentCode now resolves
+      // names as well as codes; falls back to the raw value only when it
+      // recognizes neither, same "don't drop to null outright" rule as
+      // region above.
+      truncateForColumn(normalizeDepartmentCode(data.location_department) || data.location_department || null, 100),
+      // 27 Sep client report, point 5: "France entière" surfacing
+      // Roumanie/Espagne/Italie notices - those come from the TED
+      // connector, the one source that isn't France-only (see its own
+      // location_country comment in collectTedData). BOAMP/PLACE/DECP/
+      // Batiweb are all exclusively French sources by construction (no
+      // foreign notices are even fetched), so they're always 'FR' here
+      // unless a source explicitly says otherwise (TED sets
+      // data.location_country itself from buyer-country).
+      data.location_country || 'FR',
       // PLACE/TED feeds don't reliably expose a distinct buyer field the
       // way BOAMP's `nomacheteur` does - null there rather than a guess.
       truncateForColumn(data.buyer_name || data.organism || null, 1000),
@@ -980,17 +1023,32 @@ export const updateOpportunity = async (opportunityId: string, data: any) => {
   // overwrite: a row backfilled with a real link shouldn't get clobbered
   // back to null on a later run where the field happened to come through
   // empty (e.g. a raw payload missing the id this run).
+  //
+  // location_department/location_country use COALESCE($x, existing) the
+  // same way official_url does, rather than an unconditional overwrite -
+  // this is also how a row from BEFORE the 27 Sep department/country fixes
+  // above self-heals on its own next refresh (same self-healing shape as
+  // location_region's own backfill script) instead of needing every
+  // existing row rewritten by hand: as long as a source keeps sending a
+  // value, a currently-wrong or currently-missing one gets corrected the
+  // next time this connector runs, without a blank value on some later run
+  // ever erasing an already-good one.
   await db.query(
     `UPDATE opportunities 
      SET description = $1, deadline = $2, estimated_value = $3, raw_data = $4,
-         official_url = COALESCE($5, official_url), updated_at = NOW()
-     WHERE id = $6`,
+         official_url = COALESCE($5, official_url),
+         location_department = COALESCE($6, location_department),
+         location_country = COALESCE($7, location_country),
+         updated_at = NOW()
+     WHERE id = $8`,
     [
       data.description,
       data.deadline,
       data.estimated_value,
       JSON.stringify(data.raw || data),
       data.official_url || null,
+      normalizeDepartmentCode(data.location_department) || data.location_department || null,
+      data.location_country || null,
       opportunityId,
     ]
   );
@@ -1023,8 +1081,8 @@ async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: stri
     const values: any[] = [];
     const rowsSql: string[] = [];
     chunk.forEach((data, idx) => {
-      const base = idx * 15;
-      rowsSql.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13}, $${base + 14}, $${base + 15})`);
+      const base = idx * 17;
+      rowsSql.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13}, $${base + 14}, $${base + 15}, $${base + 16}, $${base + 17})`);
       values.push(
         sourceId,
         data.source_reference,
@@ -1039,6 +1097,23 @@ async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: stri
         // own row.
         truncateForColumn(data.location_city, 255),
         truncateForColumn(data.location_region || null, 255),
+        // 27 Sep client report, point 6: this INSERT never had a
+        // location_department column at all, even though DECP is the
+        // largest single source and normalizeDecpRecord() already computes
+        // a resolvedDepartment - every DECP row's department was silently
+        // dropped on the floor before it ever reached the database, so a
+        // department-filtered search structurally could never find a DECP
+        // row, no matter how good the source data or the normalization
+        // logic upstream was. normalizeDepartmentCode() re-applied here too
+        // (cheap no-op if normalizeDecpRecord already normalized it) so
+        // this insert path gets the same name-vs-code handling as
+        // insertOpportunity's, rather than depending on every caller having
+        // already normalized before reaching here.
+        truncateForColumn(normalizeDepartmentCode(data.location_department) || data.location_department || null, 100),
+        // 27 Sep client report, point 5: DECP/Batiweb are French-only
+        // sources by construction, same reasoning as insertOpportunity's
+        // location_country above.
+        data.location_country || 'FR',
         truncateForColumn(data.buyer_name || null, 1000),
         opportunityTypeId,
         JSON.stringify(data.raw || data),
@@ -1052,7 +1127,7 @@ async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: stri
       const result = await db.query(
         `INSERT INTO opportunities
           (source_id, source_reference, title, description, publication_date, deadline,
-           estimated_value, location_city, location_region, buyer_name, opportunity_type_id,
+           estimated_value, location_city, location_region, location_department, location_country, buyer_name, opportunity_type_id,
            raw_data, ai_classification_status, status, official_url)
          VALUES ${rowsSql.join(', ')}
          ON CONFLICT (source_id, source_reference) DO UPDATE SET
@@ -1062,6 +1137,8 @@ async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: stri
            raw_data = EXCLUDED.raw_data,
            status = EXCLUDED.status,
            official_url = COALESCE(EXCLUDED.official_url, opportunities.official_url),
+           location_department = COALESCE(EXCLUDED.location_department, opportunities.location_department),
+           location_country = COALESCE(EXCLUDED.location_country, opportunities.location_country),
            updated_at = NOW()
          RETURNING (xmax = 0) AS was_insert`,
         values

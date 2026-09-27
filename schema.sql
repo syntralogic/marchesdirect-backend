@@ -473,6 +473,16 @@ ALTER TABLE opportunities ADD COLUMN search_vector tsvector GENERATED ALWAYS AS 
   setweight(to_tsvector('french', immutable_unaccent(COALESCE(title, ''))), 'A') ||
   setweight(to_tsvector('french', immutable_unaccent(COALESCE(description, ''))), 'B')
 ) STORED;
+
+-- 27 Sep client report, point 5: "France entière" surfacing foreign
+-- (Roumanie, Espagne, Italie...) notices under a French-procurement
+-- search. Those come from TED (EU-wide) - the only connector that isn't
+-- France-only by construction (BOAMP/PLACE/DECP/Batiweb never fetch
+-- anything but French notices in the first place). ISO 3166-1 code,
+-- stored as-is (alpha-2 'FR' or alpha-3 'FRA' depending on what a given
+-- source sends) rather than forced into one canonical form - see
+-- dataCollectionService.ts/opportunities.ts for where this is set/read.
+ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS location_country VARCHAR(3);
 CREATE INDEX IF NOT EXISTS opportunities_search ON opportunities USING GIN(search_vector);
 
 -- Safe to re-run: covers anyone who already loaded schema.sql once before this
