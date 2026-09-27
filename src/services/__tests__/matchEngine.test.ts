@@ -12,7 +12,7 @@ const company = (over: Partial<CompanyProfile> = {}): CompanyProfile => ({
   tradeSlugs: tradeSlugsForCompany('4322B', 'Travaux d’installation d’équipements thermiques et de climatisation'),
   activityText: 'chauffage/climatisation',
   latitude: null, longitude: null, department: '62', city: 'Hénin-Beaumont', radiusKm: null,
-  annualRevenue: null, recentReferenceCount: null, certificationText: '',
+  annualRevenue: null, revenueEstimated: false, recentReferenceCount: null, certificationText: '',
   ...over,
 });
 
