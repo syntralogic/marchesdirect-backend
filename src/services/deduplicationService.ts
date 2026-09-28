@@ -68,7 +68,19 @@ export const mergeExactDuplicates = async (): Promise<number> => {
         regexp_replace(lower(unaccent(trim(title))), '\\s+', ' ', 'g'),
         date_trunc('day', deadline),
         estimated_value,
-        regexp_replace(lower(unaccent(trim(COALESCE(buyer_name, '')))), '\\s+', ' ', 'g')
+        regexp_replace(lower(unaccent(trim(COALESCE(buyer_name, '')))), '\\s+', ' ', 'g'),
+        -- BUG (DECP rows disappearing, 28 Sep: DB had ~43k rows instead of ~70k):
+        -- DECP rows have no buyer_name and no deadline by construction, so
+        -- this grouping collapsed them on title + montant alone. Two
+        -- DIFFERENT buyers awarding a same-titled, same-amount contract
+        -- (very common: generic objets with the same montant) were treated
+        -- as exact duplicates and one was marked 'merged' (hidden everywhere).
+        -- With no buyer_name, the source and the buyer's SIRET (acheteur_id)
+        -- now also have to match.
+        CASE WHEN COALESCE(buyer_name, '') = ''
+             THEN source_id::text || ':' || COALESCE(raw_data->>'acheteur_id', id::text)
+             ELSE ''
+        END
       HAVING COUNT(*) > 1
       LIMIT 500
     `);
