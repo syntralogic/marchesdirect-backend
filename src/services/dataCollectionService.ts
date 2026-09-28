@@ -119,33 +119,64 @@ export const collectBoampData = async (sourceId: number) => {
     // MAX_RECORDS_PER_RUN safety cap.
     const today = new Date().toISOString().slice(0, 10);
 
-    const rawRecords = await fetchAllPages(endpoint, {
-      where: `datelimitereponse >= date'${today}'`,
-      order_by: 'datelimitereponse',
-      ...(apiKey ? { apikey: apiKey } : {}),
-    }, 'BOAMP');
+    // Opendatasoft refuses offset+limit above 10,000, so ONE paged query can
+    // never return more than 9,900 notices - and because it is ordered by
+    // deadline, pressing "Run now" again just re-fetched the same 9,900
+    // earliest-closing notices while every later one never loaded. When the
+    // open-notice count is above that cap, walk deadline windows instead
+    // (each kept under the cap, halving the window if one is too dense) and
+    // upsert each window as it arrives, so memory stays flat too.
+    const authParams = apiKey ? { apikey: apiKey } : {};
+    const countWhere = async (where: string): Promise<number> => {
+      const r = await axios.get(endpoint, { params: { where, limit: 1, ...authParams }, timeout: 30000 });
+      return Number(r.data?.total_count ?? 0);
+    };
+    const addDays = (iso: string, n: number) => new Date(new Date(iso + 'T00:00:00Z').getTime() + n * 86400000).toISOString().slice(0, 10);
 
-    const notices = rawRecords.map(normalizeBoampRecord);
-    logger.info(`[BOAMP] Fetched ${notices.length} notices`);
-
-    // Chunked bulk upsert (500 rows per INSERT ... ON CONFLICT) instead of the
-    // old per-notice SELECT + INSERT/UPDATE loop: at the 1-2s-per-query
-    // latency measured on the hosted DB, that loop took hours once the cap
-    // went past a few thousand notices, and scheduleDataCollection() runs
-    // sources one after another, so a slow BOAMP run also held up DECP/TED.
-    // Every notice here has datelimitereponse >= today (see the query
-    // above), so bulkUpsertOpportunities' status = 'active' on conflict is
-    // the correct value for all of them.
     const publicProcurementType = await db.query(`SELECT id FROM opportunity_types WHERE code = 'public_procurement'`);
     const opportunityTypeId = publicProcurementType.rows[0]?.id || null;
-    // A notice with no reference can't be keyed (source_reference is NOT
-    // NULL) and would fail its whole 500-row chunk - count it as an error
-    // and skip it instead, same outcome the old per-row loop had.
-    const usableNotices = notices.filter((n: any) => n.source_reference);
-    const bulk = await bulkUpsertOpportunities(sourceId, opportunityTypeId, usableNotices);
-    const inserted = bulk.inserted;
-    const updated = bulk.updated;
-    const errors = bulk.errors + (notices.length - usableNotices.length);
+
+    let fetchedTotal = 0, inserted = 0, updated = 0, errors = 0;
+    const processWindow = async (where: string) => {
+      const rawRecords = await fetchAllPages(endpoint, { where, order_by: 'datelimitereponse', ...authParams }, 'BOAMP');
+      const notices = rawRecords.map(normalizeBoampRecord);
+      // Chunked bulk upsert (500 rows per INSERT ... ON CONFLICT) instead of the
+      // old per-notice SELECT + INSERT/UPDATE loop (hours at 1-2s/query on the
+      // hosted DB). Every notice has datelimitereponse >= today, so the
+      // status = 'active' on conflict is right for all of them.
+      // A notice with no reference can't be keyed (source_reference NOT NULL)
+      // and would fail its whole chunk - count it as an error and skip it.
+      const usableNotices = notices.filter((n: any) => n.source_reference);
+      const bulk = await bulkUpsertOpportunities(sourceId, opportunityTypeId, usableNotices);
+      fetchedTotal += notices.length;
+      inserted += bulk.inserted;
+      updated += bulk.updated;
+      errors += bulk.errors + (notices.length - usableNotices.length);
+    };
+
+    const maxTotal = Number(process.env.BOAMP_MAX_TOTAL_PER_RUN) > 0 ? Number(process.env.BOAMP_MAX_TOTAL_PER_RUN) : 60000;
+    let cursor = today;
+    let span = 14;
+    const horizon = addDays(today, 1095);
+    while (fetchedTotal < maxTotal && cursor <= horizon) {
+      const remaining = await countWhere(`datelimitereponse >= date'${cursor}'`);
+      if (remaining === 0) break;
+      if (remaining <= MAX_RECORDS_PER_RUN) {
+        await processWindow(`datelimitereponse >= date'${cursor}'`);
+        break;
+      }
+      const windowWhere = (days: number) =>
+        `datelimitereponse >= date'${cursor}' AND datelimitereponse < date'${addDays(cursor, days)}'`;
+      let inWindow = await countWhere(windowWhere(span));
+      while (inWindow > MAX_RECORDS_PER_RUN && span > 1) {
+        span = Math.max(1, Math.floor(span / 2));
+        inWindow = await countWhere(windowWhere(span));
+      }
+      if (inWindow > 0) await processWindow(windowWhere(span)); // a single day above the cap is truncated to the cap
+      cursor = addDays(cursor, span);
+      if (inWindow < MAX_RECORDS_PER_RUN / 4) span = Math.min(span * 2, 60);
+    }
+    logger.info(`[BOAMP] Fetched ${fetchedTotal} notices`);
 
     // Deduplicate once per batch (cross-source, e.g. BOAMP vs PLACE) - not once per record,
     // which would rescan the whole opportunities table on every single insert.
@@ -155,7 +186,7 @@ export const collectBoampData = async (sourceId: number) => {
       `INSERT INTO connector_logs 
         (source_id, status, records_fetched, records_processed, records_failed, started_at, completed_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [sourceId, 'success', notices.length, inserted + updated, errors, startedAt, new Date()]
+      [sourceId, 'success', fetchedTotal, inserted + updated, errors, startedAt, new Date()]
     );
 
     await db.query(
