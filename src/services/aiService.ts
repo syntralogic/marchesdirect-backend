@@ -160,11 +160,48 @@ function extractRawDataContext(rawData: any, restCap: number = 2500): string {
   return parts.join('\n\n');
 }
 
+// Circuit breaker for Anthropic billing failures. When the account's credit
+// balance runs out, every call returns 400 "credit balance is too low", and
+// the background jobs (classification, analysis-sections backfill, ...) used
+// to keep firing dozens of doomed requests per run and flooding the logs.
+// On that specific error we stop calling the API for a cooldown window and
+// fail fast instead; normal calls resume automatically afterwards (or as
+// soon as credits are topped up and the window expires).
+const AI_BILLING_COOLDOWN_MS = 10 * 60 * 1000;
+let aiBillingBlockedUntil = 0;
+
+export const isAiBillingBlocked = (): boolean => Date.now() < aiBillingBlockedUntil;
+
+const isBillingError = (err: unknown): boolean => {
+  if (!axios.isAxiosError(err) || err.response?.status !== 400) return false;
+  const msg = String((err.response?.data as any)?.error?.message ?? '').toLowerCase();
+  return msg.includes('credit balance is too low');
+};
+
+const assertAiAvailable = (): void => {
+  if (isAiBillingBlocked()) {
+    throw new Error('AI temporarily unavailable: Anthropic credit balance too low');
+  }
+};
+
+const noteBillingErrorIfAny = (err: unknown): boolean => {
+  if (!isBillingError(err)) return false;
+  if (!isAiBillingBlocked()) {
+    logger.error(
+      `Anthropic credit balance too low - pausing all AI calls for ${AI_BILLING_COOLDOWN_MS / 60000} min. ` +
+      'Top up credits at console.anthropic.com > Plans & Billing.'
+    );
+  }
+  aiBillingBlockedUntil = Date.now() + AI_BILLING_COOLDOWN_MS;
+  return true;
+};
+
 const callClaudeAPI = async (
   messages: ClaudeMessage[],
   systemPrompt: string,
   maxTokens: number = MAX_TOKENS
 ): Promise<string> => {
+  assertAiAvailable();
   try {
     const payload: any = {
       model: MODEL,
@@ -213,6 +250,7 @@ const callClaudeAPI = async (
     throw new Error('No response from Claude API');
 
   } catch (err) {
+    if (noteBillingErrorIfAny(err)) throw err;
     // BUG (found live on Render, 2026-09-07): this only ever logged
     // err.message, which for an axios error is just the generic "Request
     // failed with status code 400" - Anthropic's actual error body (the
@@ -252,6 +290,7 @@ const callClaudeAPIWithTool = async (
   inputSchema: Record<string, any>,
   maxTokens: number = MAX_TOKENS
 ): Promise<Record<string, any>> => {
+  assertAiAvailable();
   try {
     const payload: any = {
       model: MODEL,
@@ -295,6 +334,7 @@ const callClaudeAPIWithTool = async (
       `No valid tool_use block from Claude API (stop_reason: ${response.data.stop_reason ?? 'unknown'})`
     );
   } catch (err) {
+    if (noteBillingErrorIfAny(err)) throw err;
     const status = axios.isAxiosError(err) ? err.response?.status : undefined;
     const detail = axios.isAxiosError(err) ? JSON.stringify(err.response?.data) : undefined;
     const errorMessage = err instanceof Error ? err.message : String(err);
@@ -1225,6 +1265,10 @@ Estimated Value: ${opp.estimated_value || 'Not specified'}`;
     return true;
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
+    // AI outage (credits exhausted): not this row's fault. Leave its status
+    // untouched so it is picked up again once credits are back, and don't
+    // log one error line per row.
+    if (isAiBillingBlocked()) return false;
     logger.error(`Classification failed for ${opportunityId}: ${errorMessage}`);
 
     await db.query(
@@ -1643,6 +1687,10 @@ export const generateAnalysisSectionsForOpportunities = async (limit: number = 5
   let succeeded = 0;
   let failed = 0;
   for (const row of result.rows) {
+    if (isAiBillingBlocked()) {
+      logger.warn('[AnalysisSectionsBackfill] AI paused (credit balance too low) - stopping this batch early');
+      break;
+    }
     try {
       await generateOpportunityAnalysisSections(row.id);
       succeeded++;
@@ -1847,6 +1895,7 @@ export const classifyUnanalyzedOpportunities = async (limit: number = 100) => {
     let failed = 0;
 
     for (const opp of result.rows) {
+      if (isAiBillingBlocked()) break;
       const success = await classifyOpportunity(opp.id);
       if (success) classified++;
       else failed++;
