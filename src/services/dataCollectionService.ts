@@ -22,11 +22,13 @@ import { decodeHtmlEntities, truncateForColumn } from '../utils/textSanitize';
 // (every 6h for BOAMP, 24h for DECP per data_sources.frequency_hours) keep
 // working through the backlog day over day.
 const PAGE_SIZE = 100;
-// Raised from 3000. Opendatasoft's /records endpoint refuses offset+limit above
-// 10,000, so 9,900 is the most one paged run can pull. Override with the
-// BOAMP_MAX_RECORDS_PER_RUN env var.
+// BOAMP writes rows one at a time (SELECT + INSERT/UPDATE per notice, 1-2s
+// per round trip on this DB), so 3,000 already takes ~25 min and 9,900 takes
+// well over an hour. Kept at 3,000 by default; raise it with the
+// BOAMP_MAX_RECORDS_PER_RUN env var (max 9,900 - Opendatasoft refuses
+// offset+limit above 10,000) once BOAMP is moved to bulk upserts.
 const MAX_RECORDS_PER_RUN = Math.min(
-  Number(process.env.BOAMP_MAX_RECORDS_PER_RUN) > 0 ? Number(process.env.BOAMP_MAX_RECORDS_PER_RUN) : 9900,
+  Number(process.env.BOAMP_MAX_RECORDS_PER_RUN) > 0 ? Number(process.env.BOAMP_MAX_RECORDS_PER_RUN) : 3000,
   9900
 );
 // DECP's source is a single pre-downloaded Parquet file already fully
@@ -1260,6 +1262,15 @@ export const scheduleDataCollection = async (force: boolean = false) => {
     logger.info('No sources due for collection right now.');
     return;
   }
+
+  // DECP first. It is by far the biggest source (tens of thousands of rows,
+  // written in fast 500-row bulk chunks), while BOAMP/TED/PLACE write one row
+  // at a time (SELECT + INSERT/UPDATE, 1-2s each on this DB) and can take an
+  // hour+ per run. With DECP last, every restart/deploy that landed during
+  // BOAMP's slow loop killed the process before DECP ever started (28 Sep:
+  // SIGTERM in the middle of the BOAMP loop, DECP stuck at ~40k rows).
+  const priority = (code: string) => (code === 'decp' ? 0 : 1);
+  sources.rows.sort((a: any, b: any) => priority(a.code) - priority(b.code));
 
   for (const source of sources.rows) {
     try {
