@@ -22,7 +22,13 @@ import { decodeHtmlEntities, truncateForColumn } from '../utils/textSanitize';
 // (every 6h for BOAMP, 24h for DECP per data_sources.frequency_hours) keep
 // working through the backlog day over day.
 const PAGE_SIZE = 100;
-const MAX_RECORDS_PER_RUN = 3000;
+// Raised from 3000. Opendatasoft's /records endpoint refuses offset+limit above
+// 10,000, so 9,900 is the most one paged run can pull. Override with the
+// BOAMP_MAX_RECORDS_PER_RUN env var.
+const MAX_RECORDS_PER_RUN = Math.min(
+  Number(process.env.BOAMP_MAX_RECORDS_PER_RUN) > 0 ? Number(process.env.BOAMP_MAX_RECORDS_PER_RUN) : 9900,
+  9900
+);
 // DECP's source is a single pre-downloaded Parquet file already fully
 // parsed into memory before this cap is applied (see collectDecpData) - so
 // raising it doesn't add extra download/parse cost, only how many of the
