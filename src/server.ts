@@ -8,6 +8,7 @@ import path from 'path';
 
 import { db, ensureSchema } from './config/database';
 import { logger } from './utils/logger';
+import { explainDbFailure } from './utils/dbDiagnostics';
 import { errorHandler } from './middleware/errorHandler';
 import { drainActiveJobs } from './utils/jobTracker';
 import { authenticate, optionalAuth } from './middleware/auth';
@@ -316,9 +317,16 @@ const startServer = async () => {
         await db.query('SELECT NOW()');
         break;
       } catch (err: any) {
-        if (attempt >= maxAttempts) throw err;
+        // Say WHERE we tried to connect and whether the host answers at all
+        // (TCP probe) - a bare "connection timeout" can't tell a paused
+        // Supabase project from a saturated pooler from a blocked network.
+        const why = await explainDbFailure().catch(() => 'diagnostics unavailable');
+        if (attempt >= maxAttempts) {
+          logger.error(`❌ Database still unreachable after ${maxAttempts} attempts (${err?.code || err?.message}): ${why}`);
+          throw err;
+        }
         const wait = Math.min(5000 * attempt, 20000);
-        logger.warn(`⏳ Database not reachable yet (attempt ${attempt}/${maxAttempts}: ${err?.code || err?.message}) - retrying in ${wait / 1000}s`);
+        logger.warn(`⏳ Database not reachable yet (attempt ${attempt}/${maxAttempts}: ${err?.code || err?.message}) - retrying in ${wait / 1000}s | ${why}`);
         await new Promise(r => setTimeout(r, wait));
       }
     }

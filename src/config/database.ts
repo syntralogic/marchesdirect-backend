@@ -12,6 +12,10 @@ dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 // set DB_SSL=false to explicitly disable (e.g. local Postgres with no SSL).
 const connectionString = process.env.DATABASE_URL;
 
+// How long pool.connect() waits for a free/new connection. Default unchanged
+// (10s); raise DB_CONNECT_TIMEOUT_MS on Render if Supabase cold-starts slowly.
+const CONNECT_TIMEOUT_MS = Math.max(1000, parseInt(process.env.DB_CONNECT_TIMEOUT_MS || '10000', 10) || 10000);
+
 const pool = connectionString
   ? new Pool({
       connectionString,
@@ -26,7 +30,7 @@ const pool = connectionString
       // Left real headroom rather than cutting it exactly to 15.
       max: 8,
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000,
+      connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
     })
   : new Pool({
       user: process.env.DB_USER,
@@ -37,7 +41,7 @@ const pool = connectionString
       ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
       max: 8,
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000,
+      connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
     });
 
 pool.on('error', (err) => {
