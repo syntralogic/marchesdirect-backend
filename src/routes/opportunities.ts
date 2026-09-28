@@ -1140,31 +1140,28 @@ const extractSourceUrl = (rawData: any): string | null => {
 // `status` filter so a caller can ask for the active-only cut of the same
 // counts - no `status` param keeps returning today's all-statuses total,
 // unchanged, for HeroCounters/the map.
-router.get('/stats/counts', async (req: Request, res: Response) => {
-  try {
-    const { status } = req.query as Record<string, string>;
-    // Same base conditions as the main search route (deleted_at + the
-    // 'merged' exclusion - deduplicationService.ts's internal marker for
-    // the losing side of a duplicate pair, never a real-world status) so
-    // this can never disagree with what an unfiltered search shows.
-    // 27 Sep client report, point 5: same TED-only country guard as the
-    // main search route above, kept here too so these hero-tile totals
-    // never promise a count the (now-filtered) list can't actually show.
-    const conditions: string[] = [
-      "o.deleted_at IS NULL",
-      "COALESCE(o.status, '') != 'merged'",
-      "(ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))",
-    ];
-    const params: any[] = [];
-    if (status) {
-      const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
-      if (statuses.length > 0) {
-        conditions.push(`o.status = ANY($1::text[])`);
-        params.push(statuses);
-      }
+// Shared by the route below and by warmOpportunityCounts() (called once at
+// boot). Runs the aggregate in a transaction with its own statement_timeout
+// (SET LOCAL - never leaks to other queries) because on a cold/loaded
+// Supabase pooler this full-table count can exceed the default timeout.
+async function loadOpportunityCounts(status?: string) {
+  const conditions: string[] = [
+    "o.deleted_at IS NULL",
+    "COALESCE(o.status, '') != 'merged'",
+    "(ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))",
+  ];
+  const params: any[] = [];
+  if (status) {
+    const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
+    if (statuses.length > 0) {
+      conditions.push(`o.status = ANY($1::text[])`);
+      params.push(statuses);
     }
-    const where = `WHERE ${conditions.join(' AND ')}`;
-    const result = await cached(`counts:${params.length ? String(params[0]) : ''}`, 5 * 60 * 1000, () => db.query(
+  }
+  const where = `WHERE ${conditions.join(' AND ')}`;
+  const result = await cached(`counts:${params.length ? String(params[0]) : ''}`, 5 * 60 * 1000, () => db.transaction(async (client) => {
+    await client.query('SET LOCAL statement_timeout = 60000');
+    return client.query(
       `SELECT ot.code AS journey, COUNT(*)::int AS count
        FROM opportunities o
        LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
@@ -1172,22 +1169,49 @@ router.get('/stats/counts', async (req: Request, res: Response) => {
        ${where}
        GROUP BY ot.code`,
       params
-    ));
-    const byJourney: Record<string, number> = {};
-    let total = 0;
-    for (const row of result.rows) {
-      byJourney[row.journey] = row.count;
-      total += row.count;
+    );
+  }));
+  const byJourney: Record<string, number> = {};
+  let total = 0;
+  for (const row of result.rows) {
+    byJourney[row.journey] = row.count;
+    total += row.count;
+  }
+  return {
+    total,
+    public_procurement: byJourney['public_procurement'] || 0,
+    tender: byJourney['tender'] || 0,
+    subcontracting: byJourney['subcontracting'] || 0,
+  };
+}
+
+// Fills the counts cache right after boot so the first homepage visit after a
+// deploy/restart is served from memory instead of racing a cold DB (28 Sep:
+// the homepage tiles showed "0 opportunité" because the very first count
+// query after the restart failed and the frontend treats any error as 0).
+// Retries a few times; never throws.
+export async function warmOpportunityCounts(): Promise<void> {
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    try {
+      await loadOpportunityCounts();
+      await loadOpportunityCounts('active');
+      logger.info('✅ Opportunity counts cache warmed');
+      return;
+    } catch (err: any) {
+      logger.warn(`Opportunity counts warm-up attempt ${attempt}/6 failed: ${err?.message}`);
+      await new Promise(r => setTimeout(r, 15000));
     }
-    res.json({
-      total,
-      public_procurement: byJourney['public_procurement'] || 0,
-      tender: byJourney['tender'] || 0,
-      subcontracting: byJourney['subcontracting'] || 0,
-    });
+  }
+}
+
+router.get('/stats/counts', async (req: Request, res: Response) => {
+  try {
+    const { status } = req.query as Record<string, string>;
+    res.json(await loadOpportunityCounts(status));
   } catch (err: any) {
     logger.error('Opportunity counts error:', err);
-    res.status(500).json({ error: 'Failed to load opportunity counts' });
+    // 503 (not 500): temporary, the client should retry rather than treat it as "0".
+    res.set('Retry-After', '5').status(503).json({ error: 'Failed to load opportunity counts' });
   }
 });
 
