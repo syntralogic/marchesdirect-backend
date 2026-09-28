@@ -81,11 +81,36 @@ const parser = new Parser();
 // BOAMP CONNECTOR (French Public Procurement)
 // ============================================================================
 
+// Stops a connector run BEFORE it tries to write when the database cannot
+// take writes. Supabase's Free plan flips the whole database read-only once
+// it passes 500 MB, after which every INSERT/UPDATE fails with "cannot
+// execute INSERT in a read-only transaction" - and each connector would keep
+// re-fetching thousands of records only to fail chunk after chunk, with the
+// real reason buried in the logs. This fails fast with the reason in
+// connector_logs instead. transaction_read_only is always checked (no false
+// positives on any plan); the size check is opt-in via DB_SIZE_LIMIT_MB
+// (e.g. 450 on the Free plan, unset/0 on Pro) so it can't block a bigger plan.
+export async function assertDbHasRoom(): Promise<void> {
+  const ro = await db.query('SHOW transaction_read_only');
+  if (String(ro.rows[0]?.transaction_read_only).toLowerCase() === 'on') {
+    throw new Error('DATABASE_READ_ONLY: the database is in read-only mode (Supabase does this when the Free plan 500 MB storage limit is exceeded). Free space or upgrade the plan, then run: set default_transaction_read_only = \'off\';');
+  }
+  const limitMb = Number(process.env.DB_SIZE_LIMIT_MB);
+  if (limitMb > 0) {
+    const sz = await db.query('SELECT pg_database_size(current_database()) AS bytes');
+    const usedMb = Number(sz.rows[0]?.bytes) / 1048576;
+    if (usedMb >= limitMb) {
+      throw new Error(`DATABASE_STORAGE_FULL: database is ${usedMb.toFixed(0)} MB, at/over DB_SIZE_LIMIT_MB=${limitMb}. Ingestion paused to avoid the read-only lockout - free space or raise the limit after upgrading.`);
+    }
+  }
+}
+
 export const collectBoampData = async (sourceId: number) => {
   const logId = uuid();
   const startedAt = new Date();
 
   try {
+    await assertDbHasRoom();
     logger.info(`[BOAMP] Starting collection (log: ${logId})`);
 
     // Real BOAMP open-data portal (Opendatasoft/DILA) - public dataset, no API key required.
@@ -290,6 +315,7 @@ export const collectPlaceData = async (sourceId: number) => {
   const startedAt = new Date();
 
   try {
+    await assertDbHasRoom();
     logger.info(`[PLACE] Starting collection (log: ${logId})`);
 
     const endpoint = process.env.PLACE_API_ENDPOINT || 'https://api.place.gouv.fr/v1/notices';
@@ -444,6 +470,7 @@ export const collectDecpData = async (sourceId: number) => {
   let tmpPath: string | null = null;
 
   try {
+    await assertDbHasRoom();
     logger.info('[DECP] Starting collection (downloading consolidated Parquet file - this can take a few minutes)');
 
     const fileUrl = process.env.DECP_PARQUET_URL
@@ -772,6 +799,7 @@ export const collectBatiwebData = async (sourceId: number) => {
   const startedAt = new Date();
 
   try {
+    await assertDbHasRoom();
     logger.info('[Batiweb] Starting collection');
 
     const feedUrl = process.env.BATIWEB_FEED_URL || 'https://www.batiweb.com/rss/actualites.xml';
@@ -893,6 +921,7 @@ export const collectTedData = async (sourceId: number) => {
   const startedAt = new Date();
 
   try {
+    await assertDbHasRoom();
     logger.info(`[TED] Starting collection (Search API)`);
 
     // eForms multilingual/nested fields commonly come back as either a
