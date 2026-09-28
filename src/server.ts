@@ -394,22 +394,31 @@ const startServer = async () => {
       });
     }
 
-    // Start background jobs
-    require('./jobs/dataCollection').startScheduledJobs();
-    require('./jobs/documentIngestion').startDocumentIngestion();
-    require('./jobs/documentExpiry').startExpiryCheck();
-    require('./jobs/seoGeneration').startSEOGeneration();
-    require('./jobs/backupManagement').startBackupSchedule();
-    require('./jobs/searchIndexRefresh').startSearchIndexRefresh();
-    require('./jobs/factsBackfillJob').startFactsBackfillJob();
-    require('./jobs/locationRegionBackfillJob').startLocationRegionBackfillJob();
-    require('./jobs/geocodingBackfillJob').startGeocodingBackfillJob();
-    require('./jobs/staleSummaryBackfillJob').startStaleSummaryBackfillJob();
-    require('./jobs/analysisSectionsBackfillJob').startAnalysisSectionsBackfillJob();
-    require('./jobs/opportunityStatusJob').startOpportunityStatusJob();
-    require('./jobs/aiProcessing').startAIProcessing();
-    require('./jobs/opportunityAlerts').startOpportunityAlerts();
-    require('./jobs/crmRetry').startCrmRetrySchedule();
+    // Start background jobs. DISABLE_BACKGROUND_JOBS=true is an emergency
+    // kill switch: ~15 jobs (forced data collection on every boot, search-index
+    // refresh, geocoding/region/facts backfills...) all start together and share
+    // one 8-connection pool, which can keep a small/near-full database too busy
+    // to even answer the Supabase SQL editor ("connection timeout"). Set it on
+    // Render, let the DB recover, fix what needs fixing, then remove it.
+    if (process.env.DISABLE_BACKGROUND_JOBS === 'true') {
+      logger.warn('[Jobs] DISABLE_BACKGROUND_JOBS=true - NO background jobs started (no collection, refresh, backfills or AI processing).');
+    } else {
+      require('./jobs/dataCollection').startScheduledJobs();
+      require('./jobs/documentIngestion').startDocumentIngestion();
+      require('./jobs/documentExpiry').startExpiryCheck();
+      require('./jobs/seoGeneration').startSEOGeneration();
+      require('./jobs/backupManagement').startBackupSchedule();
+      require('./jobs/searchIndexRefresh').startSearchIndexRefresh();
+      require('./jobs/factsBackfillJob').startFactsBackfillJob();
+      require('./jobs/locationRegionBackfillJob').startLocationRegionBackfillJob();
+      require('./jobs/geocodingBackfillJob').startGeocodingBackfillJob();
+      require('./jobs/staleSummaryBackfillJob').startStaleSummaryBackfillJob();
+      require('./jobs/analysisSectionsBackfillJob').startAnalysisSectionsBackfillJob();
+      require('./jobs/opportunityStatusJob').startOpportunityStatusJob();
+      require('./jobs/aiProcessing').startAIProcessing();
+      require('./jobs/opportunityAlerts').startOpportunityAlerts();
+      require('./jobs/crmRetry').startCrmRetrySchedule();
+    }
 
     // Client's 20 Sep audit: "10 à 15 secondes... impression d'un site
     // vide" on arrival. Render's free tier spins a web service down after
