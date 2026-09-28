@@ -33,7 +33,16 @@ const MAX_RECORDS_PER_RUN = 3000;
 // MAX_RECORDS_PER_RUN; 24h between runs (data_sources.frequency_hours)
 // still means it takes several days to work through a large backlog, which
 // is fine for a one-off catch-up.
-const DECP_MAX_RECORDS_PER_RUN = 50000;
+// 28 Sep: DB stopped at ~40k DECP rows although 50,000 were "accepted" per run.
+// The cap used to count file rows, but the DECP file repeats the same uid
+// (one row per modification), so ~10k of those 50k collapsed into existing
+// rows via ON CONFLICT and the run always re-took the same first 50k rows of
+// the file - it could never grow past ~40k. The cap now counts UNIQUE
+// marchés (source_reference). Override with the DECP_MAX_RECORDS_PER_RUN env
+// var; keep an eye on the Supabase free-plan 500MB database limit when raising it.
+const DECP_MAX_RECORDS_PER_RUN = Number(process.env.DECP_MAX_RECORDS_PER_RUN) > 0
+  ? Number(process.env.DECP_MAX_RECORDS_PER_RUN)
+  : 100000;
 // TED Search API's own pagination-mode cap is 250/page (15k total via
 // pagination mode without switching to iteration/scroll mode) - see
 // docs.ted.europa.eu/reuse/search-api.html. Well under that ceiling.
@@ -494,6 +503,7 @@ export const collectDecpData = async (sourceId: number) => {
 
     let totalParsed = 0;
     let acceptedCount = 0;
+    const seenRefs = new Set<string>();
     let inserted = 0;
     let updated = 0;
     let errors = 0;
@@ -518,9 +528,16 @@ export const collectDecpData = async (sourceId: number) => {
         return (pubDate && pubDate >= since) || (notifDate && notifDate >= since);
       });
 
-      const toUpsert = recentBatch
-        .slice(0, Math.max(0, DECP_MAX_RECORDS_PER_RUN - acceptedCount))
-        .map(record => normalizeDecpRecord(record));
+      // Count unique marchés only (see DECP_MAX_RECORDS_PER_RUN comment).
+      const uniqueBatch: any[] = [];
+      for (const r of recentBatch) {
+        if (acceptedCount + uniqueBatch.length >= DECP_MAX_RECORDS_PER_RUN) break;
+        const ref = String(r.uid || r.id || '');
+        if (!ref || seenRefs.has(ref)) continue;
+        seenRefs.add(ref);
+        uniqueBatch.push(r);
+      }
+      const toUpsert = uniqueBatch.map(record => normalizeDecpRecord(record));
       acceptedCount += toUpsert.length;
 
       const result = await bulkUpsertOpportunities(sourceId, opportunityTypeId, toUpsert);
