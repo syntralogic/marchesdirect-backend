@@ -22,13 +22,11 @@ import { decodeHtmlEntities, truncateForColumn } from '../utils/textSanitize';
 // (every 6h for BOAMP, 24h for DECP per data_sources.frequency_hours) keep
 // working through the backlog day over day.
 const PAGE_SIZE = 100;
-// BOAMP writes rows one at a time (SELECT + INSERT/UPDATE per notice, 1-2s
-// per round trip on this DB), so 3,000 already takes ~25 min and 9,900 takes
-// well over an hour. Kept at 3,000 by default; raise it with the
-// BOAMP_MAX_RECORDS_PER_RUN env var (max 9,900 - Opendatasoft refuses
-// offset+limit above 10,000) once BOAMP is moved to bulk upserts.
+// BOAMP now writes in bulk upserts (500 rows per statement), so the per-run
+// cap is 9,900 - the most one paged run can pull, since Opendatasoft refuses
+// offset+limit above 10,000. Override with BOAMP_MAX_RECORDS_PER_RUN.
 const MAX_RECORDS_PER_RUN = Math.min(
-  Number(process.env.BOAMP_MAX_RECORDS_PER_RUN) > 0 ? Number(process.env.BOAMP_MAX_RECORDS_PER_RUN) : 3000,
+  Number(process.env.BOAMP_MAX_RECORDS_PER_RUN) > 0 ? Number(process.env.BOAMP_MAX_RECORDS_PER_RUN) : 9900,
   9900
 );
 // DECP's source is a single pre-downloaded Parquet file already fully
