@@ -68,3 +68,30 @@ describe('changePassword', () => {
     expect(mockedDb.query.mock.calls[2][0]).toMatch(/DELETE FROM user_sessions/);
   });
 });
+
+describe('registerCompanyAndUser', () => {
+  it('never grants a platform admin role to a self-service signup', async () => {
+    const { registerCompanyAndUser } = await import('../authService');
+    const calls: Array<{ sql: string; params: any[] }> = [];
+    const client = {
+      query: jest.fn(async (sql: string, params: any[] = []) => {
+        calls.push({ sql, params });
+        if (/SELECT id FROM users WHERE email/.test(sql)) return { rows: [] };
+        return { rows: [] };
+      }),
+      release: jest.fn(),
+    };
+    (mockedDb as any).getClient = jest.fn(async () => client);
+
+    await registerCompanyAndUser(
+      { companyName: 'Acme', firstName: 'A', lastName: 'B', email: 'new@acme.fr', password: 'Testpass123!' } as any,
+      'brand-1'
+    );
+
+    const userInsert = calls.find((c) => /INSERT INTO users/.test(c.sql));
+    expect(userInsert).toBeDefined();
+    // params order: id, company_id, email, password_hash, first_name, last_name, phone, role, status
+    expect(userInsert!.params[7]).toBe('user');
+    expect(['admin', 'super_admin']).not.toContain(userInsert!.params[7]);
+  });
+});
