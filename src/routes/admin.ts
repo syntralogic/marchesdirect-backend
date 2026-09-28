@@ -200,7 +200,11 @@ const backgroundRunsInFlight = new Set<string>();
 // now run in the background and the endpoint responds immediately; the existing
 // admin screen (last run / next run / connector_logs) is how the result gets
 // checked afterwards, same as waiting on the scheduled cron would be.
-const LONG_RUNNING_SOURCES = new Set(['decp']);
+// BOAMP joined the list when its per-run cap went to 9,900 records (28 Sep
+// audit: "Échec de l'exécution" on Run now even though the run was still
+// going server-side). Runs upsert by source_reference, so triggering it again
+// after a failed/cut-short run simply picks up whatever was left unloaded.
+const LONG_RUNNING_SOURCES = new Set(['decp', 'boamp']);
 
 router.post('/data-sources/:code/run', async (req: AuthRequest, res: Response) => {
   try {
