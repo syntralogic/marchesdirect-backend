@@ -128,30 +128,24 @@ export const collectBoampData = async (sourceId: number) => {
     const notices = rawRecords.map(normalizeBoampRecord);
     logger.info(`[BOAMP] Fetched ${notices.length} notices`);
 
-    // Process each notice
-    let inserted = 0;
-    let updated = 0;
-    let errors = 0;
-
-    for (const notice of notices) {
-      try {
-        const existing = await db.query(
-          'SELECT id FROM opportunities WHERE source_id = $1 AND source_reference = $2',
-          [sourceId, notice.source_reference]
-        );
-
-        if (existing.rows.length > 0) {
-          await updateOpportunity(existing.rows[0].id, notice);
-          updated++;
-        } else {
-          await insertOpportunity(sourceId, notice);
-          inserted++;
-        }
-      } catch (err) {
-        logger.error(`[BOAMP] Error processing notice ${notice.source_reference}:`, err);
-        errors++;
-      }
-    }
+    // Chunked bulk upsert (500 rows per INSERT ... ON CONFLICT) instead of the
+    // old per-notice SELECT + INSERT/UPDATE loop: at the 1-2s-per-query
+    // latency measured on the hosted DB, that loop took hours once the cap
+    // went past a few thousand notices, and scheduleDataCollection() runs
+    // sources one after another, so a slow BOAMP run also held up DECP/TED.
+    // Every notice here has datelimitereponse >= today (see the query
+    // above), so bulkUpsertOpportunities' status = 'active' on conflict is
+    // the correct value for all of them.
+    const publicProcurementType = await db.query(`SELECT id FROM opportunity_types WHERE code = 'public_procurement'`);
+    const opportunityTypeId = publicProcurementType.rows[0]?.id || null;
+    // A notice with no reference can't be keyed (source_reference is NOT
+    // NULL) and would fail its whole 500-row chunk - count it as an error
+    // and skip it instead, same outcome the old per-row loop had.
+    const usableNotices = notices.filter((n: any) => n.source_reference);
+    const bulk = await bulkUpsertOpportunities(sourceId, opportunityTypeId, usableNotices);
+    const inserted = bulk.inserted;
+    const updated = bulk.updated;
+    const errors = bulk.errors + (notices.length - usableNotices.length);
 
     // Deduplicate once per batch (cross-source, e.g. BOAMP vs PLACE) - not once per record,
     // which would rescan the whole opportunities table on every single insert.
@@ -402,7 +396,19 @@ async function downloadDecpParquet(url: string): Promise<string> {
   return tmpPath;
 }
 
+// Guards against two DECP runs overlapping in this process (the boot-time
+// forced run and the 2-hourly cron tick can both fire while a long run is
+// still going). Both would read the same saved cursor and process the same
+// rows twice, and each holds a 234MB file plus a 20k-row batch in memory.
+let decpRunInFlight = false;
+
 export const collectDecpData = async (sourceId: number) => {
+  if (decpRunInFlight) {
+    logger.info('[DECP] A run is already in progress in this process - skipping this trigger');
+    return { inserted: 0, updated: 0, duplicates: 0, errors: 0 };
+  }
+  decpRunInFlight = true;
+
   const startedAt = new Date();
   let tmpPath: string | null = null;
 
@@ -507,17 +513,37 @@ export const collectDecpData = async (sourceId: number) => {
     // modification.
     const since = new Date(Date.now() - 3 * 365 * 24 * 60 * 60 * 1000);
 
+    // Resume where the previous run stopped (data_sources.collection_cursor)
+    // instead of always starting at row 0. Before this, every run re-read the
+    // first DECP_MAX_RECORDS_PER_RUN matching rows of the file and stopped, so
+    // the DECP total was frozen at that cap no matter how often it ran. The
+    // cursor is a plain row offset into the file: the file is re-published
+    // daily so it drifts a little between runs, but every write is an
+    // idempotent upsert, so the worst case is re-touching a few rows, never
+    // duplicating one. A missing column (migration not applied yet) or an
+    // offset past the end of the file just means "start from 0".
+    let startRow = 0;
+    try {
+      const cursorResult = await db.query('SELECT collection_cursor FROM data_sources WHERE id = $1', [sourceId]);
+      const saved = Number(cursorResult.rows[0]?.collection_cursor) || 0;
+      startRow = saved > 0 && saved < numRows ? saved : 0;
+    } catch (err) {
+      logger.warn('[DECP] Could not read collection_cursor, starting from row 0:', err);
+    }
+    if (startRow > 0) logger.info(`[DECP] Resuming from row ${startRow}/${numRows}`);
+
     let totalParsed = 0;
     let acceptedCount = 0;
     const seenRefs = new Set<string>();
     let inserted = 0;
     let updated = 0;
     let errors = 0;
+    let nextCursor = startRow;
 
     const publicProcurementType = await db.query(`SELECT id FROM opportunity_types WHERE code = 'public_procurement'`);
     const opportunityTypeId = publicProcurementType.rows[0]?.id || null;
 
-    for (let rowStart = 0; rowStart < numRows && acceptedCount < DECP_MAX_RECORDS_PER_RUN; rowStart += BATCH_ROWS) {
+    for (let rowStart = startRow; rowStart < numRows && acceptedCount < DECP_MAX_RECORDS_PER_RUN; rowStart += BATCH_ROWS) {
       const rowEnd = Math.min(rowStart + BATCH_ROWS, numRows);
       let batchRows: any[] = [];
       await parquetRead({
@@ -535,9 +561,13 @@ export const collectDecpData = async (sourceId: number) => {
       });
 
       // Count unique marchés only (see DECP_MAX_RECORDS_PER_RUN comment).
+      // Whole batches only, no cut-off inside a batch: the saved cursor below
+      // is a batch boundary, so stopping partway through a batch would skip
+      // the remaining rows for good on the next run. The cap is checked
+      // between batches (loop condition), so it can overshoot by up to one
+      // batch (BATCH_ROWS = 20,000 rows read, fewer once filtered/deduped).
       const uniqueBatch: any[] = [];
       for (const r of recentBatch) {
-        if (acceptedCount + uniqueBatch.length >= DECP_MAX_RECORDS_PER_RUN) break;
         const ref = String(r.uid || r.id || '');
         if (!ref || seenRefs.has(ref)) continue;
         seenRefs.add(ref);
@@ -550,6 +580,16 @@ export const collectDecpData = async (sourceId: number) => {
       inserted += result.inserted;
       updated += result.updated;
       errors += result.errors;
+
+      // Saved after every batch, not just at the end: a crash/OOM/restart
+      // mid-run (the boot-time forced run re-triggers this on every restart)
+      // now resumes here instead of redoing the file from row 0.
+      nextCursor = rowEnd;
+      try {
+        await db.query('UPDATE data_sources SET collection_cursor = $1 WHERE id = $2', [nextCursor < numRows ? nextCursor : 0, sourceId]);
+      } catch (err) {
+        logger.warn('[DECP] Could not save collection_cursor (non-fatal):', err);
+      }
 
       logger.info(`[DECP] Batch rows ${rowStart}-${rowEnd}/${numRows}: ${recentBatch.length} matched the date filter, ${acceptedCount} accepted so far`);
     }
@@ -572,12 +612,20 @@ export const collectDecpData = async (sourceId: number) => {
       [sourceId, 'success', acceptedCount, inserted + updated, errors, startedAt, new Date()]
     );
 
+    // Reached the end of the file -> normal cadence (frequency_hours), and the
+    // cursor already wrapped to 0 above so the next full pass refreshes
+    // everything. Stopped at the cap with rows left -> schedule the next run
+    // as due right now, so the next 2-hourly cron tick continues the backlog
+    // instead of waiting a full frequency_hours (24h) between 50k-row slices.
+    const reachedEndOfFile = nextCursor >= numRows;
     await db.query(
-      "UPDATE data_sources SET last_run = NOW(), next_run = NOW() + (frequency_hours || ' hours')::interval, total_imports = total_imports + $2 WHERE id = $1",
+      reachedEndOfFile
+        ? "UPDATE data_sources SET last_run = NOW(), next_run = NOW() + (frequency_hours || ' hours')::interval, total_imports = total_imports + $2 WHERE id = $1"
+        : "UPDATE data_sources SET last_run = NOW(), next_run = NOW(), total_imports = total_imports + $2 WHERE id = $1",
       [sourceId, inserted]
     );
 
-    logger.info(`[DECP] Collection complete: ${inserted} inserted, ${updated} updated, ${duplicates} duplicates merged`);
+    logger.info(`[DECP] Collection complete: ${inserted} inserted, ${updated} updated, ${duplicates} duplicates merged. ${reachedEndOfFile ? 'Reached end of file, cursor reset to 0.' : `Stopped at row ${nextCursor}/${numRows}, next run continues from there.`}`);
 
     return { inserted, updated, duplicates, errors };
   } catch (err) {
@@ -597,6 +645,7 @@ export const collectDecpData = async (sourceId: number) => {
     if (tmpPath) {
       fs.unlink(tmpPath, () => {});
     }
+    decpRunInFlight = false;
   }
 };
 

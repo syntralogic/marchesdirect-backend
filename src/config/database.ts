@@ -836,6 +836,14 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // way DECP was.
   await step(`UPDATE data_sources SET active = true WHERE code = 'batiweb'`);
 
+  // Resume point for the bulk connectors (currently DECP). DECP's Parquet
+  // file is far bigger than one run's cap, and the old loop restarted at
+  // row 0 on every run - so every run re-upserted the same first
+  // DECP_MAX_RECORDS_PER_RUN rows and the table could never grow past that
+  // cap, no matter how many days it ran. collection_cursor stores the row
+  // offset the next run should continue from (0 = start of file).
+  await step(`ALTER TABLE data_sources ADD COLUMN IF NOT EXISTS collection_cursor INTEGER DEFAULT 0`);
+
   // Client's dix images (écran 10, "Documents de candidature"): DC1/DC2/DUME
   // each get their own "Générer" button and status, same as the existing
   // engagement_act_text pattern - a real template fill from the company's
