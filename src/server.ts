@@ -457,21 +457,40 @@ const startServer = async () => {
     if (process.env.DISABLE_BACKGROUND_JOBS === 'true') {
       logger.warn('[Jobs] DISABLE_BACKGROUND_JOBS=true - NO background jobs started (no collection, refresh, backfills or AI processing).');
     } else {
-      require('./jobs/dataCollection').startScheduledJobs();
-      require('./jobs/documentIngestion').startDocumentIngestion();
-      require('./jobs/documentExpiry').startExpiryCheck();
-      require('./jobs/seoGeneration').startSEOGeneration();
-      require('./jobs/backupManagement').startBackupSchedule();
-      require('./jobs/searchIndexRefresh').startSearchIndexRefresh();
-      require('./jobs/factsBackfillJob').startFactsBackfillJob();
-      require('./jobs/locationRegionBackfillJob').startLocationRegionBackfillJob();
-      require('./jobs/geocodingBackfillJob').startGeocodingBackfillJob();
-      require('./jobs/staleSummaryBackfillJob').startStaleSummaryBackfillJob();
-      require('./jobs/analysisSectionsBackfillJob').startAnalysisSectionsBackfillJob();
-      require('./jobs/opportunityStatusJob').startOpportunityStatusJob();
-      require('./jobs/aiProcessing').startAIProcessing();
-      require('./jobs/opportunityAlerts').startOpportunityAlerts();
-      require('./jobs/crmRetry').startCrmRetrySchedule();
+      // Staggered, not simultaneous: every start*() below also fires a boot-time
+      // pass, and 15 of them at once against the 8-connection pool produced the
+      // wall of "Connection terminated due to connection timeout" seen in the
+      // 28 Sep production log. Cheap, user-facing jobs first; heavy AI/SEO/
+      // collection last. JOB_START_GAP_MS=0 restores the old all-at-once start.
+      const gap = Number(process.env.JOB_START_GAP_MS ?? 8000);
+      const startups: Array<[string, string, string]> = [
+        ['opportunityStatusJob', 'startOpportunityStatusJob', 'opportunity status'],
+        ['searchIndexRefresh', 'startSearchIndexRefresh', 'search index refresh'],
+        ['locationRegionBackfillJob', 'startLocationRegionBackfillJob', 'location-region backfill'],
+        ['geocodingBackfillJob', 'startGeocodingBackfillJob', 'geocoding backfill'],
+        ['documentIngestion', 'startDocumentIngestion', 'DCE ingestion'],
+        ['dataCollection', 'startScheduledJobs', 'data collection'],
+        ['opportunityAlerts', 'startOpportunityAlerts', 'alerts'],
+        ['documentExpiry', 'startExpiryCheck', 'document expiry'],
+        ['crmRetry', 'startCrmRetrySchedule', 'CRM retry'],
+        ['backupManagement', 'startBackupSchedule', 'backups'],
+        ['factsBackfillJob', 'startFactsBackfillJob', 'facts backfill'],
+        ['aiProcessing', 'startAIProcessing', 'AI processing'],
+        ['analysisSectionsBackfillJob', 'startAnalysisSectionsBackfillJob', 'analysis-sections backfill'],
+        ['staleSummaryBackfillJob', 'startStaleSummaryBackfillJob', 'stale summary backfill'],
+        ['seoGeneration', 'startSEOGeneration', 'SEO generation'],
+      ];
+      startups.forEach(([mod, fn, label], i) => {
+        const start = () => {
+          try {
+            require(`./jobs/${mod}`)[fn]();
+          } catch (err) {
+            logger.error(`[Jobs] Failed to start ${label} job (others unaffected):`, err);
+          }
+        };
+        if (gap <= 0 || i === 0) start();
+        else setTimeout(start, i * gap).unref?.();
+      });
     }
 
     // Client's 20 Sep audit: "10 à 15 secondes... impression d'un site

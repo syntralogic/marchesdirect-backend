@@ -189,6 +189,26 @@ const step = async (sql: string): Promise<void> => {
   }
 };
 
+// One-shot data fixes that scan the whole opportunities table. They used to run
+// on EVERY boot; on a loaded/small DB each one hit the statement timeout (28 Sep
+// production log) and, together with the boot-time jobs, starved the 8-connection
+// pool. Success is recorded in app_once_migrations so later boots skip them
+// instantly; a failed/timed-out run records nothing and is retried next boot.
+const onceStep = async (key: string, sql: string): Promise<void> => {
+  try {
+    await pool.query(
+      `CREATE TABLE IF NOT EXISTS app_once_migrations (key TEXT PRIMARY KEY, done_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`
+    );
+    const done = await pool.query(`SELECT 1 FROM app_once_migrations WHERE key = $1`, [key]);
+    if (done.rows.length > 0) return;
+    await pool.query(sql);
+    await pool.query(`INSERT INTO app_once_migrations (key) VALUES ($1) ON CONFLICT DO NOTHING`, [key]);
+    logger.info(`✅ One-time migration "${key}" applied`);
+  } catch (err) {
+    logger.error(`⚠️ One-time migration "${key}" failed (will retry on next boot)`, err);
+  }
+};
+
 // Long-running index build, isolated from the boot path. Uses its own
 // connection so the statement timeout can be lifted for this one session only,
 // and CONCURRENTLY so INSERT/UPDATE on opportunities keep working meanwhile.
@@ -464,7 +484,10 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // so the ingestion job's WHERE clause (see jobs/documentIngestion.ts) picks
   // them up on its next pass instead of silently skipping every pre-existing
   // opportunity forever.
-  await step(
+  // The ingestion job itself also selects `dce_documents_status IS NULL`, so this
+  // is only a normalisation and must not rescan the table on every boot.
+  await onceStep(
+    'dce_documents_status_pending',
     `UPDATE opportunities SET dce_documents_status = 'pending' WHERE dce_documents_status IS NULL`
   );
   await step(`ALTER TABLE tenders ADD COLUMN IF NOT EXISTS source_completeness VARCHAR(50)`);
@@ -1019,7 +1042,10 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // again; this cleans up rows already polluted by the old code before
   // that fix shipped. No real French region name is exactly 3 uppercase
   // letters, so this regex can't false-positive against real data.
-  await step(`UPDATE opportunities SET location_region = NULL WHERE location_region ~ '^[A-Z]{3}$'`);
+  await onceStep(
+    'ted_country_codes_in_location_region',
+    `UPDATE opportunities SET location_region = NULL WHERE location_region ~ '^[A-Z]{3}$'`
+  );
 
   // Client's production audit: ~2,670 exact-duplicate rows still unmerged
   // because deduplicateOpportunities() never recorded a REJECTED (scored,
@@ -1281,13 +1307,16 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // was never wrongly-geocoded to begin with), it's marked verified and
   // this UPDATE stops matching it - converges to a no-op, doesn't loop.
   await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS location_geocode_verified BOOLEAN DEFAULT FALSE`);
-  await step(`
-    UPDATE opportunities
-    SET location_latitude = NULL, location_longitude = NULL
-    WHERE location_geocode_verified IS NOT TRUE
-      AND location_latitude IS NOT NULL
-      AND NOT (location_latitude = 0 AND location_longitude = 0)
-  `);
+  // One-time purge of pre-verification coordinates (the geocoding job stamps
+  // location_geocode_verified itself from now on), no longer a per-boot rescan.
+  await onceStep(
+    'reset_unverified_geocodes',
+    `UPDATE opportunities
+     SET location_latitude = NULL, location_longitude = NULL
+     WHERE location_geocode_verified IS NOT TRUE
+       AND location_latitude IS NOT NULL
+       AND NOT (location_latitude = 0 AND location_longitude = 0)`
+  );
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old
