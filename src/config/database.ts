@@ -189,6 +189,45 @@ const step = async (sql: string): Promise<void> => {
   }
 };
 
+// Long-running index build, isolated from the boot path. Uses its own
+// connection so the statement timeout can be lifted for this one session only,
+// and CONCURRENTLY so INSERT/UPDATE on opportunities keep working meanwhile.
+// A CONCURRENTLY build that is interrupted leaves an INVALID index that
+// "IF NOT EXISTS" would then skip forever, so drop it first if found.
+let unlocatedCityIndexRunning = false;
+const buildUnlocatedCityIndex = async (): Promise<void> => {
+  if (unlocatedCityIndexRunning) return;
+  unlocatedCityIndexRunning = true;
+  let client: PoolClient | null = null;
+  try {
+    const state = await pool.query(
+      `SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+        WHERE c.relname = 'opportunities_unlocated_city'`
+    );
+    if (state.rows[0]?.indisvalid) return; // already built
+    client = await pool.connect();
+    await client.query('SET statement_timeout = 0');
+    if (state.rows.length > 0) {
+      await client.query('DROP INDEX IF EXISTS opportunities_unlocated_city');
+    }
+    logger.info('Building opportunities_unlocated_city index in background...');
+    await client.query(
+      `CREATE INDEX CONCURRENTLY IF NOT EXISTS opportunities_unlocated_city
+         ON opportunities(location_city, location_department)
+         WHERE location_latitude IS NULL AND deleted_at IS NULL AND location_city IS NOT NULL`
+    );
+    logger.info('opportunities_unlocated_city index ready');
+  } catch (err) {
+    logger.error('⚠️ opportunities_unlocated_city index build failed (will retry on next boot)', err);
+  } finally {
+    if (client) {
+      try { await client.query('RESET statement_timeout'); } catch { /* connection discarded below */ }
+      client.release();
+    }
+    unlocatedCityIndexRunning = false;
+  }
+};
+
 const applyIncrementalMigrations = async (): Promise<void> => {
   // Client audit (15 Sep counter-audit, R11): "renovation" (unaccented) found
   // the private listing "Renovation complete de 18 logements", but
@@ -300,9 +339,11 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // statement timeout on ~100k rows (Render logs, 28 Sep). Partial index over
   // only the still-unlocated rows keeps that scan tiny and shrinks as they
   // get geocoded.
-  await step(`CREATE INDEX IF NOT EXISTS opportunities_unlocated_city
-    ON opportunities(location_city, location_department)
-    WHERE location_latitude IS NULL AND deleted_at IS NULL AND location_city IS NOT NULL`);
+  // Built in the background on a dedicated connection (see
+  // buildUnlocatedCityIndex): a plain CREATE INDEX over ~100k rows exceeded
+  // the DB's statement timeout on boot (Render logs, 28 Sep 15:48) and it
+  // would have blocked startup + write traffic while running.
+  void buildUnlocatedCityIndex();
 
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
 
