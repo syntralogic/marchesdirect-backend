@@ -127,6 +127,16 @@ const emailSendLimiter = rateLimit({
   max: 5,
 });
 
+// 28 Sep: DB readiness gate. The port now opens BEFORE the database is
+// reachable (see startServer), so API calls that arrive in that window get a
+// fast 503 instead of each one hanging ~10s on a pool connect timeout and
+// piling more connection attempts onto an already-saturated pooler.
+let dbReady = false;
+app.use('/api/', (_req, res, next) => {
+  if (dbReady) return next();
+  res.set('Retry-After', '5').status(503).json({ error: 'Service is starting - database not ready yet, retry in a few seconds.' });
+});
+
 app.use('/api/', limiter);
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
@@ -237,37 +247,36 @@ app.use(errorHandler);
 // DATABASE & SERVER STARTUP
 // ============================================================================
 
+// The four boot-time maintenance scripts each open their own pg Pool (default
+// 10 connections). Run in parallel they alone could exceed Supabase's 15-client
+// session-pool cap; chaining them keeps it to one extra pool at a time.
+let bootScriptChain: Promise<void> = Promise.resolve();
+const queueBootScript = (scriptPath: string, cb: (err: any, stdout: string, stderr: string) => void) => {
+  bootScriptChain = bootScriptChain.then(
+    () =>
+      new Promise<void>(resolve => {
+        require('child_process').execFile('node', [scriptPath], (err: any, stdout: string, stderr: string) => {
+          try {
+            cb(err, stdout, stderr);
+          } finally {
+            resolve();
+          }
+        });
+      })
+  );
+};
+
 const startServer = async () => {
   try {
-    // Test database connection
-    await db.query('SELECT NOW()');
-    logger.info('✅ Database connected successfully');
-
-    // Auto-load schema.sql if this is a fresh/empty database (e.g. brand new
-    // Supabase project) — no manual psql step required.
-    await ensureSchema();
-
-    // 26 Sep fix (Render: "Port scan timeout reached, no open ports
-    // detected" - deploy killed even though the build succeeded and the DB
-    // connected fine). Root cause: app.listen() used to happen at the very
-    // end of this function, after four execFile-spawned maintenance
-    // scripts (seed, region-name backfill, GMT-content reset, editorial
-    // seed) and every cron job's boot-time run had already been kicked
-    // off. That ordering is fine when the DB responds quickly - but this
-    // deploy's own logs show SELECT NOW() taking 4.3s and the schema check
-    // taking 6.5s (both near-instant normally), i.e. the DB itself was
-    // unusually slow/cold-starting - and spawning four more Node
-    // processes that each open their own DB pool right into that
-    // slowness pushed the whole boot sequence past Render's ~90s port-scan
-    // window before app.listen() was ever reached. Render only cares that
-    // *something* is listening on PORT; it has no way to know the rest of
-    // boot is still in progress behind that, so there's no reason for
-    // those one-time maintenance tasks and cron schedules to gate it.
-    // Moving app.listen() here - right after the one thing every request
-    // handler actually needs (schema present) - means Render's port scan
-    // succeeds immediately regardless of how slow the DB or these
-    // fire-and-forget background tasks are; they still run exactly as
-    // before, just after the port is already open instead of before it.
+    // 28 Sep (Render deploy loop: "Connection terminated due to connection
+    // timeout" on SELECT NOW() -> exit(1) -> restart, forever). Supabase's
+    // Session pooler caps total clients at 15 and Render keeps the OLD
+    // instance (up to 8 pooled connections + its boot scripts) running until
+    // the NEW one is healthy. The new instance used to connect to the DB
+    // BEFORE opening its port, so it could never get a connection, never
+    // became healthy, and the old one never let go. Open the port first (the
+    // /health route needs no DB), then retry the DB connection with backoff;
+    // exit only if it is still unreachable after ~2 minutes.
     const server = app.listen(PORT, () => {
       logger.info(`🚀 Server running on http://localhost:${PORT}`);
       logger.info(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
@@ -301,6 +310,47 @@ const startServer = async () => {
       }
     });
 
+    const maxAttempts = 8;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await db.query('SELECT NOW()');
+        break;
+      } catch (err: any) {
+        if (attempt >= maxAttempts) throw err;
+        const wait = Math.min(5000 * attempt, 20000);
+        logger.warn(`⏳ Database not reachable yet (attempt ${attempt}/${maxAttempts}: ${err?.code || err?.message}) - retrying in ${wait / 1000}s`);
+        await new Promise(r => setTimeout(r, wait));
+      }
+    }
+    logger.info('✅ Database connected successfully');
+
+    // Auto-load schema.sql if this is a fresh/empty database (e.g. brand new
+    // Supabase project) — no manual psql step required.
+    await ensureSchema();
+    dbReady = true;
+
+    // 26 Sep fix (Render: "Port scan timeout reached, no open ports
+    // detected" - deploy killed even though the build succeeded and the DB
+    // connected fine). Root cause: app.listen() used to happen at the very
+    // end of this function, after four execFile-spawned maintenance
+    // scripts (seed, region-name backfill, GMT-content reset, editorial
+    // seed) and every cron job's boot-time run had already been kicked
+    // off. That ordering is fine when the DB responds quickly - but this
+    // deploy's own logs show SELECT NOW() taking 4.3s and the schema check
+    // taking 6.5s (both near-instant normally), i.e. the DB itself was
+    // unusually slow/cold-starting - and spawning four more Node
+    // processes that each open their own DB pool right into that
+    // slowness pushed the whole boot sequence past Render's ~90s port-scan
+    // window before app.listen() was ever reached. Render only cares that
+    // *something* is listening on PORT; it has no way to know the rest of
+    // boot is still in progress behind that, so there's no reason for
+    // those one-time maintenance tasks and cron schedules to gate it.
+    // Moving app.listen() here - right after the one thing every request
+    // handler actually needs (schema present) - means Render's port scan
+    // succeeds immediately regardless of how slow the DB or these
+    // fire-and-forget background tasks are; they still run exactly as
+    // before, just after the port is already open instead of before it.
+
     // Auto-run the demo-data seed script (scripts/seed.js) on every boot,
     // same reasoning as ensureSchema() above: on Render's free tier there's
     // no shell to run `npm run db:seed` by hand, so it has to happen as
@@ -314,9 +364,8 @@ const startServer = async () => {
     // a real launch, once DEMO-* listings shouldn't appear next to live
     // BOAMP/DECP data for real visitors).
     if (process.env.SKIP_DEMO_SEED !== 'true') {
-      const { execFile } = require('child_process');
       const seedScriptPath = require('path').resolve(process.cwd(), 'scripts', 'seed.js');
-      execFile('node', [seedScriptPath], (err: any, stdout: string, stderr: string) => {
+      queueBootScript(seedScriptPath, (err: any, stdout: string, stderr: string) => {
         if (stdout) logger.info(`[demo seed] ${stdout.trim()}`);
         if (err) {
           // Non-fatal: the server must still come up even if seeding fails
@@ -339,9 +388,8 @@ const startServer = async () => {
     // successfully in production a first time, to skip the full-table pass
     // on every subsequent restart.
     if (process.env.SKIP_REGION_BACKFILL !== 'true') {
-      const { execFile } = require('child_process');
       const backfillScriptPath = require('path').resolve(process.cwd(), 'scripts', 'backfillRegionNames.js');
-      execFile('node', [backfillScriptPath], (err: any, stdout: string, stderr: string) => {
+      queueBootScript(backfillScriptPath, (err: any, stdout: string, stderr: string) => {
         if (stdout) logger.info(`[region backfill] ${stdout.trim()}`);
         if (err) {
           logger.error('[region backfill] failed (non-fatal):', stderr || err.message);
@@ -361,9 +409,8 @@ const startServer = async () => {
     // opened. Naturally a no-op after the first successful run (nothing
     // left to find), so no separate skip flag needed.
     if (process.env.SKIP_GMT_CONTENT_RESET !== 'true') {
-      const { execFile } = require('child_process');
       const gmtResetScriptPath = require('path').resolve(process.cwd(), 'scripts', 'resetGmtDateContent.js');
-      execFile('node', [gmtResetScriptPath], (err: any, stdout: string, stderr: string) => {
+      queueBootScript(gmtResetScriptPath, (err: any, stdout: string, stderr: string) => {
         if (stdout) logger.info(`[gmt content reset] ${stdout.trim()}`);
         if (err) {
           logger.error('[gmt content reset] failed (non-fatal):', stderr || err.message);
@@ -384,9 +431,8 @@ const startServer = async () => {
     // Set SKIP_EDITORIAL_SEED=true to turn this off later once a real
     // private-listings feed replaces it.
     if (process.env.SKIP_EDITORIAL_SEED !== 'true') {
-      const { execFile } = require('child_process');
       const editorialSeedPath = require('path').resolve(process.cwd(), 'scripts', 'seedEditorialListings.js');
-      execFile('node', [editorialSeedPath], (err: any, stdout: string, stderr: string) => {
+      queueBootScript(editorialSeedPath, (err: any, stdout: string, stderr: string) => {
         if (stdout) logger.info(`[editorial seed] ${stdout.trim()}`);
         if (err) {
           logger.error('[editorial seed] failed (non-fatal):', stderr || err.message);
