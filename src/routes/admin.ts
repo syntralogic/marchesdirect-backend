@@ -588,8 +588,13 @@ router.get('/seo-pages', async (req: AuthRequest, res: Response) => {
 // them at all - this is that endpoint).
 router.get('/stats', async (req: AuthRequest, res: Response) => {
   try {
-    const [opportunities, companies, matchRate, revenue, recentActivity] = await Promise.all([
-      db.query(`SELECT COUNT(*)::int AS count FROM opportunities WHERE status = 'active'`),
+    const [opportunities, totals, users, companies, matchRate, revenue, recentActivity] = await Promise.all([
+      db.query(`SELECT COUNT(*)::int AS count FROM opportunities WHERE status = 'active' AND deleted_at IS NULL`),
+      // Every real marché in the database: all statuses (open, awarded/closed,
+      // expired...), minus duplicates folded into another row ('merged') and
+      // soft-deleted rows. This is the number that matches the public search.
+      db.query(`SELECT COUNT(*)::int AS count FROM opportunities WHERE deleted_at IS NULL AND COALESCE(status, '') != 'merged'`),
+      db.query(`SELECT COUNT(*)::int AS count FROM users WHERE deleted_at IS NULL`),
       db.query(`SELECT COUNT(*)::int AS count FROM companies WHERE deleted_at IS NULL`),
       db.query(
         `SELECT
@@ -602,18 +607,42 @@ router.get('/stats', async (req: AuthRequest, res: Response) => {
          FROM subscriptions s JOIN subscription_plans sp ON s.plan_id = sp.id
          WHERE s.status = 'active'`
       ),
+      // Real recent events. audit_logs alone was always empty (nothing writes
+      // to it), so the feed also merges the latest sign-ups, visitor requests
+      // (callbacks / appointments / access requests) and connector runs.
       db.query(
-        `SELECT al.action, al.entity_type, al.created_at,
-                u.first_name, u.last_name, c.name AS company_name
-         FROM audit_logs al
-         LEFT JOIN users u ON al.user_id = u.id
-         LEFT JOIN companies c ON al.company_id = c.id
-         ORDER BY al.created_at DESC LIMIT 10`
+        `SELECT * FROM (
+           (SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), c.name, 'Système') AS actor,
+                   al.action AS action, al.entity_type AS target, al.created_at AS at
+            FROM audit_logs al
+            LEFT JOIN users u ON al.user_id = u.id
+            LEFT JOIN companies c ON al.company_id = c.id
+            ORDER BY al.created_at DESC LIMIT 10)
+           UNION ALL
+           (SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', first_name, last_name)), ''), email) AS actor,
+                   's''est inscrit' AS action, COALESCE(email, '') AS target, created_at AS at
+            FROM users WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 10)
+           UNION ALL
+           (SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', first_name, last_name)), ''), company_name, email, 'Visiteur') AS actor,
+                   'a envoyé une demande' AS action, COALESCE(company_name, email, '') AS target, created_at AS at
+            FROM crm_leads ORDER BY created_at DESC LIMIT 10)
+           UNION ALL
+           (SELECT 'Système' AS actor,
+                   CASE WHEN l.status = 'failed' THEN 'collecte en échec' ELSE 'collecte terminée' END AS action,
+                   CONCAT(UPPER(ds.code), COALESCE(' - ' || l.records_processed::text || ' marchés traités', '')) AS target,
+                   COALESCE(l.completed_at, l.started_at) AS at
+            FROM connector_logs l JOIN data_sources ds ON ds.id = l.source_id
+            ORDER BY l.started_at DESC LIMIT 10)
+         ) feed
+         WHERE at IS NOT NULL
+         ORDER BY at DESC LIMIT 10`
       ),
     ]);
 
     res.json({
       activeOpportunities: opportunities.rows[0].count,
+      totalOpportunities: totals.rows[0].count,
+      totalUsers: users.rows[0].count,
       totalCompanies: companies.rows[0].count,
       // null when there's no classified/failed data yet (fresh install, or AI
       // processing hasn't run) - the frontend shows "-" rather than a
@@ -621,10 +650,10 @@ router.get('/stats', async (req: AuthRequest, res: Response) => {
       matchRate: matchRate.rows[0].rate !== null ? Math.round(matchRate.rows[0].rate * 100) : null,
       monthlyRecurringRevenue: revenue.rows[0].mrr,
       recentActivity: recentActivity.rows.map((r) => ({
-        user: [r.first_name, r.last_name].filter(Boolean).join(' ') || r.company_name || 'Système',
+        user: r.actor,
         action: r.action,
-        target: r.entity_type,
-        time: r.created_at,
+        target: r.target,
+        time: r.at,
       })),
     });
   } catch (err: any) {
