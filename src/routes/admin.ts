@@ -4,10 +4,9 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { AuthRequest, requireRole } from '../middleware/auth';
 import { verifyDeduplicationQuality, getDeduplicationReport, deduplicateOpportunities } from '../services/deduplicationService';
-import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities, generateOpportunitySummary, generateAnalysisSectionsForOpportunities, generateOpportunityAnalysisSections } from '../services/aiService';
+import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities, generateAnalysisSectionsForOpportunities, generateOpportunityAnalysisSections } from '../services/aiService';
 import { collectBoampData, collectPlaceData, collectTedData, collectDecpData, collectBatiwebData } from '../services/dataCollectionService';
 import { runBackup, testRestore } from '../jobs/backupManagement';
-import { regionForDepartmentCode, normalizeDepartmentCode, extractDepartmentCode } from '../utils/departmentRegion';
 
 const router = Router();
 
