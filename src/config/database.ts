@@ -291,6 +291,14 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // the raw column wouldn't be usable for that comparison.
   await step(`CREATE INDEX IF NOT EXISTS opportunities_trade ON opportunities(trade_id)`);
   await step(`CREATE INDEX IF NOT EXISTS opportunities_department ON opportunities(UPPER(TRIM(location_department)))`);
+  // The geocoding backfill's SELECT DISTINCT location_city ... WHERE
+  // location_latitude IS NULL had no usable index and was cancelled by the
+  // statement timeout on ~100k rows (Render logs, 28 Sep). Partial index over
+  // only the still-unlocated rows keeps that scan tiny and shrinks as they
+  // get geocoded.
+  await step(`CREATE INDEX IF NOT EXISTS opportunities_unlocated_city
+    ON opportunities(location_city, location_department)
+    WHERE location_latitude IS NULL AND deleted_at IS NULL AND location_city IS NOT NULL`);
 
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
 
