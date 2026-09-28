@@ -14,6 +14,7 @@ import { drainActiveJobs } from './utils/jobTracker';
 import { authenticate, optionalAuth } from './middleware/auth';
 import { isVerificationRequired } from './services/phoneVerificationService';
 import { isSmsConfigured } from './services/smsService';
+import { warmOpportunityCounts } from './routes/opportunities';
 
 // Load environment variables
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
@@ -336,6 +337,8 @@ const startServer = async () => {
     // Supabase project) — no manual psql step required.
     await ensureSchema();
     dbReady = true;
+    // Warm the homepage counts cache (fire-and-forget; never blocks boot).
+    setTimeout(() => { require('./routes/opportunities').warmOpportunityCounts().catch(() => {}); }, 3000);
 
     // 26 Sep fix (Render: "Port scan timeout reached, no open ports
     // detected" - deploy killed even though the build succeeded and the DB

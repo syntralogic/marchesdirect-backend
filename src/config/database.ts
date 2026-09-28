@@ -209,6 +209,59 @@ const onceStep = async (key: string, sql: string): Promise<void> => {
   }
 };
 
+// Batched, background variant of onceStep for whole-table data fixes on
+// `opportunities`. A single UPDATE over ~100k rows hit the Supabase statement
+// timeout on every boot (28 Sep log: "dce_documents_status_pending" failed with
+// 57014, was retried and failed again on each restart, and held the pool while
+// doing so). This walks the table in small id-batches, each in its own short
+// transaction with its own SET LOCAL timeout, sleeps between batches so normal
+// traffic keeps its connections, and records completion only when a batch
+// updates zero rows. Fire-and-forget: it never delays boot.
+const onceBatchedRunning = new Set<string>();
+const onceBatchedStep = (key: string, setClause: string, whereClause: string): void => {
+  if (onceBatchedRunning.has(key)) return;
+  onceBatchedRunning.add(key);
+  (async () => {
+    try {
+      await pool.query(
+        `CREATE TABLE IF NOT EXISTS app_once_migrations (key TEXT PRIMARY KEY, done_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`
+      );
+      const done = await pool.query(`SELECT 1 FROM app_once_migrations WHERE key = $1`, [key]);
+      if (done.rows.length > 0) return;
+      await new Promise(r => setTimeout(r, 60000)); // let boot + counts warm-up finish first
+      let total = 0;
+      for (;;) {
+        const client = await pool.connect();
+        let n = 0;
+        try {
+          await client.query('BEGIN');
+          await client.query('SET LOCAL statement_timeout = 120000');
+          const r = await client.query(
+            `UPDATE opportunities SET ${setClause}
+             WHERE id IN (SELECT id FROM opportunities WHERE ${whereClause} LIMIT 1000)`
+          );
+          n = r.rowCount || 0;
+          await client.query('COMMIT');
+        } catch (err) {
+          try { await client.query('ROLLBACK'); } catch { /* connection discarded */ }
+          throw err;
+        } finally {
+          client.release();
+        }
+        total += n;
+        if (n === 0) break;
+        await new Promise(r => setTimeout(r, 300));
+      }
+      await pool.query(`INSERT INTO app_once_migrations (key) VALUES ($1) ON CONFLICT DO NOTHING`, [key]);
+      logger.info(`✅ One-time batched migration "${key}" applied (${total} rows)`);
+    } catch (err) {
+      logger.error(`⚠️ One-time batched migration "${key}" failed (will retry on next boot)`, err);
+    } finally {
+      onceBatchedRunning.delete(key);
+    }
+  })();
+};
+
 // Long-running index build, isolated from the boot path. Uses its own
 // connection so the statement timeout can be lifted for this one session only,
 // and CONCURRENTLY so INSERT/UPDATE on opportunities keep working meanwhile.
@@ -486,9 +539,10 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // opportunity forever.
   // The ingestion job itself also selects `dce_documents_status IS NULL`, so this
   // is only a normalisation and must not rescan the table on every boot.
-  await onceStep(
+  onceBatchedStep(
     'dce_documents_status_pending',
-    `UPDATE opportunities SET dce_documents_status = 'pending' WHERE dce_documents_status IS NULL`
+    `dce_documents_status = 'pending'`,
+    `dce_documents_status IS NULL`
   );
   await step(`ALTER TABLE tenders ADD COLUMN IF NOT EXISTS source_completeness VARCHAR(50)`);
 
@@ -1042,9 +1096,10 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // again; this cleans up rows already polluted by the old code before
   // that fix shipped. No real French region name is exactly 3 uppercase
   // letters, so this regex can't false-positive against real data.
-  await onceStep(
+  onceBatchedStep(
     'ted_country_codes_in_location_region',
-    `UPDATE opportunities SET location_region = NULL WHERE location_region ~ '^[A-Z]{3}$'`
+    `location_region = NULL`,
+    `location_region ~ '^[A-Z]{3}$'`
   );
 
   // Client's production audit: ~2,670 exact-duplicate rows still unmerged
@@ -1309,11 +1364,10 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS location_geocode_verified BOOLEAN DEFAULT FALSE`);
   // One-time purge of pre-verification coordinates (the geocoding job stamps
   // location_geocode_verified itself from now on), no longer a per-boot rescan.
-  await onceStep(
+  onceBatchedStep(
     'reset_unverified_geocodes',
-    `UPDATE opportunities
-     SET location_latitude = NULL, location_longitude = NULL
-     WHERE location_geocode_verified IS NOT TRUE
+    `location_latitude = NULL, location_longitude = NULL`,
+    `location_geocode_verified IS NOT TRUE
        AND location_latitude IS NOT NULL
        AND NOT (location_latitude = 0 AND location_longitude = 0)`
   );
