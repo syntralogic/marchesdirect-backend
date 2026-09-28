@@ -1,3 +1,4 @@
+import { cached } from '../utils/ttlCache';
 import { Router, Request, Response } from 'express';
 import { isUuid } from '../utils/uuid';
 import { body, validationResult } from 'express-validator';
@@ -1163,7 +1164,7 @@ router.get('/stats/counts', async (req: Request, res: Response) => {
       }
     }
     const where = `WHERE ${conditions.join(' AND ')}`;
-    const result = await db.query(
+    const result = await cached(`counts:${params.length ? String(params[0]) : ''}`, 5 * 60 * 1000, () => db.query(
       `SELECT ot.code AS journey, COUNT(*)::int AS count
        FROM opportunities o
        LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
@@ -1171,7 +1172,7 @@ router.get('/stats/counts', async (req: Request, res: Response) => {
        ${where}
        GROUP BY ot.code`,
       params
-    );
+    ));
     const byJourney: Record<string, number> = {};
     let total = 0;
     for (const row of result.rows) {
@@ -1236,7 +1237,7 @@ router.get('/stats/regions', async (req: Request, res: Response) => {
     // the entire nationwide un-located pool - see the region filter's 26
     // Sep comment). The frontend must NOT add this back into any one
     // region's displayed count.
-    const [result, unlocatedResult] = await Promise.all([
+    const [result, unlocatedResult] = await cached('regions', 10 * 60 * 1000, () => Promise.all([
       db.query(
         `SELECT MAX(location_region) AS region, COUNT(*)::int AS count
          FROM opportunities
@@ -1253,7 +1254,7 @@ router.get('/stats/regions', async (req: Request, res: Response) => {
            AND deleted_at IS NULL
            AND COALESCE(status, '') != 'merged'`
       ),
-    ]);
+    ]));
     res.json({ regions: result.rows, unlocatedCount: unlocatedResult.rows[0]?.count ?? 0 });
   } catch (err: any) {
     logger.error('Region stats error:', err);
@@ -1290,7 +1291,7 @@ router.get('/stats/departments', async (req: Request, res: Response) => {
     // Same reasoning as /stats/regions above: unlocatedCount is returned
     // for reference only and must NOT be added back into any one
     // department's displayed count (26 Sep fix).
-    const [result, unlocatedResult] = await Promise.all([
+    const [result, unlocatedResult] = await cached('departments', 10 * 60 * 1000, () => Promise.all([
       db.query(
         `SELECT
            CASE
@@ -1312,7 +1313,7 @@ router.get('/stats/departments', async (req: Request, res: Response) => {
            AND deleted_at IS NULL
            AND COALESCE(status, '') != 'merged'`
       ),
-    ]);
+    ]));
     res.json({ departments: result.rows, unlocatedCount: unlocatedResult.rows[0]?.count ?? 0 });
   } catch (err: any) {
     logger.error('Department stats error:', err);

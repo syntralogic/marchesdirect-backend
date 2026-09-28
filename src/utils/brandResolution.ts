@@ -1,5 +1,6 @@
 import { Request } from 'express';
 import { db } from '../config/database';
+import { cached } from './ttlCache';
 
 // ============================================================================
 // BRAND RESOLUTION (Milestone 10 - multi-brand duplication)
@@ -34,20 +35,25 @@ const normalizeHost = (req: Request): string => (req.hostname || '').replace(/^w
 export const resolveBrand = async (req: Request): Promise<ResolvedBrand | null> => {
   const host = normalizeHost(req);
 
-  let result = await db.query(
-    `SELECT id, code, name, domain, logo_url, color_primary, color_secondary, language, region_focus
-     FROM brands WHERE domain = $1 LIMIT 1`,
-    [host]
-  );
-
-  if (result.rows.length === 0) {
-    result = await db.query(
+  // Called on every page load (and by most public endpoints) for a table that
+  // basically never changes - cached per host for 2 minutes so it stops
+  // competing for the 8-connection DB pool. Brand edits show up within 2 min.
+  return cached(`brand:${host}`, 2 * 60 * 1000, async () => {
+    let result = await db.query(
       `SELECT id, code, name, domain, logo_url, color_primary, color_secondary, language, region_focus
-       FROM brands ORDER BY created_at ASC LIMIT 1`
+       FROM brands WHERE domain = $1 LIMIT 1`,
+      [host]
     );
-  }
 
-  return result.rows[0] ?? null;
+    if (result.rows.length === 0) {
+      result = await db.query(
+        `SELECT id, code, name, domain, logo_url, color_primary, color_secondary, language, region_focus
+         FROM brands ORDER BY created_at ASC LIMIT 1`
+      );
+    }
+
+    return (result.rows[0] ?? null) as ResolvedBrand | null;
+  });
 };
 
 /**
