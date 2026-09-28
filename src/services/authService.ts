@@ -216,7 +216,11 @@ export const registerCompanyAndUser = async (data: RegisterParams, brandId?: str
         data.firstName,
         data.lastName,
         data.phone || null,
-        'admin', // First user of company is admin
+        // Self-service signups are ordinary users. The 'admin' / 'super_admin' roles
+        // gate the platform-wide /api/admin/* and /api/crm/* routers, so they must
+        // only ever be granted by an existing admin (never by signing up) - assigning
+        // 'admin' here made every new registrant a full platform admin.
+        'user',
         'active',
       ]
     );
