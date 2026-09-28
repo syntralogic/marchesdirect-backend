@@ -1201,7 +1201,112 @@ export const updateOpportunity = async (opportunityId: string, data: any) => {
 // using the same unique constraint Postgres already enforces, and reads
 // back which rows were genuinely new via the classic `xmax = 0` trick so
 // inserted/updated counts stay accurate for connector_logs.
-const BULK_UPSERT_CHUNK = 500;
+const BULK_UPSERT_CHUNK = 200;
+// Below this size a failing chunk is not split further - it is counted as
+// errors instead of retried forever.
+const BULK_UPSERT_MIN_CHUNK = 25;
+// 28 Sep Render log: "canceling statement due to statement timeout" (57014)
+// on chunks around record 11000 of a DECP run. Cause: ON CONFLICT DO UPDATE
+// rewrote every already-existing row even when nothing changed, and every
+// rewrite recomputes the GENERATED search_vector (french to_tsvector +
+// unaccent over title+description) and updates the GIN index. A re-run over
+// mostly-existing data therefore did the most expensive possible work for
+// 500 rows per statement. Fixes: (1) skip rows whose values did not change,
+// (2) smaller chunks, (3) a per-transaction timeout just for this statement
+// (SET LOCAL, so it is safe behind a pooler and never leaks to other
+// queries), (4) a failed chunk is split in halves instead of losing all of it.
+const BULK_UPSERT_TIMEOUT_MS = 300000;
+
+async function upsertOpportunityChunk(sourceId: number, opportunityTypeId: string | null, chunk: any[]): Promise<{ inserted: number; updated: number }> {
+  const values: any[] = [];
+  const rowsSql: string[] = [];
+  chunk.forEach((data, idx) => {
+    const base = idx * 17;
+    rowsSql.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13}, $${base + 14}, $${base + 15}, $${base + 16}, $${base + 17})`);
+    values.push(
+      sourceId,
+      data.source_reference,
+      data.title,
+      data.description,
+      data.publication_date || new Date(),
+      data.deadline,
+      data.estimated_value,
+      // See truncateForColumn's comment in utils/textSanitize.ts - this is
+      // a multi-row INSERT, so one oversized value here used to fail the
+      // entire chunk, not just its own row.
+      truncateForColumn(data.location_city, 255),
+      truncateForColumn(data.location_region || null, 255),
+      // 27 Sep client report, point 6: location_department must be written
+      // here (DECP is the largest source); normalizeDepartmentCode() is
+      // re-applied so this path matches insertOpportunity's handling.
+      truncateForColumn(normalizeDepartmentCode(data.location_department) || data.location_department || null, 100),
+      // 27 Sep client report, point 5: DECP/Batiweb are French-only sources.
+      data.location_country || 'FR',
+      truncateForColumn(data.buyer_name || null, 1000),
+      opportunityTypeId,
+      JSON.stringify(data.raw || data),
+      'not_analyzed',
+      data.status || 'active',
+      data.official_url || null,
+    );
+  });
+
+  return db.transaction(async (client) => {
+    await client.query(`SET LOCAL statement_timeout = ${BULK_UPSERT_TIMEOUT_MS}`);
+    const result = await client.query(
+      `INSERT INTO opportunities AS o
+        (source_id, source_reference, title, description, publication_date, deadline,
+         estimated_value, location_city, location_region, location_department, location_country, buyer_name, opportunity_type_id,
+         raw_data, ai_classification_status, status, official_url)
+       VALUES ${rowsSql.join(', ')}
+       ON CONFLICT (source_id, source_reference) DO UPDATE SET
+         description = EXCLUDED.description,
+         deadline = EXCLUDED.deadline,
+         estimated_value = EXCLUDED.estimated_value,
+         raw_data = EXCLUDED.raw_data,
+         status = EXCLUDED.status,
+         official_url = COALESCE(EXCLUDED.official_url, o.official_url),
+         location_department = COALESCE(EXCLUDED.location_department, o.location_department),
+         location_country = COALESCE(EXCLUDED.location_country, o.location_country),
+         updated_at = NOW()
+       WHERE o.description IS DISTINCT FROM EXCLUDED.description
+          OR o.deadline IS DISTINCT FROM EXCLUDED.deadline
+          OR o.estimated_value IS DISTINCT FROM EXCLUDED.estimated_value
+          OR o.raw_data IS DISTINCT FROM EXCLUDED.raw_data
+          OR o.status IS DISTINCT FROM EXCLUDED.status
+          OR o.official_url IS DISTINCT FROM COALESCE(EXCLUDED.official_url, o.official_url)
+          OR o.location_department IS DISTINCT FROM COALESCE(EXCLUDED.location_department, o.location_department)
+          OR o.location_country IS DISTINCT FROM COALESCE(EXCLUDED.location_country, o.location_country)
+       RETURNING (xmax = 0) AS was_insert`,
+      values
+    );
+    let inserted = 0, updated = 0;
+    // Rows that already existed and did not change are skipped by the WHERE
+    // above, so they are not returned and not counted as "updated".
+    for (const row of result.rows) {
+      if (row.was_insert) inserted++; else updated++;
+    }
+    return { inserted, updated };
+  });
+}
+
+async function upsertChunkWithSplit(sourceId: number, opportunityTypeId: string | null, chunk: any[], offset: number): Promise<{ inserted: number; updated: number; errors: number }> {
+  try {
+    const r = await upsertOpportunityChunk(sourceId, opportunityTypeId, chunk);
+    return { ...r, errors: 0 };
+  } catch (err) {
+    if (chunk.length <= BULK_UPSERT_MIN_CHUNK) {
+      logger.error(`[bulkUpsertOpportunities] Chunk of ${chunk.length} starting at record ${offset} failed:`, err);
+      return { inserted: 0, updated: 0, errors: chunk.length };
+    }
+    logger.warn(`[bulkUpsertOpportunities] Chunk of ${chunk.length} at record ${offset} failed (${(err as Error)?.message}) - retrying as two halves`);
+    const mid = Math.ceil(chunk.length / 2);
+    const a = await upsertChunkWithSplit(sourceId, opportunityTypeId, chunk.slice(0, mid), offset);
+    const b = await upsertChunkWithSplit(sourceId, opportunityTypeId, chunk.slice(mid), offset + mid);
+    return { inserted: a.inserted + b.inserted, updated: a.updated + b.updated, errors: a.errors + b.errors };
+  }
+}
+
 async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: string | null, rawRecords: any[]): Promise<{ inserted: number; updated: number; errors: number }> {
   const byReference = new Map<string, any>();
   for (const record of rawRecords) byReference.set(record.source_reference, record); // last occurrence wins
@@ -1209,79 +1314,10 @@ async function bulkUpsertOpportunities(sourceId: number, opportunityTypeId: stri
 
   let inserted = 0, updated = 0, errors = 0;
   for (let i = 0; i < records.length; i += BULK_UPSERT_CHUNK) {
-    const chunk = records.slice(i, i + BULK_UPSERT_CHUNK);
-    const values: any[] = [];
-    const rowsSql: string[] = [];
-    chunk.forEach((data, idx) => {
-      const base = idx * 17;
-      rowsSql.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13}, $${base + 14}, $${base + 15}, $${base + 16}, $${base + 17})`);
-      values.push(
-        sourceId,
-        data.source_reference,
-        data.title,
-        data.description,
-        data.publication_date || new Date(),
-        data.deadline,
-        data.estimated_value,
-        // See truncateForColumn's comment in utils/textSanitize.ts - this is
-        // a multi-row INSERT (BULK_UPSERT_CHUNK rows per statement), so one
-        // oversized value here used to fail the entire chunk, not just its
-        // own row.
-        truncateForColumn(data.location_city, 255),
-        truncateForColumn(data.location_region || null, 255),
-        // 27 Sep client report, point 6: this INSERT never had a
-        // location_department column at all, even though DECP is the
-        // largest single source and normalizeDecpRecord() already computes
-        // a resolvedDepartment - every DECP row's department was silently
-        // dropped on the floor before it ever reached the database, so a
-        // department-filtered search structurally could never find a DECP
-        // row, no matter how good the source data or the normalization
-        // logic upstream was. normalizeDepartmentCode() re-applied here too
-        // (cheap no-op if normalizeDecpRecord already normalized it) so
-        // this insert path gets the same name-vs-code handling as
-        // insertOpportunity's, rather than depending on every caller having
-        // already normalized before reaching here.
-        truncateForColumn(normalizeDepartmentCode(data.location_department) || data.location_department || null, 100),
-        // 27 Sep client report, point 5: DECP/Batiweb are French-only
-        // sources by construction, same reasoning as insertOpportunity's
-        // location_country above.
-        data.location_country || 'FR',
-        truncateForColumn(data.buyer_name || null, 1000),
-        opportunityTypeId,
-        JSON.stringify(data.raw || data),
-        'not_analyzed',
-        data.status || 'active',
-        data.official_url || null,
-      );
-    });
-
-    try {
-      const result = await db.query(
-        `INSERT INTO opportunities
-          (source_id, source_reference, title, description, publication_date, deadline,
-           estimated_value, location_city, location_region, location_department, location_country, buyer_name, opportunity_type_id,
-           raw_data, ai_classification_status, status, official_url)
-         VALUES ${rowsSql.join(', ')}
-         ON CONFLICT (source_id, source_reference) DO UPDATE SET
-           description = EXCLUDED.description,
-           deadline = EXCLUDED.deadline,
-           estimated_value = EXCLUDED.estimated_value,
-           raw_data = EXCLUDED.raw_data,
-           status = EXCLUDED.status,
-           official_url = COALESCE(EXCLUDED.official_url, opportunities.official_url),
-           location_department = COALESCE(EXCLUDED.location_department, opportunities.location_department),
-           location_country = COALESCE(EXCLUDED.location_country, opportunities.location_country),
-           updated_at = NOW()
-         RETURNING (xmax = 0) AS was_insert`,
-        values
-      );
-      for (const row of result.rows) {
-        if (row.was_insert) inserted++; else updated++;
-      }
-    } catch (err) {
-      logger.error(`[bulkUpsertOpportunities] Chunk starting at record ${i} failed:`, err);
-      errors += chunk.length;
-    }
+    const r = await upsertChunkWithSplit(sourceId, opportunityTypeId, records.slice(i, i + BULK_UPSERT_CHUNK), i);
+    inserted += r.inserted;
+    updated += r.updated;
+    errors += r.errors;
   }
   return { inserted, updated, errors };
 }
