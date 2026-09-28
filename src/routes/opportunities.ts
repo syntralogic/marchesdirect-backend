@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { isUuid } from '../utils/uuid';
 import { body, validationResult } from 'express-validator';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
@@ -15,6 +16,16 @@ import { geocodeCity } from '../services/geocodingService';
 import { optionalAuth, authenticate, requireRole, AuthRequest } from '../middleware/auth';
 
 const router = Router();
+
+// Every :id in this router is an opportunity uuid. Reject malformed ids as a
+// plain 404 before they reach Postgres (which would otherwise throw 22P02 and
+// surface as a 500 "Impossible de charger cette annonce" on garbled links).
+router.param('id', (_req, res, next, id) => {
+  if (!isUuid(id)) {
+    return res.status(404).json({ error: 'Opportunity not found' });
+  }
+  next();
+});
 
 // Shared by GET /:id (to decide what to redact) and GET /:id/access (to
 // report the unlock state directly) so the two can never disagree.
