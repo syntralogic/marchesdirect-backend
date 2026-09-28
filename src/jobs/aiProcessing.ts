@@ -1,7 +1,7 @@
 import cron from 'node-cron';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
-import { classifyOpportunity, generateOpportunitySummary } from '../services/aiService';
+import { classifyOpportunity, generateOpportunitySummary, isAiBillingBlocked } from '../services/aiService';
 import { trackJob } from '../utils/jobTracker';
 
 // ============================================================================
@@ -78,6 +78,10 @@ export const processUnclassifiedOpportunities = async () => {
     let failed = 0;
 
     for (const row of result.rows) {
+      if (isAiBillingBlocked()) {
+        logger.warn('[aiProcessing] AI paused (credit balance too low) - stopping classification batch early');
+        break;
+      }
       const ok = await classifyOpportunity(row.id);
       if (ok) classified++;
       else failed++;

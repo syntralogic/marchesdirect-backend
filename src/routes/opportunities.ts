@@ -1743,10 +1743,10 @@ router.get('/:id/match-score', optionalAuth, async (req: AuthRequest, res: Respo
     });
     res.json(result);
   } catch (err: any) {
-    logger.error('Match score error:', err);
     if (err.message === 'Opportunity not found') {
       return res.status(404).json({ error: 'Opportunity not found' });
     }
+    logger.error('Match score error:', err);
     res.status(500).json({ error: 'Failed to compute match score' });
   }
 });
