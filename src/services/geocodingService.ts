@@ -46,19 +46,40 @@ const GEOCODE_BASE_URL = 'https://api-adresse.data.gouv.fr/search/';
 export interface GeocodeResult {
   lat: number;
   lng: number;
+  /** Department code (e.g. "69", "2A", "971") read from the matched commune; null if not derivable. */
+  department: string | null;
+  /** api-adresse confidence 0-1 (null when the API didn't send one). */
+  score: number | null;
 }
+
+/** 'error' = network/HTTP failure (transient, must be retried); 'nomatch' = the API answered but nothing trustworthy. */
+export type GeocodeOutcome =
+  | { status: 'ok'; result: GeocodeResult }
+  | { status: 'nomatch' }
+  | { status: 'error' };
+
+// Department of a matched commune: prefer `context` ("69, Rhone, Auvergne-Rhone-Alpes"),
+// fall back to the INSEE citycode prefix (2 chars, or 3 for 97x/98x overseas).
+export const departmentFromGeocodeProps = (props: any): string | null => {
+  const ctx = typeof props?.context === 'string' ? props.context.split(',')[0].trim().toUpperCase() : '';
+  if (/^(\d{2,3}|2A|2B)$/.test(ctx)) return ctx;
+  const cc = typeof props?.citycode === 'string' ? props.citycode.trim().toUpperCase() : '';
+  if (/^9[78]\d{3}$/.test(cc)) return cc.slice(0, 3);
+  if (/^(\d{5}|2[AB]\d{3})$/.test(cc)) return cc.slice(0, 2);
+  return null;
+};
 
 // department code -> INSEE citycode prefix isn't a real constraint the API
 // takes directly; we instead pass the department as part of the query text
 // (matches how a person would type it) since api-adresse free-text search
 // already ranks municipality-type results well. citycode filtering would
 // need the actual INSEE code, which we don't have from source data.
-export const geocodeCity = async (
+export const geocodeCityDetailed = async (
   city: string,
   departmentCode?: string | null
-): Promise<GeocodeResult | null> => {
+): Promise<GeocodeOutcome> => {
   const cityTrimmed = city?.trim();
-  if (!cityTrimmed) return null;
+  if (!cityTrimmed) return { status: 'nomatch' };
 
   const q = departmentCode ? `${cityTrimmed} (${departmentCode})` : cityTrimmed;
 
@@ -69,31 +90,29 @@ export const geocodeCity = async (
     });
     const feature = response.data?.features?.[0];
     const coords = feature?.geometry?.coordinates;
-    if (!Array.isArray(coords) || coords.length !== 2) return null;
-    // Client (26 Sep audit, point 8): a "Bordeaux, 200 km" radius search
-    // surfaced a notice whose own fiche says "Lieu : Ville de Saint
-    // Etienne" - hundreds of km outside that radius. api-adresse's
-    // free-text search with limit:1 always returns SOME municipality even
-    // for a poor match (a garbled source city name, a buyer's address
-    // fragment that isn't really a commune name) with no indication of
-    // that beyond a low `properties.score` (0-1 confidence) - which this
-    // never checked, so a low-confidence guess was stored and trusted
-    // exactly like a real match. Below a conservative threshold, treat it
-    // the same as no result at all: the 0,0 sentinel this returns as null
-    // for is EXCLUDED from every radius search (opportunities.ts), so a
-    // location we can't confidently place no longer silently claims one.
+    if (!Array.isArray(coords) || coords.length !== 2) return { status: 'nomatch' };
+    // Low-confidence guard (26 Sep audit, point 8): api-adresse with limit:1 always
+    // returns SOME commune; below 0.4 treat it as no result so a wrong place is
+    // never stored (0,0 sentinel rows are excluded from radius searches).
     const score = typeof feature?.properties?.score === 'number' ? feature.properties.score : null;
     if (score !== null && score < 0.4) {
       logger.warn(`[geocoding] Low-confidence match for "${q}" (score ${score}) - treating as unresolved`);
-      return null;
+      return { status: 'nomatch' };
     }
-    const [lng, lat] = coords; // GeoJSON order - see file-level note above.
-    if (typeof lat !== 'number' || typeof lng !== 'number') return null;
-    return { lat, lng };
+    const [lng, lat] = coords; // GeoJSON order is [lon, lat]
+    if (typeof lat !== 'number' || typeof lng !== 'number') return { status: 'nomatch' };
+    return { status: 'ok', result: { lat, lng, department: departmentFromGeocodeProps(feature?.properties), score } };
   } catch (err: any) {
-    // Not fatal for a single city - the backfill job just skips it this
-    // run and picks it up again next time (see geocodingBackfillJob.ts).
     logger.warn(`[geocoding] Failed for "${q}": ${err.message || err}`);
-    return null;
+    return { status: 'error' };
   }
+};
+
+// Backwards-compatible wrapper: null for both "no match" and "error".
+export const geocodeCity = async (
+  city: string,
+  departmentCode?: string | null
+): Promise<GeocodeResult | null> => {
+  const out = await geocodeCityDetailed(city, departmentCode);
+  return out.status === 'ok' ? out.result : null;
 };

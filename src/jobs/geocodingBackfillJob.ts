@@ -16,7 +16,8 @@
  */
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
-import { geocodeCity } from '../services/geocodingService';
+import { geocodeCityDetailed } from '../services/geocodingService';
+import { normalizeDepartmentCode, regionForDepartmentCode } from '../utils/departmentRegion';
 import { trackJob } from '../utils/jobTracker';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -55,31 +56,41 @@ export async function runGeocodingBackfillBatch(): Promise<{ geocoded: number; f
   let rowsUpdated = 0;
 
   for (const pair of pairs) {
-    const result = await geocodeCity(pair.location_city, pair.location_department);
-    if (result) {
+    const outcome = await geocodeCityDetailed(pair.location_city, pair.location_department);
+    if (outcome.status === 'ok') {
+      const result = outcome.result;
       geocoded++;
       try {
+        // Department/region derived from the matched commune. When the row already
+        // has a department we keep it (never overwrite source data). When it has
+        // none, we only trust the geocoder's department if confidence is >= 0.6,
+        // since a bare ambiguous city name ("Saint-Denis") can match the wrong one.
+        const knownDept = normalizeDepartmentCode(pair.location_department);
+        const trusted = knownDept || ((result.score === null || result.score >= 0.6) ? normalizeDepartmentCode(result.department) : null);
+        const region = regionForDepartmentCode(trusted);
         // Matches on the exact (city, department) pair used to geocode -
-        // department included (even though it's nullable/IS NOT DISTINCT
-        // FROM-matched) so two same-named communes in different
-        // departments never get cross-applied to each other's coordinates.
+        // two same-named communes in different departments never cross-apply.
         const updateResult = await db.query(
           `UPDATE opportunities
-           SET location_latitude = $1, location_longitude = $2, location_geocode_verified = TRUE, updated_at = NOW()
+           SET location_latitude = $1, location_longitude = $2, location_geocode_verified = TRUE,
+               location_department = COALESCE(NULLIF(location_department, ''), $5),
+               location_region = COALESCE(NULLIF(location_region, ''), $6),
+               updated_at = NOW()
            WHERE location_city = $3
              AND location_department IS NOT DISTINCT FROM $4
              AND location_latitude IS NULL`,
-          [result.lat, result.lng, pair.location_city, pair.location_department]
+          [result.lat, result.lng, pair.location_city, pair.location_department, trusted, region]
         );
         rowsUpdated += updateResult.rowCount || 0;
       } catch (err) {
         logger.error(`[Job] Geocoding backfill UPDATE failed for "${pair.location_city}":`, err);
       }
-    } else {
+    } else if (outcome.status === 'nomatch') {
       failed++;
-      // Stamp a sentinel so a city that genuinely can't be geocoded (typo,
-      // foreign buyer address, garbage source data) doesn't get re-queried
-      // forever on every run - 0,0 is never a real French coordinate.
+      // Genuinely unplaceable (typo, foreign address, garbage): stamp the 0,0
+      // sentinel so it isn't re-queried forever. A transient network error is
+      // NOT stamped (below) - previously a timeout permanently marked a real
+      // city as unlocatable.
       try {
         await db.query(
           `UPDATE opportunities
@@ -92,6 +103,8 @@ export async function runGeocodingBackfillBatch(): Promise<{ geocoded: number; f
       } catch (err) {
         logger.error(`[Job] Geocoding backfill sentinel UPDATE failed for "${pair.location_city}":`, err);
       }
+    } else {
+      failed++; // transient: leave NULL so a later run retries it
     }
     await sleep(DELAY_BETWEEN_CALLS_MS);
   }
