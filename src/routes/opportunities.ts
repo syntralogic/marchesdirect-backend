@@ -827,7 +827,11 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       // who wants it (send status=active,expired,awarded,cancelled) - only
       // the *default*, no-param case changes here, to open-to-candidature
       // only. Admin's own /api/admin/opportunities route is unaffected.
-      conditions.push(`o.status = 'active'`);
+      // 28 Sep (owner): searches showed only a sliver of the ~70k rows because
+      // this default hid every non-'active' row, while the homepage tiles count
+      // all statuses. Default is now every status (merged stays excluded above),
+      // and the ORDER BY below puts still-open opportunities first and closed
+      // ones after them. Pick a status explicitly to narrow it.
     }
     if (nature) {
       // R02 (contre-audit 15 Sep): "espaces verts" kept returning
@@ -891,7 +895,13 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     // pages (duplicate id -> React only renders one, so the list looks one
     // short) or be skipped by both. Appending o.id ASC makes the order
     // fully deterministic across pages regardless of ties.
-    const DEFAULT_ORDER = `(o.status = 'active' AND (o.deadline IS NULL OR o.deadline >= NOW())) DESC, o.deadline ASC NULLS LAST, o.id ASC`;
+    // 28 Sep (owner): still-open opportunities always come first, soonest
+    // deadline first; closed/expired ones follow, most recently closed first
+    // (the old plain "deadline ASC" listed the oldest, years-dead notices right
+    // after the open ones).
+    const LIVE_EXPR = `(o.status = 'active' AND (o.deadline IS NULL OR o.deadline >= NOW()))`;
+    const AFTER_LIVE_ORDER = `CASE WHEN ${LIVE_EXPR} THEN o.deadline END ASC NULLS LAST, o.deadline DESC NULLS LAST, o.id ASC`;
+    const DEFAULT_ORDER = `${LIVE_EXPR} DESC, ${AFTER_LIVE_ORDER}`;
     // Client (19/20 Sep, search overhaul point 5): title match should
     // outrank a description-only match of the same word, and this needs to
     // hold for an ordinary search, not just when the visitor manually picks
@@ -906,7 +916,9 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     const relevanceTiebreak = tsRankParamIdx !== null
       ? `ts_rank(${searchVectorExpr}, to_tsquery('french', unaccent($${tsRankParamIdx}))) DESC, `
       : '';
-    let orderClause = `${relevanceTiebreak}${DEFAULT_ORDER}`;
+    // Open notices outrank relevance in the default order, so a closed notice
+    // with a slightly better text score can't push open ones down the list.
+    let orderClause = `${LIVE_EXPR} DESC, ${relevanceTiebreak}${AFTER_LIVE_ORDER}`;
     if (sort === 'deadline') {
       // Client (26 Sep audit, point 10): "climatisation" search, "Échéance
       // proche (défaut)" selected, a 28 septembre notice appeared AFTER a

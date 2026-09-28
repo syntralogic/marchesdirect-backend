@@ -23,17 +23,31 @@ import { trackJob } from '../utils/jobTracker';
 
 const CHUNK_SIZE = 500;
 
+// Rows that can't be resolved keep location_region NULL, so without a cursor
+// every run re-selected the same newest `limit` unresolvable rows and never
+// reached the older, resolvable ones (28 Sep: most rows still had no region).
+// The cursor walks the backlog newest -> oldest across runs and wraps to the
+// start once it reaches the end, so rows added later get picked up too.
+let backfillCursor: { createdAt: string; id: string } | null = null;
+
 export async function runLocationRegionBackfillBatch(limit = 8000): Promise<{ recovered: number; unresolved: number }> {
-  let rows: { id: string; raw_data: any; location_department: string | null }[];
+  let rows: { id: string; raw_data: any; location_department: string | null; created_at_txt: string }[];
   try {
     const result = await db.query(
-      `SELECT id, raw_data, location_department FROM opportunities
+      `SELECT id, raw_data, location_department, created_at::text AS created_at_txt FROM opportunities
        WHERE (location_region IS NULL OR location_region = '') AND raw_data IS NOT NULL
-       ORDER BY created_at DESC
+         AND ($2::timestamptz IS NULL OR (created_at, id) < ($2::timestamptz, $3::uuid))
+       ORDER BY created_at DESC, id DESC
        LIMIT $1`,
-      [limit]
+      [limit, backfillCursor?.createdAt ?? null, backfillCursor?.id ?? null]
     );
     rows = result.rows;
+    if (rows.length < limit) {
+      backfillCursor = null;
+    } else {
+      const last = rows[rows.length - 1];
+      backfillCursor = { createdAt: last.created_at_txt, id: last.id };
+    }
   } catch (err) {
     logger.error('[Job] Location-region backfill query failed:', err);
     return { recovered: 0, unresolved: 0 };
