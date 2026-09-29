@@ -286,6 +286,12 @@ const mergeDuplicates = async (
       );
 
       const sec = secondary.rows[0];
+      if (!sec) {
+        // Secondary vanished (pruned) - abort this transaction quietly.
+        const gone: any = new Error('secondary opportunity no longer exists');
+        gone.code = '23503';
+        throw gone;
+      }
 
       await client.query(
         `UPDATE opportunities SET
@@ -325,7 +331,15 @@ const mergeDuplicates = async (
 
     logger.debug(`Merged opportunities: ${primaryId} (primary) + ${secondaryId} (duplicate)`);
     return true;
-  } catch (err) {
+  } catch (err: any) {
+    // 23503 = foreign_key_violation: one of the two rows was deleted between
+    // the duplicate scan and this merge (the closed-opportunity retention
+    // prune in opportunityRetention.ts runs concurrently). Nothing left to
+    // merge - skip quietly instead of logging an error per pair.
+    if (err?.code === '23503') {
+      logger.debug(`Skipped merge (${primaryId}, ${secondaryId}): a row was pruned meanwhile`);
+      return false;
+    }
     logger.error(`Failed to merge duplicates (${primaryId}, ${secondaryId}):`, err);
     return false;
   }
