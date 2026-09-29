@@ -31,7 +31,11 @@ export const startAnalysisSectionsBackfillJob = () => {
     );
   }, 45_000);
 
-  cron.schedule('*/15 * * * *', () => {
+  // 29 Sep incident: this, documentIngestion, aiProcessing and
+  // searchIndexRefresh were all '*/15 * * * *' - four heavy jobs firing on
+  // the exact same clock tick, all competing for the 8-connection pool at
+  // once. Offset by a few minutes from each other instead.
+  cron.schedule('4,19,34,49 * * * *', () => {
     generateAnalysisSectionsForOpportunities(20).catch(err =>
       logger.error('[Job] Scheduled analysis-sections backfill failed (non-fatal):', err)
     );

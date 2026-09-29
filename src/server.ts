@@ -8,6 +8,7 @@ import path from 'path';
 
 import { db, ensureSchema } from './config/database';
 import { logger } from './utils/logger';
+import { cached } from './utils/ttlCache';
 import { explainDbFailure } from './utils/dbDiagnostics';
 import { errorHandler } from './middleware/errorHandler';
 import { drainActiveJobs } from './utils/jobTracker';
@@ -56,22 +57,33 @@ app.use(helmet());
 // allowed here too - no separate env var to remember to update.
 // Cached for 5 minutes rather than querying brands on every single
 // request/preflight; a newly-added domain becomes valid within that window.
-let cachedBrandDomains: string[] = [];
-let brandDomainsCacheExpiresAt = 0;
 const BRAND_DOMAINS_CACHE_TTL_MS = 5 * 60 * 1000;
-
+let lastKnownBrandDomains: string[] = [];
+// 29 Sep incident (Render log): every CORS preflight/request calls this, and
+// the old version re-checked its own "is the cache expired" flag with no
+// in-flight de-dupe - the instant the 5-minute cache expired, every request
+// that had piled up (a real traffic burst) each fired its OWN "SELECT domain
+// FROM brands" before any of them could finish and refresh the flag (9
+// identical concurrent queries seen in the log, 2-10s each). That alone was
+// enough to exhaust the 8-connection pool and 500 out unrelated requests
+// (search, favorites, siret status...) queued behind them for a connection.
+// `cached()` (utils/ttlCache.ts) already solves exactly this shape - same
+// TTL + single-flight + stale-on-error used for the homepage counts and
+// current-brand lookup - so reuse it here too instead of a bespoke cache.
 const getAllowedBrandDomains = async (): Promise<string[]> => {
-  if (Date.now() < brandDomainsCacheExpiresAt) return cachedBrandDomains;
   try {
-    const result = await db.query('SELECT domain FROM brands WHERE domain IS NOT NULL');
-    cachedBrandDomains = result.rows.map((r: { domain: string }) => r.domain).filter(Boolean);
+    lastKnownBrandDomains = await cached('cors:brandDomains', BRAND_DOMAINS_CACHE_TTL_MS, async () => {
+      const result = await db.query('SELECT domain FROM brands WHERE domain IS NOT NULL');
+      return result.rows.map((r: { domain: string }) => r.domain).filter(Boolean);
+    });
   } catch (err) {
-    // DB hiccup: keep serving the last known-good list rather than an
-    // empty one, which would lock every brand out of CORS at once.
+    // DB hiccup and no previous success to fall back on (cached() only
+    // serves stale once it has succeeded at least once) - keep the last
+    // known-good list rather than an empty one, which would lock every
+    // brand out of CORS at once.
     logger.error('Failed to refresh CORS-allowed brand domains, keeping previous list:', err);
   }
-  brandDomainsCacheExpiresAt = Date.now() + BRAND_DOMAINS_CACHE_TTL_MS;
-  return cachedBrandDomains;
+  return lastKnownBrandDomains;
 };
 
 app.use(cors({

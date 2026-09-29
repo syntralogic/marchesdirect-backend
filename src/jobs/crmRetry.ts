@@ -6,7 +6,9 @@ import { trackJob } from '../utils/jobTracker';
 export const startCrmRetrySchedule = () => {
   // Every 30 minutes - frequent enough that a lead isn't stuck for long, without
   // hammering the CRM API if it's genuinely down for a while.
-  cron.schedule('*/30 * * * *', async () => {
+  // 29 Sep incident: offset from factsBackfillJob and opportunityAlerts,
+  // which were also both '*/30 * * * *'.
+  cron.schedule('20,50 * * * *', async () => {
     await trackJob('crmRetry:cron', async () => {
       try {
         const count = await retryPendingCrmSyncs(50);

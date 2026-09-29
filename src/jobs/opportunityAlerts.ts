@@ -114,7 +114,9 @@ export const startOpportunityAlerts = () => {
   // process fresh data - every 30 minutes, offset from aiProcessing's :00/:15/
   // :30/:45 cadence isn't critical here since this only reads results, it
   // doesn't compete for the same write lock.
-  cron.schedule('*/30 * * * *', () => {
+  // 29 Sep incident: offset from factsBackfillJob and crmRetry, which were
+  // also both '*/30 * * * *'.
+  cron.schedule('10,40 * * * *', () => {
     trackJob('opportunityAlerts:newMatches', alertNewMatches);
   });
 

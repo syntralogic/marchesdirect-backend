@@ -33,7 +33,11 @@ export const refreshSearchIndex = async () => {
 export const startSearchIndexRefresh = () => {
   // Every 15 minutes - frequent enough that new/updated opportunities show up
   // in search reasonably quickly, without refreshing on every single write.
-  cron.schedule('*/15 * * * *', () => {
+  // 29 Sep incident: offset from the other 3 jobs that were all on the
+  // same '*/15 * * * *' tick (documentIngestion, analysisSectionsBackfillJob,
+  // aiProcessing) - REFRESH MATERIALIZED VIEW CONCURRENTLY is one of the
+  // heavier queries in the whole app, worst possible one to pile on with them.
+  cron.schedule('11,26,41,56 * * * *', () => {
     trackJob('searchIndexRefresh:cron', refreshSearchIndex);
   });
 
