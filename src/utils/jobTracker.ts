@@ -18,14 +18,51 @@ import { logger } from './logger';
 // running gets a chance to finish instead of getting cut off mid-query.
 const activeJobs = new Set<Promise<any>>();
 
-export function trackJob<T>(name: string, fn: () => Promise<T>): Promise<T> {
-  const p = fn().catch(err => {
-    // Jobs already log their own failures internally; this catch exists
-    // only so a rejected job promise doesn't produce an unhandled
-    // rejection once it's sitting in the activeJobs set below - re-throw
-    // preserved for the caller's own .catch/.then chain.
-    throw err;
+// 29 Sep incident (Render log): a fresh deploy's ~15 background jobs each
+// fire their boot-time run within the first couple of minutes (staggered by
+// JOB_START_GAP_MS, but that only spaces out when they START - a slow one,
+// e.g. a multi-window BOAMP/DECP collection run, can still be mid-query when
+// the next job's turn comes up). With only an 8-connection pool, a handful of
+// jobs each holding a connection at once was enough that a real visitor's
+// very first request - the CORS brand-domains lookup - couldn't get a
+// connection within its own 10s timeout, 500ing real traffic seconds after
+// the deploy went live. Every background job already goes through
+// trackJob(), so gating admission here (rather than in each job file) caps
+// how many can ever be doing DB work at the same moment, process-wide,
+// leaving the rest of the pool free for web requests no matter how long any
+// one job takes or how its cron tick happens to line up with another's.
+// Jobs beyond the cap simply wait their turn, in order.
+const MAX_CONCURRENT_JOBS = Number(process.env.JOB_CONCURRENCY ?? 3);
+let runningJobs = 0;
+const jobQueue: Array<() => void> = [];
+
+const acquireJobSlot = (): Promise<void> => {
+  if (runningJobs < MAX_CONCURRENT_JOBS) {
+    runningJobs++;
+    return Promise.resolve();
+  }
+  return new Promise<void>(resolve => jobQueue.push(resolve)).then(() => {
+    runningJobs++;
   });
+};
+
+const releaseJobSlot = (): void => {
+  runningJobs--;
+  const next = jobQueue.shift();
+  if (next) next();
+};
+
+export function trackJob<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  const p = acquireJobSlot()
+    .then(fn)
+    .finally(releaseJobSlot)
+    .catch(err => {
+      // Jobs already log their own failures internally; this catch exists
+      // only so a rejected job promise doesn't produce an unhandled
+      // rejection once it's sitting in the activeJobs set below - re-throw
+      // preserved for the caller's own .catch/.then chain.
+      throw err;
+    });
   activeJobs.add(p);
   const cleanup = () => activeJobs.delete(p);
   p.then(cleanup, cleanup);

@@ -18,6 +18,7 @@
 import { db } from '../config/database';
 import { generateOpportunitySummary } from '../services/aiService';
 import { logger } from '../utils/logger';
+import { trackJob } from '../utils/jobTracker';
 
 // Same >500-char heuristic as the admin route: the new prompt's own token
 // budget makes it physically incapable of producing that many characters,
@@ -58,13 +59,20 @@ export const startStaleSummaryBackfillJob = () => {
   const cron = require('node-cron');
 
   setTimeout(() => {
-    runStaleSummaryBackfillBatch().catch(err => logger.error('[Job] Boot-time stale summary backfill failed (non-fatal):', err));
+    // 29 Sep incident: this ran outside trackJob(), so it wasn't subject to
+    // the process-wide concurrent-jobs cap (see jobTracker.ts). Every other
+    // job's boot/cron run goes through trackJob(); this one now does too.
+    trackJob('staleSummaryBackfill:boot', () => runStaleSummaryBackfillBatch()).catch(err =>
+      logger.error('[Job] Boot-time stale summary backfill failed (non-fatal):', err)
+    );
   }, 30_000);
 
   // Every hour, small batch - a paid Claude call per row, so deliberately
   // slower/cheaper than the free bulk-SQL backfills (facts/location-region).
   cron.schedule('0 * * * *', () => {
-    runStaleSummaryBackfillBatch().catch(err => logger.error('[Job] Scheduled stale summary backfill failed (non-fatal):', err));
+    trackJob('staleSummaryBackfill:cron', () => runStaleSummaryBackfillBatch()).catch(err =>
+      logger.error('[Job] Scheduled stale summary backfill failed (non-fatal):', err)
+    );
   });
 
   logger.info('✅ Stale summary backfill job scheduled (batch of 10 on boot, then hourly)');

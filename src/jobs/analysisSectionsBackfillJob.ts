@@ -21,12 +21,17 @@
 
 import { generateAnalysisSectionsForOpportunities } from '../services/aiService';
 import { logger } from '../utils/logger';
+import { trackJob } from '../utils/jobTracker';
 
 export const startAnalysisSectionsBackfillJob = () => {
   const cron = require('node-cron');
 
   setTimeout(() => {
-    generateAnalysisSectionsForOpportunities(20).catch(err =>
+    // 29 Sep incident: this ran outside trackJob(), so it wasn't subject to
+    // the process-wide concurrent-jobs cap (see jobTracker.ts) and could add
+    // to a boot-time pool pile-up untracked. Every other job's boot/cron run
+    // goes through trackJob(); this one now does too.
+    trackJob('analysisSectionsBackfill:boot', () => generateAnalysisSectionsForOpportunities(20)).catch(err =>
       logger.error('[Job] Boot-time analysis-sections backfill failed (non-fatal):', err)
     );
   }, 45_000);
@@ -36,7 +41,7 @@ export const startAnalysisSectionsBackfillJob = () => {
   // the exact same clock tick, all competing for the 8-connection pool at
   // once. Offset by a few minutes from each other instead.
   cron.schedule('4,19,34,49 * * * *', () => {
-    generateAnalysisSectionsForOpportunities(20).catch(err =>
+    trackJob('analysisSectionsBackfill:cron', () => generateAnalysisSectionsForOpportunities(20)).catch(err =>
       logger.error('[Job] Scheduled analysis-sections backfill failed (non-fatal):', err)
     );
   });
