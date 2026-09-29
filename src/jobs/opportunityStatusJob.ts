@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { trackJob } from '../utils/jobTracker';
+import { pruneClosedOpportunities } from '../services/opportunityRetention';
 
 // ============================================================================
 // OPPORTUNITY STATUS TRANSITIONS
@@ -45,6 +46,14 @@ export async function markExpiredOpportunities() {
   );
   if (staleResult.rowCount && staleResult.rowCount > 0) {
     logger.info(`[Job] Marked ${staleResult.rowCount} opportunities as expired (no deadline captured, publication older than 120 days).`);
+  }
+
+  // Expired rows just joined the closed pool - keep it under the cap
+  // (default 100k, newest kept). Open opportunities are never deleted.
+  try {
+    await pruneClosedOpportunities();
+  } catch (err) {
+    logger.error('[Job] Closed-opportunity prune failed (non-fatal):', err);
   }
 
   return (result.rowCount || 0) + (staleResult.rowCount || 0);
