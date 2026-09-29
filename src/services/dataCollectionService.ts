@@ -10,6 +10,7 @@ import { deduplicateOpportunities } from './deduplicationService';
 import { v4 as uuid } from 'uuid';
 import { regionForDepartmentCode, normalizeDepartmentCode, normalizeRegionName, extractDepartmentCodeFromFreeText } from '../utils/departmentRegion';
 import { buildOfficialUrl } from '../utils/officialUrl';
+import { closedRoomLeft, pruneClosedOpportunities } from './opportunityRetention';
 import { decodeHtmlEntities, truncateForColumn } from '../utils/textSanitize';
 
 // v2.1 caps each request at 100 records - a real collection run needs to
@@ -471,7 +472,19 @@ export const collectDecpData = async (sourceId: number) => {
 
   try {
     await assertDbHasRoom();
-    logger.info('[DECP] Starting collection (downloading consolidated Parquet file - this can take a few minutes)');
+
+    // DECP rows are all closed ("Attribué"). Closed rows are capped (default
+    // 100,000, see opportunityRetention.ts) so the DB stays small and search
+    // stays fast. Check room BEFORE downloading the 234MB file: if the cap is
+    // already reached there is nothing to add, so skip the whole run.
+    const closedRoom = await closedRoomLeft();
+    if (closedRoom <= 0) {
+      logger.info('[DECP] Closed-opportunity cap reached - skipping download (open notices are unaffected).');
+      await db.query("UPDATE data_sources SET last_run = NOW(), next_run = NOW() + (frequency_hours || ' hours')::interval WHERE id = $1", [sourceId]);
+      return { inserted: 0, updated: 0, duplicates: 0, errors: 0 };
+    }
+    const decpRunCap = Math.min(DECP_MAX_RECORDS_PER_RUN, closedRoom);
+    logger.info(`[DECP] Starting collection (room for ${closedRoom} more closed rows; downloading consolidated Parquet file - this can take a few minutes)`);
 
     const fileUrl = process.env.DECP_PARQUET_URL
       || 'https://www.data.gouv.fr/api/1/datasets/r/11cea8e8-df3e-4ed1-932b-781e2635e432';
@@ -601,7 +614,7 @@ export const collectDecpData = async (sourceId: number) => {
     const publicProcurementType = await db.query(`SELECT id FROM opportunity_types WHERE code = 'public_procurement'`);
     const opportunityTypeId = publicProcurementType.rows[0]?.id || null;
 
-    for (let rowStart = startRow; rowStart < numRows && acceptedCount < DECP_MAX_RECORDS_PER_RUN; rowStart += BATCH_ROWS) {
+    for (let rowStart = startRow; rowStart < numRows && acceptedCount < decpRunCap; rowStart += BATCH_ROWS) {
       const rowEnd = Math.min(rowStart + BATCH_ROWS, numRows);
       let batchRows: any[] = [];
       await parquetRead({
@@ -652,7 +665,7 @@ export const collectDecpData = async (sourceId: number) => {
       logger.info(`[DECP] Batch rows ${rowStart}-${rowEnd}/${numRows}: ${recentBatch.length} matched the date filter, ${acceptedCount} accepted so far`);
     }
 
-    logger.info(`[DECP] Parsed ${totalParsed} rows total, ${acceptedCount} within the last 3 years (accepted, capped at ${DECP_MAX_RECORDS_PER_RUN} per run)`);
+    logger.info(`[DECP] Parsed ${totalParsed} rows total, ${acceptedCount} within the last 3 years (accepted, capped at ${decpRunCap} per run)`);
 
     // This is the exact case the client called out for training the
     // dedup engine on: the same marché appearing on both BOAMP and the
@@ -662,6 +675,9 @@ export const collectDecpData = async (sourceId: number) => {
     // slightly different labels/formats. deduplicateOpportunities() now
     // scores on all four (see deduplicationService.ts).
     const duplicates = await deduplicateOpportunities();
+
+    // Batches can overshoot the cap slightly - trim back to the limit.
+    try { await pruneClosedOpportunities(); } catch (err) { logger.warn('[DECP] Post-run prune failed (non-fatal):', err); }
 
     await db.query(
       `INSERT INTO connector_logs 
