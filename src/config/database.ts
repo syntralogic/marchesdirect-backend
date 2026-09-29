@@ -301,6 +301,48 @@ const buildUnlocatedCityIndex = async (): Promise<void> => {
   }
 };
 
+// Same background/CONCURRENTLY treatment as opportunities_unlocated_city
+// above, for locationRegionBackfillJob's own query. That job's
+// `WHERE (location_region IS NULL OR location_region = '') AND raw_data IS
+// NOT NULL ORDER BY created_at DESC, id DESC LIMIT $1` had no matching index,
+// so on the real ~70k-row table it fell back to a sequential scan; seen in
+// the 29 Sep Render log as that job's own statement timing out ("canceling
+// statement due to statement timeout") every 3 minutes, each attempt holding
+// a pool connection for the full timeout window before giving it back.
+let unresolvedRegionIndexRunning = false;
+const buildUnresolvedRegionIndex = async (): Promise<void> => {
+  if (unresolvedRegionIndexRunning) return;
+  unresolvedRegionIndexRunning = true;
+  let client: PoolClient | null = null;
+  try {
+    const state = await pool.query(
+      `SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+        WHERE c.relname = 'opportunities_unresolved_region'`
+    );
+    if (state.rows[0]?.indisvalid) return; // already built
+    client = await pool.connect();
+    await client.query('SET statement_timeout = 0');
+    if (state.rows.length > 0) {
+      await client.query('DROP INDEX IF EXISTS opportunities_unresolved_region');
+    }
+    logger.info('Building opportunities_unresolved_region index in background...');
+    await client.query(
+      `CREATE INDEX CONCURRENTLY IF NOT EXISTS opportunities_unresolved_region
+         ON opportunities(created_at DESC, id DESC)
+         WHERE (location_region IS NULL OR location_region = '') AND raw_data IS NOT NULL`
+    );
+    logger.info('opportunities_unresolved_region index ready');
+  } catch (err) {
+    logger.error('⚠️ opportunities_unresolved_region index build failed (will retry on next boot)', err);
+  } finally {
+    if (client) {
+      try { await client.query('RESET statement_timeout'); } catch { /* connection discarded below */ }
+      client.release();
+    }
+    unresolvedRegionIndexRunning = false;
+  }
+};
+
 const applyIncrementalMigrations = async (): Promise<void> => {
   // Client audit (15 Sep counter-audit, R11): "renovation" (unaccented) found
   // the private listing "Renovation complete de 18 logements", but
@@ -417,6 +459,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // the DB's statement timeout on boot (Render logs, 28 Sep 15:48) and it
   // would have blocked startup + write traffic while running.
   void buildUnlocatedCityIndex();
+  void buildUnresolvedRegionIndex();
 
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
 

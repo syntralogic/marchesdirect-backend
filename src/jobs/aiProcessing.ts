@@ -138,7 +138,9 @@ export const startAIProcessing = () => {
   // Cost fix (11 Sep): was */5 * * * * (every 5 min) to burn through the
   // backlog fast for go-live. Dialed back to every 15 min at the smaller
   // BATCH_SIZE above - see that comment for the reasoning.
-  cron.schedule('*/15 * * * *', async () => {
+  // 29 Sep incident: offset from documentIngestion/analysisSectionsBackfillJob/
+  // searchIndexRefresh, which were all on the same '*/15 * * * *' tick.
+  cron.schedule('8,23,38,53 * * * *', async () => {
     await trackJob('aiProcessing:cron', async () => {
       await processUnclassifiedOpportunities();
       await processMissingSummaries();
