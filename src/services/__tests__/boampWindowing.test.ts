@@ -1,7 +1,11 @@
 import axios from 'axios';
 
 jest.mock('axios');
-jest.mock('../../config/database', () => ({ db: { query: jest.fn() } }));
+jest.mock('../../config/database', () => {
+  const query = jest.fn();
+  // bulkUpsertOpportunities now runs inside db.transaction(); hand the callback a client that shares the same mocked query.
+  return { db: { query, transaction: jest.fn(async (cb: any) => cb({ query })) } };
+});
 jest.mock('../deduplicationService', () => ({ deduplicateOpportunities: jest.fn().mockResolvedValue(0) }));
 
 const mockedAxios = axios as jest.Mocked<typeof axios>;
