@@ -139,6 +139,78 @@ router.put('/brands/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ============================================================================
+// SETTINGS (30 Sep 2026 - General section: site name / support email /
+// maintenance mode). Only the fields the current AdminSettings UI actually
+// has an input for; Security (2FA) and Notifications (email alerts) are
+// separate, not-yet-wired sections left for a follow-up.
+// ============================================================================
+const SETTINGS_DEFAULTS = {
+  siteName: 'Marchés Direct',
+  supportEmail: 'support@marchesdirect.fr',
+  maintenanceMode: false,
+  maintenanceMessage: 'Site under maintenance. Please check back soon.',
+};
+const SETTINGS_KEYS = Object.keys(SETTINGS_DEFAULTS) as Array<keyof typeof SETTINGS_DEFAULTS>;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+router.get('/settings', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await db.query('SELECT key, value FROM app_settings WHERE key = ANY($1)', [SETTINGS_KEYS]);
+    const settings = { ...SETTINGS_DEFAULTS };
+    for (const row of result.rows) {
+      if (row.key in settings) (settings as any)[row.key] = row.value;
+    }
+    res.json(settings);
+  } catch (err: any) {
+    logger.error('Settings fetch error:', err);
+    res.status(500).json({ error: 'Failed to fetch settings' });
+  }
+});
+
+router.put('/settings', async (req: AuthRequest, res: Response) => {
+  try {
+    const { siteName, supportEmail, maintenanceMode, maintenanceMessage } = req.body;
+
+    if (typeof siteName !== 'string' || !siteName.trim() || siteName.trim().length > 200) {
+      return res.status(400).json({ error: 'Le nom du site est requis (200 caractères maximum).' });
+    }
+    if (typeof supportEmail !== 'string' || !EMAIL_RE.test(supportEmail.trim())) {
+      return res.status(400).json({ error: "L'email de support n'est pas valide." });
+    }
+    if (typeof maintenanceMode !== 'boolean') {
+      return res.status(400).json({ error: 'maintenanceMode doit être vrai ou faux.' });
+    }
+    if (maintenanceMode && (typeof maintenanceMessage !== 'string' || !maintenanceMessage.trim())) {
+      return res.status(400).json({ error: 'Un message de maintenance est requis quand le mode maintenance est actif.' });
+    }
+    if (typeof maintenanceMessage === 'string' && maintenanceMessage.length > 1000) {
+      return res.status(400).json({ error: 'Le message de maintenance est trop long (1000 caractères maximum).' });
+    }
+
+    const values: Record<string, unknown> = {
+      siteName: siteName.trim(),
+      supportEmail: supportEmail.trim(),
+      maintenanceMode,
+      maintenanceMessage: (maintenanceMessage ?? '').trim(),
+    };
+
+    for (const key of SETTINGS_KEYS) {
+      await db.query(
+        `INSERT INTO app_settings (key, value, updated_at, updated_by)
+         VALUES ($1, $2, NOW(), $3)
+         ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW(), updated_by = $3`,
+        [key, JSON.stringify(values[key]), req.user?.id || null]
+      );
+    }
+
+    res.json(values);
+  } catch (err: any) {
+    logger.error('Settings update error:', err);
+    res.status(500).json({ error: 'Failed to update settings' });
+  }
+});
+
 // GET /api/admin/data-sources - connector status (proof for Milestone 2)
 //
 // Client's ask (10 Sep, WhatsApp): "which sources are you actually using,

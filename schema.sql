@@ -1413,3 +1413,20 @@ CREATE TABLE IF NOT EXISTS siret_ip_throttle (
   UNIQUE(ip_address, siren)
 );
 CREATE INDEX IF NOT EXISTS siret_ip_throttle_ip ON siret_ip_throttle(ip_address);
+
+-- Admin Settings page (30 Sep 2026 audit follow-up): the General section
+-- (site name / support email / maintenance mode+message) had no backend at
+-- all - "Save" just flipped local React state for 3 seconds, nothing ever
+-- persisted. Plain key/value store so new settings can be added later
+-- without another migration; value is JSONB so each key can hold whatever
+-- shape it needs (a string, a bool, ...).
+-- Note: maintenance_mode is stored here but NOT YET ENFORCED anywhere -
+-- no route currently checks it to actually block visitor traffic. That's a
+-- separate, larger change (needs a site-wide gate + an admin bypass) and is
+-- intentionally left for a follow-up rather than bundled into this fix.
+CREATE TABLE IF NOT EXISTS app_settings (
+  key VARCHAR(100) PRIMARY KEY,
+  value JSONB NOT NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_by UUID REFERENCES users(id)
+);
