@@ -339,8 +339,7 @@ const buildUnresolvedRegionIndex = async (): Promise<void> => {
       try { await client.query('RESET statement_timeout'); } catch { /* connection discarded below */ }
       client.release();
     }
-    unresolvedRegionIndexRunning = false;
-  }
+    unresolvedRegionIndexRunning = false;  }
 };
 
 const applyIncrementalMigrations = async (): Promise<void> => {
@@ -460,7 +459,6 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // would have blocked startup + write traffic while running.
   void buildUnlocatedCityIndex();
   void buildUnresolvedRegionIndex();
-
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
 
   // BUG (found live on Render, 2026-09-03): documentExpiry.ts's daily sweep

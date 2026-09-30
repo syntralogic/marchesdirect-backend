@@ -85,7 +85,6 @@ const getAllowedBrandDomains = async (): Promise<string[]> => {
   }
   return lastKnownBrandDomains;
 };
-
 app.use(cors({
   origin: async (origin, callback) => {
     // No Origin header at all = same-origin navigation, curl, server-to-
