@@ -3,7 +3,8 @@ import bcrypt from 'bcryptjs';
 import { v4 as uuid } from 'uuid';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
-import { generateTokens, verifyRefreshToken, generateMFASecret, verifyMFAToken } from '../middleware/auth';
+import QRCode from 'qrcode';
+import { generateTokens, verifyRefreshToken, generateMFASecret, verifyMFAToken, signMfaChallenge, verifyMfaChallenge } from '../middleware/auth';
 import { encryptSecret, decryptSecret, looksEncrypted } from '../utils/encryption';
 import { sendEmail } from './emailService';
 import { OAuth2Client } from 'google-auth-library';
@@ -304,19 +305,15 @@ export const loginUser = async (email: string, password: string) => {
       throw new Error('Invalid email or password');
     }
 
-    // Check if MFA is enabled
+    // Check if MFA is enabled. The password step is proven by a short-lived
+    // signed challenge token (see signMfaChallenge) that /mfa/verify-login
+    // requires alongside the TOTP code - before, that endpoint accepted just a
+    // userId + code and never looked at this step, so the password could be
+    // skipped entirely.
     if (user.mfa_enabled) {
-      // Return a temporary token that only allows MFA verification
-      const tempToken = uuid();
-      await db.query(
-        `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
-         VALUES ($1, $2, NOW() + INTERVAL '10 minutes')`,
-        [user.id, tempToken]
-      );
-
       return {
         mfaRequired: true,
-        mfaToken: tempToken,
+        mfaToken: signMfaChallenge(user.id),
         userId: user.id,
       };
     }
@@ -366,10 +363,25 @@ export const loginUser = async (email: string, password: string) => {
 // MFA (Multi-Factor Authentication - Milestone 8)
 // ============================================================================
 
+const readPlainSecret = (stored: string | null): string => {
+  if (!stored) throw new Error("La double authentification n'est pas configurée pour ce compte.");
+  return looksEncrypted(stored) ? decryptSecret(stored) : stored;
+};
+
+// Starts TOTP setup: stores a fresh secret with mfa_enabled still false (it is
+// only switched on once verifyMFASetup sees a valid code from the user's app).
+// Refuses when 2FA is already on - before, calling this silently overwrote the
+// secret AND set mfa_enabled = false, so anyone holding a session could turn
+// 2FA off without proving anything.
 export const enableMFA = async (userId: string) => {
   try {
-    const secret = generateMFASecret();
+    const userResult = await db.query('SELECT email, mfa_enabled FROM users WHERE id = $1', [userId]);
+    if (userResult.rows.length === 0) throw new Error('User not found');
+    if (userResult.rows[0].mfa_enabled) {
+      throw new Error('La double authentification est déjà activée.');
+    }
 
+    const secret = generateMFASecret(userResult.rows[0].email);
     const encryptedSecret = encryptSecret(secret.base32);
 
     await db.query(
@@ -382,7 +394,8 @@ export const enableMFA = async (userId: string) => {
 
     return {
       secret: secret.base32,
-      qrCode: secret.qr_code_url,
+      // Data URL of the QR code, ready for <img src>.
+      qrCode: await QRCode.toDataURL(secret.otpauthUrl, { margin: 1, width: 240 }),
       manualEntryKey: secret.base32,
     };
   } catch (err) {
@@ -393,7 +406,6 @@ export const enableMFA = async (userId: string) => {
 
 export const verifyMFASetup = async (userId: string, mfaToken: string) => {
   try {
-    // Get user's MFA secret
     const userResult = await db.query(
       'SELECT mfa_secret_encrypted FROM users WHERE id = $1',
       [userId]
@@ -403,15 +415,12 @@ export const verifyMFASetup = async (userId: string, mfaToken: string) => {
       throw new Error('User not found');
     }
 
-    const secret = userResult.rows[0].mfa_secret_encrypted;
-    const plainSecret = looksEncrypted(secret) ? decryptSecret(secret) : secret;
+    const plainSecret = readPlainSecret(userResult.rows[0].mfa_secret_encrypted);
 
-    // Verify token
-    if (!verifyMFAToken(plainSecret, mfaToken)) {
-      throw new Error('Invalid MFA token');
+    if (!verifyMFAToken(plainSecret, String(mfaToken || '').trim())) {
+      throw new Error('Code invalide.');
     }
 
-    // Confirm MFA is enabled
     await db.query(
       'UPDATE users SET mfa_enabled = true WHERE id = $1',
       [userId]
@@ -426,37 +435,92 @@ export const verifyMFASetup = async (userId: string, mfaToken: string) => {
   }
 };
 
-export const verifyMFALogin = async (userId: string, mfaToken: string) => {
+// Second step of login: exchanges the challenge token from loginUser plus a
+// valid TOTP code for a real session - same shape and side effects (last_login,
+// login_attempts, stored refresh session) as a normal password login.
+export const verifyMFALogin = async (challengeToken: string, code: string) => {
   try {
-    // Get user's MFA secret
+    let userId: string;
+    try {
+      userId = verifyMfaChallenge(challengeToken);
+    } catch {
+      throw new Error('Session de connexion expirée. Reconnectez-vous.');
+    }
+
     const userResult = await db.query(
-      'SELECT mfa_secret_encrypted FROM users WHERE id = $1',
+      `SELECT u.id, u.email, u.first_name, u.role, u.mfa_enabled, u.mfa_secret_encrypted, c.id AS company_id
+       FROM users u LEFT JOIN companies c ON u.company_id = c.id
+       WHERE u.id = $1 AND u.deleted_at IS NULL`,
       [userId]
     );
 
-    if (userResult.rows.length === 0) {
-      throw new Error('User not found');
+    if (userResult.rows.length === 0 || !userResult.rows[0].mfa_enabled) {
+      throw new Error('Session de connexion expirée. Reconnectez-vous.');
+    }
+    const user = userResult.rows[0];
+
+    const plainSecret = readPlainSecret(user.mfa_secret_encrypted);
+    if (!verifyMFAToken(plainSecret, String(code || '').trim())) {
+      await db.query('INSERT INTO login_attempts (email, success) VALUES ($1, $2)', [user.email, false]);
+      throw new Error('Code invalide.');
     }
 
-    const secret = userResult.rows[0].mfa_secret_encrypted;
-    const plainSecret = looksEncrypted(secret) ? decryptSecret(secret) : secret;
+    await db.query('UPDATE users SET last_login = NOW() WHERE id = $1', [user.id]);
+    await db.query('INSERT INTO login_attempts (email, success) VALUES ($1, $2)', [user.email, true]);
 
-    // Verify token
-    if (!verifyMFAToken(plainSecret, mfaToken)) {
-      throw new Error('Invalid MFA token');
-    }
+    const { accessToken, refreshToken } = generateTokens(user.id, user.email);
+    const tokenHash = await bcrypt.hash(refreshToken, 5);
+    await db.query(
+      `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
+       VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
+      [user.id, tokenHash]
+    );
 
-    // Generate full tokens
-    const userEmail = userResult.rows[0].email;
-    const { accessToken, refreshToken } = generateTokens(userId, userEmail);
+    logger.info(`✅ MFA login verified for user ${user.id}`);
 
-    logger.info(`✅ MFA login verified for user ${userId}`);
-
-    return { accessToken, refreshToken };
+    return {
+      userId: user.id,
+      companyId: user.company_id,
+      email: user.email,
+      firstName: user.first_name,
+      role: user.role,
+      accessToken,
+      refreshToken,
+      mfaRequired: false,
+    };
   } catch (err) {
     logger.error('MFA login verification error:', err);
     throw err;
   }
+};
+
+// Turning 2FA off needs both the account password and a current TOTP code, so
+// a stolen access token alone can't strip the protection.
+export const disableMFA = async (userId: string, password: string, code: string) => {
+  const userResult = await db.query(
+    'SELECT password_hash, mfa_enabled, mfa_secret_encrypted FROM users WHERE id = $1',
+    [userId]
+  );
+  if (userResult.rows.length === 0) throw new Error('Utilisateur introuvable.');
+
+  const user = userResult.rows[0];
+  if (!user.mfa_enabled) throw new Error("La double authentification n'est pas activée.");
+
+  const passwordOk = user.password_hash && typeof password === 'string' && password
+    ? await bcrypt.compare(password, user.password_hash)
+    : false;
+  if (!passwordOk) throw new Error('Mot de passe incorrect.');
+
+  if (!verifyMFAToken(readPlainSecret(user.mfa_secret_encrypted), String(code || '').trim())) {
+    throw new Error('Code invalide.');
+  }
+
+  await db.query(
+    'UPDATE users SET mfa_enabled = false, mfa_type = NULL, mfa_secret_encrypted = NULL WHERE id = $1',
+    [userId]
+  );
+  logger.info(`MFA disabled for user ${userId}`);
+  return { success: true };
 };
 
 // ============================================================================
@@ -660,12 +724,16 @@ export const verifyMagicLink = async (token: string, email: string) => {
 
   await db.query('UPDATE magic_link_tokens SET used_at = NOW() WHERE id = $1', [matchedId]);
 
-  const userResult = await db.query('SELECT id, email FROM users WHERE LOWER(email) = LOWER($1)', [normalizedEmail]);
+  const userResult = await db.query('SELECT id, email, mfa_enabled FROM users WHERE LOWER(email) = LOWER($1)', [normalizedEmail]);
   if (userResult.rows.length === 0) {
     throw new Error('Aucun compte associé à cette adresse e-mail.');
   }
 
   const user = userResult.rows[0];
+  // A magic link proves email ownership only - it must not skip 2FA.
+  if (user.mfa_enabled) {
+    return { mfaRequired: true, mfaToken: signMfaChallenge(user.id), userId: user.id };
+  }
   const { accessToken, refreshToken } = generateTokens(user.id, user.email);
   return { accessToken, refreshToken, userId: user.id, email: user.email };
 };
