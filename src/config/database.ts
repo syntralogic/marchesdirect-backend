@@ -1414,6 +1414,25 @@ const applyIncrementalMigrations = async (): Promise<void> => {
        AND location_latitude IS NOT NULL
        AND NOT (location_latitude = 0 AND location_longitude = 0)`
   );
+
+  // app_settings (AdminSettings General section: site name/support email/
+  // maintenance) exists in schema.sql (added alongside admin.ts's GET/PUT
+  // /admin/settings) but was never added here. Every already-provisioned
+  // database (production included - it already has `opportunities`, so
+  // ensureSchema() takes the "schema already present" branch above and
+  // never re-runs schema.sql) only ever picks up new tables through this
+  // function. Without this step, GET/PUT /admin/settings query a table
+  // that was never actually created in production and 500 every time -
+  // the admin's "Enregistrer" button for Site Name/Support Email cannot
+  // have been persisting anything until this line runs at least once.
+  await step(`
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key VARCHAR(100) PRIMARY KEY,
+      value JSONB NOT NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_by UUID REFERENCES users(id)
+    )
+  `);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old
