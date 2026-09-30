@@ -39,12 +39,39 @@ router.get('/brands', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// Admin-panel input-validation audit (30 Sep 2026): code/domain only had a
+// presence check ("!code" etc) - any string passed through, including a
+// domain with a protocol/path/spaces or a code with spaces/uppercase/
+// punctuation. brandResolution.ts matches incoming request hostnames
+// against brands.domain with a plain equality check, so a malformed
+// domain here doesn't error, it just silently makes that brand
+// unreachable-by-hostname until someone notices in production.
+const BRAND_CODE_RE = /^[a-z0-9][a-z0-9_-]{1,39}$/;
+// Bare hostname only: no scheme, no path/query, no port, no leading/trailing
+// dot, and requires a dotted TLD-style suffix so "marches sud" or
+// "https://marches-sud.fr/" are both rejected but "marches-sud.fr" passes.
+const BRAND_DOMAIN_RE = /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/;
+
+function validateBrandFields(code: unknown, domain: unknown): string | null {
+  if (typeof code === 'string' && code && !BRAND_CODE_RE.test(code)) {
+    return 'Le code ne doit contenir que des lettres minuscules, chiffres, "-" ou "_" (2 à 40 caractères).';
+  }
+  if (typeof domain === 'string' && domain && !BRAND_DOMAIN_RE.test(domain)) {
+    return "Le domaine n'est pas valide (attendu par ex. marches-sud.fr, sans http:// ni espace).";
+  }
+  return null;
+}
+
 router.post('/brands', async (req: AuthRequest, res: Response) => {
   try {
     const { code, name, domain, logoUrl, colorPrimary, colorSecondary, language, regionFocus } = req.body;
 
     if (!code || !name || !domain) {
       return res.status(400).json({ error: 'code, name and domain are required' });
+    }
+    const validationError = validateBrandFields(code, domain);
+    if (validationError) {
+      return res.status(400).json({ error: validationError });
     }
 
     const result = await db.query(
@@ -77,6 +104,11 @@ router.post('/brands', async (req: AuthRequest, res: Response) => {
 router.put('/brands/:id', async (req: AuthRequest, res: Response) => {
   try {
     const { name, domain, logoUrl, colorPrimary, colorSecondary, language, regionFocus } = req.body;
+
+    const validationError = validateBrandFields(undefined, domain);
+    if (validationError) {
+      return res.status(400).json({ error: validationError });
+    }
 
     const result = await db.query(
       `UPDATE brands SET
