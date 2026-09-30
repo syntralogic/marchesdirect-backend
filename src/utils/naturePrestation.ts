@@ -242,5 +242,22 @@ export function naturePrestationSql(alias = 'o'): string {
  * the same WHERE, so they have to share the same joins.
  */
 export function naturePrestationLateral(alias = 'o', as = 'np'): string {
-  return `CROSS JOIN LATERAL (SELECT ${naturePrestationSql(alias)} AS nature) ${as}`;
+  // Perf bug found in user testing (30 Sep): the LATERAL above this comment
+  // was meant to compute the ~20-regex CASE expression ONCE per row and let
+  // every clause (WHERE/ORDER BY/SELECT) read the cheap `np.nature` alias
+  // instead - but a plain `LATERAL (SELECT <expr>) alias` has no
+  // correlation to the outer query, so Postgres's planner treats it as a
+  // trivial, side-effect-free subquery and INLINES it: every reference to
+  // `np.nature` got the *entire* CASE expression substituted back in,
+  // right back to the "evaluated 3-4x per row" cost this was written to
+  // avoid (EXPLAIN ANALYZE, 30 Sep: a `nature=travaux` search took 4.8s on
+  // just 1,616 local rows, with the WHERE clause literally containing the
+  // whole CASE twice - once for `= ANY(...)`, once more for `IS NULL`).
+  // `OFFSET 0` is Postgres's standard optimization fence: it stops the
+  // planner from flattening/inlining the subquery, forcing it to actually
+  // materialize `nature` once per outer row (confirmed via EXPLAIN ANALYZE:
+  // Nested Loop replaces the inlined Seq Scan filter, 4.8s -> 2.4s on the
+  // same data - the regex cost itself is still real, see
+  // natureBackfillJob.ts for the actual fix to that).
+  return `CROSS JOIN LATERAL (SELECT ${naturePrestationSql(alias)} AS nature OFFSET 0) ${as}`;
 }

@@ -483,6 +483,15 @@ const startServer = async () => {
         ['searchIndexRefresh', 'startSearchIndexRefresh', 'search index refresh'],
         ['locationRegionBackfillJob', 'startLocationRegionBackfillJob', 'location-region backfill'],
         ['geocodingBackfillJob', 'startGeocodingBackfillJob', 'geocoding backfill'],
+        // 30 Sep user testing: nature=travaux/fournitures/etc. search took
+        // 15-17s in production - ai_classification_status is 'not_analyzed'
+        // on virtually the whole table, so every row fell through to the
+        // ~20-regex heuristic in naturePrestation.ts, recomputed on every
+        // request. This writes that heuristic's result into
+        // nature_prestation once per row in the background (see
+        // natureBackfillJob.ts) so the request path reads a plain column
+        // instead - same shape as locationRegionBackfillJob just above.
+        ['natureBackfillJob', 'startNatureBackfillJob', 'nature-de-la-prestation backfill'],
         ['documentIngestion', 'startDocumentIngestion', 'DCE ingestion'],
         ['dataCollection', 'startScheduledJobs', 'data collection'],
         ['opportunityAlerts', 'startOpportunityAlerts', 'alerts'],
