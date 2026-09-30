@@ -167,6 +167,7 @@ app.use('/api/auth/change-password', authLimiter);
 app.use('/api/auth/password-reset/confirm', authLimiter);
 app.use('/api/auth/mfa/verify-login', authLimiter);
 app.use('/api/auth/mfa/confirm', authLimiter);
+app.use('/api/auth/mfa/disable', authLimiter);
 // password-reset/request and magic-link don't guess a secret, but each
 // call sends a real email to whatever address is given - unlimited calls
 // is a spam/abuse vector. Both always return 200 (enumeration protection -

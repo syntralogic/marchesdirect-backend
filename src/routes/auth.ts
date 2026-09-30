@@ -14,6 +14,7 @@ import {
   enableMFA,
   verifyMFASetup,
   verifyMFALogin,
+  disableMFA,
 } from '../services/authService';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { db } from '../config/database';
@@ -143,11 +144,16 @@ router.post(
   }
 );
 
-// POST /api/auth/mfa/verify-login
+// POST /api/auth/mfa/verify-login - second login step. mfaToken is the signed
+// challenge returned by /login (proves the password step), code is the 6-digit
+// TOTP from the authenticator app.
 router.post('/mfa/verify-login', async (req: Request, res: Response) => {
   try {
-    const { userId, mfaToken } = req.body;
-    const result = await verifyMFALogin(userId, mfaToken);
+    const { mfaToken, code } = req.body || {};
+    if (typeof mfaToken !== 'string' || typeof code !== 'string') {
+      return res.status(400).json({ error: 'Code requis.' });
+    }
+    const result = await verifyMFALogin(mfaToken, code);
     res.json(result);
   } catch (err: any) {
     res.status(401).json({ error: err.message || 'MFA verification failed' });
@@ -171,6 +177,17 @@ router.post('/mfa/confirm', authenticate, async (req: AuthRequest, res: Response
     res.json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'MFA confirmation failed' });
+  }
+});
+
+// POST /api/auth/mfa/disable (requires auth) - needs password + current TOTP code
+router.post('/mfa/disable', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { password, code } = req.body || {};
+    const result = await disableMFA(req.user!.id, password, code);
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'MFA disable failed' });
   }
 });
 

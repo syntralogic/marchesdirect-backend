@@ -230,12 +230,37 @@ export const requireActiveSubscription = (req: AuthRequest, res: Response, next:
   next();
 };
 
-export const generateMFASecret = () => {
+export const generateMFASecret = (accountLabel?: string) => {
   const speakeasy = require('speakeasy');
-  return speakeasy.generateSecret({
-    name: `${process.env.MFA_ISSUER || 'Procurement Platform'}`,
-    issuer: process.env.MFA_ISSUER || 'Procurement Platform',
+  const issuer = process.env.MFA_ISSUER || 'Procurement Platform';
+  const secret = speakeasy.generateSecret({ length: 20, name: issuer, issuer });
+  // otpauth:// URL is what authenticator apps read from the QR code. Label it
+  // with the account email so the entry is recognisable in the app.
+  const otpauthUrl: string = speakeasy.otpauthURL({
+    secret: secret.base32,
+    label: accountLabel || issuer,
+    issuer,
+    encoding: 'base32',
   });
+  return { base32: secret.base32 as string, otpauthUrl };
+};
+
+// Short-lived proof that the password step of a login succeeded and only the
+// TOTP code is still missing. Signed with a *different* secret than access
+// tokens on purpose: authenticate() verifies access tokens against JWT_SECRET
+// and trusts decoded.userId, so a challenge token signed with the same secret
+// (or carrying userId) could be replayed as a full session.
+const MFA_CHALLENGE_SECRET = `${JWT_SECRET}:mfa-challenge`;
+
+export const signMfaChallenge = (userId: string): string =>
+  jwt.sign({ sub: userId, purpose: 'mfa' }, MFA_CHALLENGE_SECRET, { expiresIn: '5m' });
+
+export const verifyMfaChallenge = (token: string): string => {
+  const decoded = jwt.verify(token, MFA_CHALLENGE_SECRET) as any;
+  if (decoded?.purpose !== 'mfa' || typeof decoded.sub !== 'string') {
+    throw new Error('Invalid MFA challenge');
+  }
+  return decoded.sub;
 };
 
 export const verifyMFAToken = (secret: string, token: string) => {
