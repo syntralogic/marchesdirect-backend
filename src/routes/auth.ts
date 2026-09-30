@@ -4,6 +4,7 @@ import {
   registerCompanyAndUser,
   completeSignupFromSession,
   loginUser,
+  loginWithGoogle,
   refreshAccessToken,
   requestPasswordReset,
   resetPassword,
@@ -105,6 +106,22 @@ router.post(
     }
   }
 );
+
+// POST /api/auth/google - "Continue with Google". Body: { credential } = the
+// Google Identity Services ID token. Logs in an existing account or creates
+// one; 2FA-enabled accounts still get the mfaRequired challenge.
+router.post('/google', [body('credential').isString().notEmpty()], async (req: Request, res: Response) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ error: 'Connexion Google invalide.' });
+  try {
+    const brandId = await resolveBrandId(req);
+    const result = await loginWithGoogle(req.body.credential, brandId);
+    res.json(result);
+  } catch (err: any) {
+    logger.error('Google login route error:', err);
+    res.status(401).json({ error: err.message || 'La connexion Google a échoué.' });
+  }
+});
 
 // POST /api/auth/login
 router.post(
