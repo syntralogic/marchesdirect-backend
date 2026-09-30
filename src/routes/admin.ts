@@ -172,7 +172,7 @@ router.get('/settings', async (req: AuthRequest, res: Response) => {
 
 router.put('/settings', async (req: AuthRequest, res: Response) => {
   try {
-    const { siteName, supportEmail, maintenanceMode, maintenanceMessage, twoFactorRequired } = req.body;
+    const { siteName, supportEmail, maintenanceMode, maintenanceMessage } = req.body;
 
     if (typeof siteName !== 'string' || !siteName.trim() || siteName.trim().length > 200) {
       return res.status(400).json({ error: 'Le nom du site est requis (200 caractères maximum).' });
@@ -188,6 +188,24 @@ router.put('/settings', async (req: AuthRequest, res: Response) => {
     }
     if (typeof maintenanceMessage === 'string' && maintenanceMessage.length > 1000) {
       return res.status(400).json({ error: 'Le message de maintenance est trop long (1000 caractères maximum).' });
+    }
+
+    // twoFactorRequired: optional in this request on purpose. The
+    // AdminSettings screen's Security section now manages real 2FA, but
+    // per-account via separate TOTP endpoints (accountApi.mfaEnable/
+    // mfaConfirm/mfaDisable, state read from user.mfaEnabled) - nothing in
+    // the frontend today reads or writes this site-wide app_settings key,
+    // including the General section's own save (Site Name/Support Email/
+    // maintenance), which never included it either. Requiring it here
+    // unconditionally rejected every General-section save with a 400
+    // before it reached the DB at all. Falls back to whatever is already
+    // stored (or the default) instead, so this key stays available for a
+    // future site-wide "require 2FA for all admins" feature to use without
+    // breaking today's saves in the meantime.
+    let twoFactorRequired: unknown = req.body.twoFactorRequired;
+    if (twoFactorRequired === undefined) {
+      const existing = await db.query(`SELECT value FROM app_settings WHERE key = 'twoFactorRequired'`);
+      twoFactorRequired = existing.rows.length > 0 ? existing.rows[0].value : SETTINGS_DEFAULTS.twoFactorRequired;
     }
     if (typeof twoFactorRequired !== 'boolean') {
       return res.status(400).json({ error: 'twoFactorRequired doit être vrai ou faux.' });
