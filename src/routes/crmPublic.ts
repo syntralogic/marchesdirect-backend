@@ -4,6 +4,7 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { toE164French } from '../services/smsService';
+import { notifyTeamOfNewLead } from '../services/leadNotificationService';
 
 // Contre-audit follow-up: crm_leads.phone was stored exactly as typed
 // ("06 00 00 00 00", "0033600000000", "+33 6 00 00 00 00", ...), so the
@@ -94,6 +95,18 @@ router.post(
       // that didn't sync on the first attempt.
       syncLeadToCrm(result.rows[0].id).catch((err) => {
         logger.error('Unexpected error firing CRM sync:', err);
+      });
+
+      // Tell the team right away (email) - also fire-and-forget, never
+      // affects the visitor's response.
+      notifyTeamOfNewLead({
+        id: result.rows[0].id,
+        firstName, lastName, email, phone, companyName,
+        industryTrade, locationCity, locationRegion,
+        leadSource: leadSource || 'website_form',
+        message,
+      }).catch((err) => {
+        logger.error('Unexpected error firing lead notification:', err);
       });
     } catch (err: any) {
       logger.error('Public CRM lead capture error:', err);
