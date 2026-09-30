@@ -153,6 +153,7 @@ app.use('/api/', (_req, res, next) => {
 
 app.use('/api/', limiter);
 app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/google', authLimiter);
 app.use('/api/auth/register', authLimiter);
 // Same secret-guessing shape as /login (a code or password checked against
 // a stored value) - these were only covered by the general 100/15min '/api/'

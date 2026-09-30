@@ -5,6 +5,7 @@ import { logger } from '../utils/logger';
 import { generateTokens, verifyRefreshToken, generateMFASecret, verifyMFAToken } from '../middleware/auth';
 import { encryptSecret, decryptSecret, looksEncrypted } from '../utils/encryption';
 import { sendEmail } from './emailService';
+import { OAuth2Client } from 'google-auth-library';
 
 interface RegisterParams {
   companyName: string;
@@ -666,4 +667,105 @@ export const verifyMagicLink = async (token: string, email: string) => {
   const user = userResult.rows[0];
   const { accessToken, refreshToken } = generateTokens(user.id, user.email);
   return { accessToken, refreshToken, userId: user.id, email: user.email };
+};
+
+// ============================================================================
+// GOOGLE SIGN-IN ("Continue with Google")
+// ============================================================================
+// The frontend sends the Google Identity Services ID token (a signed JWT).
+// It is verified here against GOOGLE_CLIENT_ID (signature, audience, expiry) -
+// the email is never trusted from the request body, only from the verified
+// token, and only when Google says email_verified is true.
+let googleClient: OAuth2Client | null = null;
+
+export const loginWithGoogle = async (idToken: string, brandId?: string | null) => {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  if (!clientId) {
+    throw new Error("La connexion Google n'est pas configurée.");
+  }
+  googleClient = googleClient || new OAuth2Client(clientId);
+
+  let payload;
+  try {
+    const ticket = await googleClient.verifyIdToken({ idToken, audience: clientId });
+    payload = ticket.getPayload();
+  } catch (err) {
+    logger.warn('Google ID token verification failed:', err);
+    throw new Error('Connexion Google invalide. Veuillez réessayer.');
+  }
+
+  if (!payload?.email || !payload.email_verified) {
+    throw new Error("Votre adresse e-mail Google n'est pas vérifiée.");
+  }
+
+  const email = payload.email.toLowerCase().trim();
+  const firstName = (payload.given_name || '').trim();
+  const lastName = (payload.family_name || '').trim();
+
+  const existing = await db.query(
+    `SELECT u.*, c.id as company_id FROM users u
+     LEFT JOIN companies c ON u.company_id = c.id
+     WHERE LOWER(u.email) = $1 AND u.deleted_at IS NULL`,
+    [email]
+  );
+
+  // New visitor -> create the account (passwordless, same as the magic-link flow).
+  if (existing.rows.length === 0) {
+    const displayName = (payload.name || `${firstName} ${lastName}` || email.split('@')[0]).trim();
+    const created = await registerCompanyAndUser(
+      {
+        companyName: displayName || 'Mon entreprise',
+        firstName,
+        lastName,
+        email,
+      },
+      brandId
+    );
+    await db.query('UPDATE users SET last_login = NOW() WHERE id = $1', [created.userId]);
+    const tokenHash = await bcrypt.hash(created.refreshToken, 5);
+    await db.query(
+      `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
+       VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
+      [created.userId, tokenHash]
+    );
+    logger.info(`✅ New account via Google: ${email}`);
+    return { ...created, firstName, role: 'user', isNewUser: true };
+  }
+
+  const user = existing.rows[0];
+
+  // Existing account: keep 2FA enforced, Google must not bypass it.
+  if (user.mfa_enabled) {
+    const tempToken = uuid();
+    await db.query(
+      `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
+       VALUES ($1, $2, NOW() + INTERVAL '10 minutes')`,
+      [user.id, tempToken]
+    );
+    return { mfaRequired: true, mfaToken: tempToken, userId: user.id };
+  }
+
+  await db.query('UPDATE users SET last_login = NOW() WHERE id = $1', [user.id]);
+  await db.query('INSERT INTO login_attempts (email, success) VALUES ($1, $2)', [email, true]);
+
+  const { accessToken, refreshToken } = generateTokens(user.id, user.email);
+  const tokenHash = await bcrypt.hash(refreshToken, 5);
+  await db.query(
+    `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
+     VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
+    [user.id, tokenHash]
+  );
+
+  logger.info(`✅ User logged in via Google: ${user.email}`);
+  return {
+    userId: user.id,
+    companyId: user.company_id,
+    email: user.email,
+    firstName: user.first_name,
+    role: user.role,
+    accessToken,
+    refreshToken,
+    mfaRequired: false,
+    isNewUser: false,
+  };
 };

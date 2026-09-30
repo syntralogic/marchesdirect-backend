@@ -54,6 +54,7 @@
     "express-validator": "^7.0.0",
     "form-data": "^4.0.0",
     "fzstd": "^0.1.1",
+    "google-auth-library": "^11.1.0",
     "helmet": "^7.1.0",
     "hyparquet": "^1.29.2",
     "jsonwebtoken": "^9.0.2",
