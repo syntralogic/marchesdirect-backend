@@ -710,7 +710,72 @@ router.get('/seo-pages', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// GET /api/admin/stats - dashboard summary counts, real numbers only (no
+// Shared by GET /stats (dashboard feed) and GET /notifications (admin bell,
+// see AdminLayout.tsx) so both read the exact same real events instead of
+// keeping two copies of this query in sync by hand.
+async function fetchRecentActivityFeed(limit: number) {
+  return db.query(
+    `SELECT * FROM (
+       (SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), c.name, 'Système') AS actor,
+               al.action AS action, al.entity_type AS target, al.created_at AS at
+        FROM audit_logs al
+        LEFT JOIN users u ON al.user_id = u.id
+        LEFT JOIN companies c ON al.company_id = c.id
+        ORDER BY al.created_at DESC LIMIT $1)
+       UNION ALL
+       (SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', first_name, last_name)), ''), email) AS actor,
+               's''est inscrit' AS action, COALESCE(email, '') AS target, created_at AS at
+        FROM users WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT $1)
+       UNION ALL
+       (SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', first_name, last_name)), ''), company_name, email, 'Visiteur') AS actor,
+               'a envoyé une demande' AS action, COALESCE(company_name, email, '') AS target, created_at AS at
+        FROM crm_leads ORDER BY created_at DESC LIMIT $1)
+       UNION ALL
+       (SELECT 'Système' AS actor,
+               CASE WHEN l.status = 'failed' THEN 'collecte en échec' ELSE 'collecte terminée' END AS action,
+               CONCAT(UPPER(ds.code), COALESCE(' - ' || l.records_processed::text || ' marchés traités', '')) AS target,
+               COALESCE(l.completed_at, l.started_at) AS at
+        FROM connector_logs l JOIN data_sources ds ON ds.id = l.source_id
+        ORDER BY l.started_at DESC LIMIT $1)
+     ) feed
+     WHERE at IS NOT NULL
+     ORDER BY at DESC LIMIT $1`,
+    [limit]
+  );
+}
+
+// GET /api/admin/notifications - real events for the admin header bell
+// (AdminLayout.tsx). Found in user testing (30 Sep): that bell rendered on
+// every admin page with a hardcoded unread dot, and clicking it just fired
+// a toast saying "Notifications checked" - no request, no list, nothing
+// behind it at all. Reuses the exact feed already proven out for the
+// dashboard's "Activité récente" card (sign-ups, visitor requests/leads,
+// connector runs, audit log) instead of building a second, different
+// notion of "admin notification".
+//
+// No per-admin read/unread column exists for these (they're system-wide
+// events, not rows owned by one admin), so unread state is computed
+// client-side against a "last seen" timestamp the frontend keeps - see
+// AdminNotificationBell.tsx.
+router.get('/notifications', async (req: AuthRequest, res: Response) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 20, 50);
+    const feed = await fetchRecentActivityFeed(limit);
+    res.json({
+      notifications: feed.rows.map((r) => ({
+        user: r.actor,
+        action: r.action,
+        target: r.target,
+        time: r.at,
+      })),
+    });
+  } catch (err: any) {
+    logger.error('Admin notifications error:', err);
+    res.status(500).json({ error: 'Failed to fetch admin notifications' });
+  }
+});
+
+
 // AdminDashboard.tsx on the frontend previously showed 100% hardcoded
 // figures like "1,248" tenders and "€48k" revenue with no endpoint behind
 // them at all - this is that endpoint).
@@ -738,33 +803,9 @@ router.get('/stats', async (req: AuthRequest, res: Response) => {
       // Real recent events. audit_logs alone was always empty (nothing writes
       // to it), so the feed also merges the latest sign-ups, visitor requests
       // (callbacks / appointments / access requests) and connector runs.
-      db.query(
-        `SELECT * FROM (
-           (SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''), c.name, 'Système') AS actor,
-                   al.action AS action, al.entity_type AS target, al.created_at AS at
-            FROM audit_logs al
-            LEFT JOIN users u ON al.user_id = u.id
-            LEFT JOIN companies c ON al.company_id = c.id
-            ORDER BY al.created_at DESC LIMIT 10)
-           UNION ALL
-           (SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', first_name, last_name)), ''), email) AS actor,
-                   's''est inscrit' AS action, COALESCE(email, '') AS target, created_at AS at
-            FROM users WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 10)
-           UNION ALL
-           (SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', first_name, last_name)), ''), company_name, email, 'Visiteur') AS actor,
-                   'a envoyé une demande' AS action, COALESCE(company_name, email, '') AS target, created_at AS at
-            FROM crm_leads ORDER BY created_at DESC LIMIT 10)
-           UNION ALL
-           (SELECT 'Système' AS actor,
-                   CASE WHEN l.status = 'failed' THEN 'collecte en échec' ELSE 'collecte terminée' END AS action,
-                   CONCAT(UPPER(ds.code), COALESCE(' - ' || l.records_processed::text || ' marchés traités', '')) AS target,
-                   COALESCE(l.completed_at, l.started_at) AS at
-            FROM connector_logs l JOIN data_sources ds ON ds.id = l.source_id
-            ORDER BY l.started_at DESC LIMIT 10)
-         ) feed
-         WHERE at IS NOT NULL
-         ORDER BY at DESC LIMIT 10`
-      ),
+      // (shared with GET /notifications - the admin header bell - see
+      // fetchRecentActivityFeed above)
+      fetchRecentActivityFeed(10),
     ]);
 
     res.json({
