@@ -141,15 +141,17 @@ router.put('/brands/:id', async (req: AuthRequest, res: Response) => {
 
 // ============================================================================
 // SETTINGS (30 Sep 2026 - General section: site name / support email /
-// maintenance mode). Only the fields the current AdminSettings UI actually
-// has an input for; Security (2FA) and Notifications (email alerts) are
-// separate, not-yet-wired sections left for a follow-up.
+// maintenance mode. 1 Oct 2026 - Security section: two-factor requirement).
+// Only the fields the current AdminSettings UI actually has an input for;
+// Notifications (email alerts) is still a separate, not-yet-wired section
+// left for a follow-up - see AdminSettings.tsx's own comment.
 // ============================================================================
 const SETTINGS_DEFAULTS = {
   siteName: 'Marchés Direct',
   supportEmail: 'support@marchesdirect.fr',
   maintenanceMode: false,
   maintenanceMessage: 'Site under maintenance. Please check back soon.',
+  twoFactorRequired: false,
 };
 const SETTINGS_KEYS = Object.keys(SETTINGS_DEFAULTS) as Array<keyof typeof SETTINGS_DEFAULTS>;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -170,7 +172,7 @@ router.get('/settings', async (req: AuthRequest, res: Response) => {
 
 router.put('/settings', async (req: AuthRequest, res: Response) => {
   try {
-    const { siteName, supportEmail, maintenanceMode, maintenanceMessage } = req.body;
+    const { siteName, supportEmail, maintenanceMode, maintenanceMessage, twoFactorRequired } = req.body;
 
     if (typeof siteName !== 'string' || !siteName.trim() || siteName.trim().length > 200) {
       return res.status(400).json({ error: 'Le nom du site est requis (200 caractères maximum).' });
@@ -187,12 +189,16 @@ router.put('/settings', async (req: AuthRequest, res: Response) => {
     if (typeof maintenanceMessage === 'string' && maintenanceMessage.length > 1000) {
       return res.status(400).json({ error: 'Le message de maintenance est trop long (1000 caractères maximum).' });
     }
+    if (typeof twoFactorRequired !== 'boolean') {
+      return res.status(400).json({ error: 'twoFactorRequired doit être vrai ou faux.' });
+    }
 
     const values: Record<string, unknown> = {
       siteName: siteName.trim(),
       supportEmail: supportEmail.trim(),
       maintenanceMode,
       maintenanceMessage: (maintenanceMessage ?? '').trim(),
+      twoFactorRequired,
     };
 
     for (const key of SETTINGS_KEYS) {
