@@ -50,6 +50,8 @@ export interface GeocodeResult {
   department: string | null;
   /** api-adresse confidence 0-1 (null when the API didn't send one). */
   score: number | null;
+  /** Name of the commune the API actually matched (only present when the API sent one). */
+  matchedName?: string;
 }
 
 /** 'error' = network/HTTP failure (transient, must be retried); 'nomatch' = the API answered but nothing trustworthy. */
@@ -69,6 +71,45 @@ export const departmentFromGeocodeProps = (props: any): string | null => {
   return null;
 };
 
+
+// 30 Sep client audit (2): the cleaning notice of "Ville de Saint-Étienne et
+// Métropole" (Loire, 42) came out as "Ville de Saint Etienne, 47,
+// Nouvelle-Aquitaine". BOAMP's city field sometimes holds the BUYER's name
+// (see normalizeBoampRecord: location_city = ville_avis || buyerName). That
+// text was sent to the geocoder as if it were a commune; the closest fuzzy
+// hit was another "Saint-Étienne-..." in Lot-et-Garonne, and the department
+// and region of that wrong commune were then written onto the notice.
+// Two guards: (1) a buyer-style label is reduced to its commune ("Ville de X"
+// -> "X") or, when it is an institution rather than a commune (métropole,
+// communauté, département, CCAS...), is not geocoded at all; (2) the commune
+// the API returns must actually carry the name that was asked for.
+const FOLD = (t: string): string =>
+  String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+const COMMUNE_PREFIX_RE = /^\s*(ville|commune|mairie|municipalite)\s+(de la|de l'|de|d'|du|des)\s*/i;
+const INSTITUTION_WORDS_RE = /\b(metropole|communaute|agglomeration|agglo|departement|conseil|region|syndicat|ccas|sdis|centre hospitalier|hopital|universite|ministere|prefecture|office|opac|opH|chu|cci|sa|sas|sarl|sci|association|groupement|etablissement|ecole|lycee|college)\b/i;
+
+/** The commune name to geocode, or null when the label is an institution rather than a place. */
+export const cleanCityForGeocoding = (city: string | null | undefined): string | null => {
+  const raw = String(city || '').trim();
+  if (!raw) return null;
+  const stripped = raw.replace(COMMUNE_PREFIX_RE, '').trim();
+  if (!stripped) return null;
+  if (INSTITUTION_WORDS_RE.test(FOLD(stripped))) return null;
+  return stripped;
+};
+
+/** True when the commune the API matched carries the name that was asked for (accent/hyphen/case-insensitive). */
+export const cityNameMatches = (asked: string, matched: string | null | undefined): boolean => {
+  if (!matched) return true; // nothing to compare against: keep the previous behaviour
+  const a = FOLD(asked.replace(/\b(saint|sainte)\b/gi, (m) => m.toLowerCase().startsWith('sainte') ? 'ste' : 'st'));
+  const b = FOLD(matched.replace(/\b(saint|sainte)\b/gi, (m) => m.toLowerCase().startsWith('sainte') ? 'ste' : 'st'));
+  if (!a || !b) return true;
+  // The API's name may not be LONGER than what was asked (that is exactly a
+  // wrong 'Saint-Etienne-de-Fougères'); the asked text may carry a suffix ("cedex").
+  return a === b || a.startsWith(b + ' ');
+};
+
 // department code -> INSEE citycode prefix isn't a real constraint the API
 // takes directly; we instead pass the department as part of the query text
 // (matches how a person would type it) since api-adresse free-text search
@@ -78,7 +119,7 @@ export const geocodeCityDetailed = async (
   city: string,
   departmentCode?: string | null
 ): Promise<GeocodeOutcome> => {
-  const cityTrimmed = city?.trim();
+  const cityTrimmed = cleanCityForGeocoding(city);
   if (!cityTrimmed) return { status: 'nomatch' };
 
   const q = departmentCode ? `${cityTrimmed} (${departmentCode})` : cityTrimmed;
@@ -101,7 +142,13 @@ export const geocodeCityDetailed = async (
     }
     const [lng, lat] = coords; // GeoJSON order is [lon, lat]
     if (typeof lat !== 'number' || typeof lng !== 'number') return { status: 'nomatch' };
-    return { status: 'ok', result: { lat, lng, department: departmentFromGeocodeProps(feature?.properties), score } };
+    const matchedName: string | undefined = typeof feature?.properties?.city === 'string' ? feature.properties.city
+      : typeof feature?.properties?.name === 'string' ? feature.properties.name : undefined;
+    if (!cityNameMatches(cityTrimmed, matchedName)) {
+      logger.warn(`[geocoding] \"${q}\" matched a differently-named commune (\"${matchedName}\") - treating as unresolved`);
+      return { status: 'nomatch' };
+    }
+    return { status: 'ok', result: { lat, lng, department: departmentFromGeocodeProps(feature?.properties), score, ...(matchedName ? { matchedName } : {}) } };
   } catch (err: any) {
     logger.warn(`[geocoding] Failed for "${q}": ${err.message || err}`);
     return { status: 'error' };
