@@ -233,3 +233,53 @@ export function tsqueryAlternatives(w: string): string[] {
   const includeRaw = !AMBIGUOUS_ABBREVIATIONS.has(folded);
   return [...(includeRaw ? [`${w}:*`] : []), ...(stem ? [`${stem}:*`] : []), ...syns.map((s) => `${s}:*`)];
 }
+
+
+// ----------------------------------------------------------------------------
+// 30 Sep comparatif, point 2: "électricité" typed in the search box missed
+// consultations whose électricité is only a LOT (or a line of the description),
+// while picking the métier "Électricité" found them. The free-text path only
+// let a trade word match the TITLE / the AI trade tags; the métier path also
+// reads title + description (where BOAMP lots are appended, see boampLots.ts).
+// Both entries now share one rule: a trade word also counts when a whole
+// WORD of its vocabulary appears in the title/description/lots.
+// ----------------------------------------------------------------------------
+
+// Extra everyday wording per trade that is not a canonical trade keyword but
+// unambiguously names the same work (électricité: CFO/CFA, courants forts...).
+const TRADE_LOT_VOCABULARY: Record<string, string[]> = {
+  electricite: ['electricite', 'electricien', 'cfo', 'cfa', 'courants? forts?', 'courants? faibles?', 'eclairages?', 'irve'],
+};
+
+/**
+ * Whole-word terms (folded, regex-safe) a trade word must hit inside the
+ * title/description/lots. Includes the word's own forms (stem, synonyms) plus
+ * the shared lot vocabulary of its trade. Ambiguous abbreviations ("elec")
+ * never match literally, only through their expansion.
+ */
+export function lotMatchTermsOf(w: string): string[] {
+  const terms = new Set<string>();
+  const esc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  for (const t of matchTermsOf(w)) {
+    if (t.length >= 3) terms.add(esc(t));
+  }
+  const all = [foldAccents(w), ...synonymsOf(w)];
+  for (const [slug, vocab] of Object.entries(TRADE_LOT_VOCABULARY)) {
+    if (all.some((t) => t === slug || vocab.includes(t))) for (const v of vocab) terms.add(v);
+  }
+  return [...terms];
+}
+
+/** Postgres regex (\y word boundaries) for lotMatchTermsOf, or null if empty. */
+export function lotMatchSqlPattern(w: string): string | null {
+  const terms = lotMatchTermsOf(w);
+  return terms.length ? `\\y(${terms.join('|')})\\y` : null;
+}
+
+/**
+ * A reference glued to a word ("000321VALDAHON", "26-94170BORDEAUX") is one
+ * token for the full-text index, so the word alone finds nothing. Words of 4+
+ * letters therefore also get a plain accent-insensitive substring match on
+ * the title.
+ */
+export const canMatchInsideTitle = (w: string): boolean => foldAccents(w).replace(/[^a-z]/g, '').length >= 4;

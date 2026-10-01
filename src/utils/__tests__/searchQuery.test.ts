@@ -184,3 +184,33 @@ describe('matchTermsOf (ILIKE substring/prefix alternatives)', () => {
     expect(matchTermsOf('couvreur').sort()).toEqual(['couvreur', 'couvr', 'toiture', 'couverture'].sort());
   });
 });
+
+import { lotMatchSqlPattern, lotMatchTermsOf, canMatchInsideTitle } from '../searchQuery';
+
+describe('lot / description matching for trade words (30 Sep comparatif)', () => {
+  const re = (w: string) => new RegExp((lotMatchSqlPattern(w) as string).replace(/\\y/g, '\\b'), 'i');
+
+  it('"électricité" finds a lot Électricité CFO-CFA inside a global works title', () => {
+    expect(re('électricité').test('travaux micro-tomographe lots : lot 4 electricite cfo-cfa ; lot 2 plomberie')).toBe(true);
+  });
+  it('accent / variant forms reach the same lots', () => {
+    for (const w of ['electricite', 'électricien', 'elec']) {
+      expect(re(w).test('lot 14 electricite cfo-cfa')).toBe(true);
+    }
+  });
+  it('covers CFO/CFA, courants faibles and IRVE wording', () => {
+    expect(re('électricité').test('lot 3 courants faibles')).toBe(true);
+    expect(re('électricité').test('deploiement de bornes irve')).toBe(true);
+  });
+  it('does not match unrelated words', () => {
+    expect(re('électricité').test('livraison de fournitures de bureau')).toBe(false);
+    expect(re('électricité').test('messagerie electronique')).toBe(false);
+  });
+  it('"elec" never matches literally, only through its expansion', () => {
+    expect(lotMatchTermsOf('elec')).not.toContain('elec');
+  });
+  it('glued reference words can be matched inside a title', () => {
+    expect(canMatchInsideTitle('VALDAHON')).toBe(true);
+    expect(canMatchInsideTitle('26')).toBe(false);
+  });
+});

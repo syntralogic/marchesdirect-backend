@@ -7,7 +7,7 @@ import { logger } from '../utils/logger';
 import { reconcileOfficialFields } from '../utils/officialFields';
 import type { RefineAnswers } from '../services/matchEngine';
 import { naturePrestationLateral, NATURE_VALUES } from '../utils/naturePrestation';
-import { tokenizeQuery, tsqueryAlternatives, isTradeWord, matchTermsOf, domainMismatchExclusionSqlPattern } from '../utils/searchQuery';
+import { tokenizeQuery, tsqueryAlternatives, isTradeWord, matchTermsOf, domainMismatchExclusionSqlPattern, lotMatchSqlPattern, canMatchInsideTitle } from '../utils/searchQuery';
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts, generateOpportunityAnalysisSections } from '../services/aiService';
 import { ingestOpportunityDocuments } from '../services/documentIngestionService';
 import { computeMatchScore } from '../services/matchScoreService';
@@ -572,7 +572,17 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
           if (isTradeWord(w)) {
             const titleIdx = idx++;
             params.push(patterns);
-            let cond = `(unaccent(o.title) ILIKE ANY($${titleIdx}::text[]) OR ${tradeCond})`;
+            // 30 Sep comparatif: the word also counts when it appears as a whole
+            // word in the description/lots (a lot "Électricité CFO-CFA" inside a
+            // global works title), same standard as the métier filter below.
+            const lotPattern = lotMatchSqlPattern(w);
+            let lotCond = '';
+            if (lotPattern) {
+              const lotIdx = idx++;
+              params.push(lotPattern);
+              lotCond = ` OR lower(unaccent(o.title || ' ' || COALESCE(o.description, ''))) ~ $${lotIdx}`;
+            }
+            let cond = `(unaccent(o.title) ILIKE ANY($${titleIdx}::text[]) OR ${tradeCond}${lotCond})`;
             // Client audit (27 Sep, point 3): "CVC"/"ventilation" matching a
             // biomedical-equipment market, "électricien" matching a
             // commodity energy-supply market - see domainMismatchExclusion
@@ -596,7 +606,15 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
             // fix there (see searchQuery.ts) can't drift out of sync here.
             const alts = tsqueryAlternatives(w);
             params.push(alts.length > 1 ? `(${alts.join(' | ')})` : alts[0]);
-            wordConds.push(`${searchVectorExpr} @@ to_tsquery('french', unaccent($${wordTsIdx}))`);
+            // A word glued to a reference in the title ("000321VALDAHON") is a
+            // single index token: also try a plain substring match on the title.
+            let titleSub = '';
+            if (canMatchInsideTitle(w)) {
+              const subIdx = idx++;
+              params.push(patterns);
+              titleSub = ` OR unaccent(o.title) ILIKE ANY($${subIdx}::text[])`;
+            }
+            wordConds.push(`(${searchVectorExpr} @@ to_tsquery('french', unaccent($${wordTsIdx}))${titleSub})`);
           }
         }
         conditions.push(wordConds.join(' AND '));
