@@ -493,6 +493,9 @@ const startServer = async () => {
         // natureBackfillJob.ts) so the request path reads a plain column
         // instead - same shape as locationRegionBackfillJob just above.
         ['natureBackfillJob', 'startNatureBackfillJob', 'nature-de-la-prestation backfill'],
+        // 1 Oct: one-off prod repairs (buyer-name locations, BOAMP lots) that
+        // used to need a shell - Render free has none, so they run by themselves.
+        ['legacyRepairJob', 'startLegacyRepairJob', 'legacy data repair'],
         ['documentIngestion', 'startDocumentIngestion', 'DCE ingestion'],
         ['dataCollection', 'startScheduledJobs', 'data collection'],
         ['opportunityAlerts', 'startOpportunityAlerts', 'alerts'],
