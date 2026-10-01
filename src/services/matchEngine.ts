@@ -130,6 +130,18 @@ export const isUsableCoordinate = (lat: unknown, lng: unknown): boolean => {
   return true;
 };
 
+// 1 Oct client report: Bordeaux-Bordeaux still read ~4 988 km. Beyond the (0,0)
+// sentinel, a geocoder can also return a homonym abroad (Bordeaux, Canada...).
+// A point only counts as a location for a French market when it lies in
+// metropolitan France or the row's own department says it is overseas (97x/98x).
+export const isPlausibleFrenchLocation = (lat: unknown, lng: unknown, department?: string | null): boolean => {
+  if (!isUsableCoordinate(lat, lng)) return false;
+  const la = Number(lat);
+  const lo = Number(lng);
+  if (la >= 41 && la <= 51.5 && lo >= -5.6 && lo <= 10) return true;
+  return /^9[78]/.test(String(department || '').trim());
+};
+
 function distanceKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -178,7 +190,7 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
   let zone: MatchCriterion = { key: 'zone', label: 'Zone d’intervention', status: 'confirm', factor: 0, weight: WEIGHTS.zone, answered: false, detail: 'Distance non évaluable : localisation de l’entreprise ou du marché inconnue. Précisez votre zone d’intervention.' };
   if (company) {
     const sameDepartment = !!(company.department && market.department && company.department === market.department);
-    const kmRaw = isUsableCoordinate(company.latitude, company.longitude) && isUsableCoordinate(market.latitude, market.longitude)
+    const kmRaw = isPlausibleFrenchLocation(company.latitude, company.longitude, company.department) && isPlausibleFrenchLocation(market.latitude, market.longitude, market.department)
       ? Math.round(distanceKm(Number(company.latitude), Number(company.longitude), Number(market.latitude), Number(market.longitude)))
       // Same department but a huge distance can only be a bad geocode:
       // never display it, fall back to the department comparison below.

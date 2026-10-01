@@ -1,4 +1,4 @@
-import { isUsableCoordinate, evaluateMatch, tradeSlugsForCompany, CompanyProfile, MarketInput } from '../matchEngine';
+import { isUsableCoordinate, isPlausibleFrenchLocation, evaluateMatch, tradeSlugsForCompany, CompanyProfile, MarketInput } from '../matchEngine';
 import { extractTradeSlugs } from '../tradeResolver';
 
 // 25 Sep client audit: VERIFRANCE HABITAT (heating / air conditioning) got 37 %
@@ -190,5 +190,22 @@ describe('company activity -> métier (30 Sep audit: SPIE CITYNETWORKS, réseaux
     const q = evaluateMatch(company({ tradeSlugs: ['electricite'] }), m).criteria.find((x) => x.key === 'qualifications')!;
     expect(q.detail).toMatch(/IRVE/);
     expect(q.detail).not.toMatch(/Aucune qualification/);
+  });
+});
+
+describe('distance plausibility (1 Oct client report)', () => {
+  it('rejects a homonym geocoded abroad and accepts real French points', () => {
+    expect(isPlausibleFrenchLocation(44.84, -0.58, '33')).toBe(true);      // Bordeaux, France
+    expect(isPlausibleFrenchLocation(46.9, -71.1, '33')).toBe(false);      // a Bordeaux in Canada
+    expect(isPlausibleFrenchLocation(0, 0, '33')).toBe(false);
+    expect(isPlausibleFrenchLocation(14.6, -61.0, '972')).toBe(true);      // Martinique
+    expect(isPlausibleFrenchLocation(14.6, -61.0, '33')).toBe(false);
+  });
+  it('shows no distance when one of the two locations is implausible', () => {
+    const c = company({ latitude: 44.84, longitude: -0.58, department: '33', radiusKm: 50 });
+    const m = market('Peinture de locaux', { latitude: 4.9, longitude: 8.3, department: '33' });
+    const ev = evaluateMatch(c, m);
+    const zone = ev.criteria.find((x: any) => x.key === 'zone');
+    expect(zone?.detail).not.toMatch(/\d{4} km/);
   });
 });
