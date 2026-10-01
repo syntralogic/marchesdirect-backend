@@ -81,3 +81,13 @@ export function withLotsText(description: string, lotsText: string): string {
   if (base.toLowerCase().includes(lots.slice(0, 80).toLowerCase())) return base;
   return base ? `${base}\n\nLots : ${lots}` : `Lots : ${lots}`;
 }
+
+/**
+ * The individual lots appended by withLotsText() ("Lots : a ; b ; c"), so the
+ * concordance can read each lot on its own instead of only the global title.
+ */
+export function lotsFromDescription(description: string | null | undefined): string[] {
+  const m = /(?:^|\n)\s*Lots\s*:\s*([\s\S]+)$/.exec(String(description || ''));
+  if (!m) return [];
+  return m[1].split(/\s;\s/).map((s) => s.replace(/\s+/g, ' ').trim()).filter((s) => s.length >= 4);
+}

@@ -2,6 +2,7 @@ import { db } from '../config/database';
 import { resolveTradeFromText } from './tradeResolver';
 import { reconcileOfficialFields } from '../utils/officialFields';
 import { extractTradeSlugs } from './tradeResolver';
+import { lotsFromDescription } from '../utils/boampLots';
 import { geocodeCity } from './geocodingService';
 import { extractQualificationsFromText } from '../utils/qualificationText';
 import { evaluateMatch, tradeSlugsForCompany, MatchCriterion, RefineAnswers, CompanyProfile } from './matchEngine';
@@ -301,7 +302,7 @@ async function loadCompanyProfile(companyId: string | null | undefined, sessionI
 // fallback, because a description that mentions another trade in passing
 // (an electrical connection in an air-conditioning job) must not make a
 // painter look like a match.
-function marketTradeSlugs(opp: any, facts: any): string[] {
+export function marketTradeSlugs(opp: any, facts: any): string[] {
   const primary = new Set<string>();
   for (const sl of extractTradeSlugs(opp.title)) primary.add(sl);
   if (opp.trade_slug) primary.add(opp.trade_slug);
@@ -310,6 +311,11 @@ function marketTradeSlugs(opp: any, facts: any): string[] {
     const matched = typeof opp.ai_matched_trades === 'string' ? JSON.parse(opp.ai_matched_trades) : opp.ai_matched_trades;
     if (Array.isArray(matched)) for (const m of matched) for (const sl of extractTradeSlugs(m?.trade_name || m?.name || '')) primary.add(sl);
   } catch { /* malformed ai_matched_trades: ignore */ }
+  // 30 Sep comparatif: a global works title ("réhabilitation", "micro-tomographe")
+  // whose électricité is a LOT stayed "à confirmer" - the lots were never read.
+  // Each lot is read on its own, so the concordance compares the company with
+  // the lot it could actually take (lot 4 électricité) and not the global title.
+  for (const lot of lotsFromDescription(opp.description)) for (const sl of extractTradeSlugs(lot)) primary.add(sl);
   if (primary.size > 0) return [...primary];
   return extractTradeSlugs(String(opp.description || '').slice(0, 1500));
 }
