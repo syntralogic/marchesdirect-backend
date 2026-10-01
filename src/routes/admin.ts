@@ -5,7 +5,7 @@ import { logger } from '../utils/logger';
 import { AuthRequest, requireRole } from '../middleware/auth';
 import { verifyDeduplicationQuality, getDeduplicationReport, deduplicateOpportunities } from '../services/deduplicationService';
 import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities, generateAnalysisSectionsForOpportunities, generateOpportunityAnalysisSections } from '../services/aiService';
-import { collectBoampData, collectPlaceData, collectTedData, collectDecpData, collectBatiwebData } from '../services/dataCollectionService';
+import { collectBoampData, collectPlaceData, collectTedData, collectDecpData, collectBatiwebData, collectApprochData } from '../services/dataCollectionService';
 import { runBackup, testRestore } from '../jobs/backupManagement';
 
 const router = Router();
@@ -332,7 +332,7 @@ const backgroundRunsInFlight = new Set<string>();
 // audit: "Échec de l'exécution" on Run now even though the run was still
 // going server-side). Runs upsert by source_reference, so triggering it again
 // after a failed/cut-short run simply picks up whatever was left unloaded.
-const LONG_RUNNING_SOURCES = new Set(['decp', 'boamp']);
+const LONG_RUNNING_SOURCES = new Set(['decp', 'boamp', 'approch']);
 
 router.post('/data-sources/:code/run', async (req: AuthRequest, res: Response) => {
   try {
@@ -351,11 +351,12 @@ router.post('/data-sources/:code/run', async (req: AuthRequest, res: Response) =
         case 'place': return collectPlaceData(source.id);
         case 'ted': return collectTedData(source.id);
         case 'batiweb': return collectBatiwebData(source.id);
+        case 'approch': return collectApprochData(source.id);
         default: return null;
       }
     };
 
-    if (!['boamp', 'decp', 'place', 'ted', 'batiweb'].includes(source.code)) {
+    if (!['boamp', 'decp', 'place', 'ted', 'batiweb', 'approch'].includes(source.code)) {
       return res.status(400).json({ error: `No connector implemented for source code: ${source.code}` });
     }
 
