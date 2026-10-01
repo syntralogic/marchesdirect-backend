@@ -331,6 +331,14 @@ const INLINE_SEARCH_VECTOR_EXPR = `(
       )`;
 
 // GET /api/opportunities - search & filter listings (public, powers the 3 journeys)
+// Base scope shared by the search list and every map/badge count (regions,
+// départements, around-a-city), so a count can never promise more than the
+// list it leads to shows (1 Oct client report: counts must match lists).
+// Expects aliases `o` (opportunities) and `ds` (data_sources).
+const LIST_SCOPE_SQL = `o.deleted_at IS NULL
+  AND COALESCE(o.status, '') != 'merged'
+  AND (ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))`;
+
 router.get('/', optionalAuth, async (req: Request, res: Response) => {
   try {
     const {
@@ -1345,20 +1353,20 @@ router.get('/stats/regions', async (req: Request, res: Response) => {
     // region's displayed count.
     const [result, unlocatedResult] = await cached('regions', 10 * 60 * 1000, () => Promise.all([
       db.query(
-        `SELECT MAX(location_region) AS region, COUNT(*)::int AS count
-         FROM opportunities
-         WHERE location_region IS NOT NULL AND location_region != ''
-           AND deleted_at IS NULL
-           AND COALESCE(status, '') != 'merged'
-         GROUP BY lower(unaccent(trim(location_region)))
+        `SELECT MAX(o.location_region) AS region, COUNT(*)::int AS count
+         FROM opportunities o
+         LEFT JOIN data_sources ds ON o.source_id = ds.id
+         WHERE o.location_region IS NOT NULL AND o.location_region != ''
+           AND ${LIST_SCOPE_SQL}
+         GROUP BY lower(unaccent(trim(o.location_region)))
          ORDER BY count DESC`
       ),
       db.query(
         `SELECT COUNT(*)::int AS count
-         FROM opportunities
-         WHERE location_region IS NULL
-           AND deleted_at IS NULL
-           AND COALESCE(status, '') != 'merged'`
+         FROM opportunities o
+         LEFT JOIN data_sources ds ON o.source_id = ds.id
+         WHERE o.location_region IS NULL
+           AND ${LIST_SCOPE_SQL}`
       ),
     ]));
     res.json({ regions: result.rows, unlocatedCount: unlocatedResult.rows[0]?.count ?? 0 });
@@ -1401,23 +1409,23 @@ router.get('/stats/departments', async (req: Request, res: Response) => {
       db.query(
         `SELECT
            CASE
-             WHEN TRIM(location_department) ~ '^[0-9]+$' THEN LPAD(TRIM(location_department), 2, '0')
-             ELSE UPPER(TRIM(location_department))
+             WHEN TRIM(o.location_department) ~ '^[0-9]+$' THEN LPAD(TRIM(o.location_department), 2, '0')
+             ELSE UPPER(TRIM(o.location_department))
            END AS department,
            COUNT(*)::int AS count
-         FROM opportunities
-         WHERE location_department IS NOT NULL AND location_department != ''
-           AND deleted_at IS NULL
-           AND COALESCE(status, '') != 'merged'
+         FROM opportunities o
+         LEFT JOIN data_sources ds ON o.source_id = ds.id
+         WHERE o.location_department IS NOT NULL AND o.location_department != ''
+           AND ${LIST_SCOPE_SQL}
          GROUP BY 1
          ORDER BY count DESC`
       ),
       db.query(
         `SELECT COUNT(*)::int AS count
-         FROM opportunities
-         WHERE location_department IS NULL
-           AND deleted_at IS NULL
-           AND COALESCE(status, '') != 'merged'`
+         FROM opportunities o
+         LEFT JOIN data_sources ds ON o.source_id = ds.id
+         WHERE o.location_department IS NULL
+           AND ${LIST_SCOPE_SQL}`
       ),
     ]));
     res.json({ departments: result.rows, unlocatedCount: unlocatedResult.rows[0]?.count ?? 0 });
@@ -1466,16 +1474,17 @@ router.get('/stats/near', async (req: Request, res: Response) => {
     }
     const result = await db.query(
       `SELECT COUNT(*)::int AS count
-       FROM opportunities
-       WHERE location_latitude IS NOT NULL AND location_longitude IS NOT NULL
-         AND deleted_at IS NULL
-         AND status != 'merged'
+       FROM opportunities o
+       LEFT JOIN data_sources ds ON o.source_id = ds.id
+       WHERE o.location_latitude IS NOT NULL AND o.location_longitude IS NOT NULL
+         AND NOT (o.location_latitude = 0 AND o.location_longitude = 0)
+         AND ${LIST_SCOPE_SQL}
          AND (
            6371 * acos(
              LEAST(1, GREATEST(-1,
-               cos(radians($1)) * cos(radians(location_latitude)) *
-               cos(radians(location_longitude) - radians($2)) +
-               sin(radians($1)) * sin(radians(location_latitude))
+               cos(radians($1)) * cos(radians(o.location_latitude)) *
+               cos(radians(o.location_longitude) - radians($2)) +
+               sin(radians($1)) * sin(radians(o.location_latitude))
              ))
            )
          ) <= $3`,
