@@ -59,6 +59,17 @@ router.put('/:opportunityId', async (req: AuthRequest, res: Response) => {
 // shows a confirmation, not a finished dossier.
 router.post('/:opportunityId/generate', async (req: AuthRequest, res: Response) => {
   try {
+    // 30 Sep audit, point 9: only a client with an active accompagnement
+    // transmits an opportunity to its chargé d'affaires. A trial/free account
+    // is a prospect and must book a rendez-vous instead - no commercial request
+    // is recorded for it.
+    const sub = await db.query('SELECT subscription_status FROM companies WHERE id = $1', [req.user!.companyId]);
+    if (sub.rows[0]?.subscription_status !== 'active') {
+      return res.status(403).json({
+        error: 'accompaniment_required',
+        message: 'Cette demande est réservée aux clients accompagnés. Prenez rendez-vous avec un chargé d’affaires pour démarrer.',
+      });
+    }
     const { response_text, partners, checklist } = req.body;
     const result = await db.query(
       `INSERT INTO dossier_requests (company_id, opportunity_id, response_text, partners, checklist, status, requested_at)
