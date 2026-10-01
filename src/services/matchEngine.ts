@@ -114,6 +114,22 @@ export function tradeSlugsForCompany(apeCode: string | null | undefined, ...text
   return [...found];
 }
 
+// 30 Sep client audit: "Bordeaux-Bordeaux affiché à 4 988 km" and "Marseille -> Ecully
+// 4 850 km". Cause: unresolved geocodes are stored as a (0,0) sentinel (see
+// geocodingService / the radius search, which already excludes them) but this
+// criterion only null-checked, so (0,0) was measured as a real place - and
+// Bordeaux to the Gulf of Guinea is ~4 990 km. A coordinate pair only counts
+// as a location when it is finite, in range and not the (0,0) sentinel.
+export const isUsableCoordinate = (lat: unknown, lng: unknown): boolean => {
+  if (lat == null || lng == null || lat === '' || lng === '') return false;
+  const la = Number(lat);
+  const lo = Number(lng);
+  if (!Number.isFinite(la) || !Number.isFinite(lo)) return false;
+  if (Math.abs(la) > 90 || Math.abs(lo) > 180) return false;
+  if (Math.abs(la) < 0.0001 && Math.abs(lo) < 0.0001) return false;
+  return true;
+};
+
 function distanceKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -161,8 +177,14 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
   // own answer (applied below via `apply`).
   let zone: MatchCriterion = { key: 'zone', label: 'Zone d’intervention', status: 'confirm', factor: 0, weight: WEIGHTS.zone, answered: false, detail: 'Distance non évaluable : localisation de l’entreprise ou du marché inconnue. Précisez votre zone d’intervention.' };
   if (company) {
-    if (company.latitude != null && company.longitude != null && market.latitude != null && market.longitude != null) {
-      const km = Math.round(distanceKm(Number(company.latitude), Number(company.longitude), Number(market.latitude), Number(market.longitude)));
+    const sameDepartment = !!(company.department && market.department && company.department === market.department);
+    const kmRaw = isUsableCoordinate(company.latitude, company.longitude) && isUsableCoordinate(market.latitude, market.longitude)
+      ? Math.round(distanceKm(Number(company.latitude), Number(company.longitude), Number(market.latitude), Number(market.longitude)))
+      // Same department but a huge distance can only be a bad geocode:
+      // never display it, fall back to the department comparison below.
+      : null;
+    const km = kmRaw != null && !(sameDepartment && kmRaw > 250) ? kmRaw : null;
+    if (km != null) {
       if (company.radiusKm != null) {
         const radius = company.radiusKm;
         zone = km <= radius
