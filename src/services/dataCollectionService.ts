@@ -1120,6 +1120,173 @@ export const collectTedData = async (sourceId: number) => {
 
 };
 
+
+// ============================================================================
+// APProch - "Projets d'achats publics" (data.economie.gouv.fr, Opendatasoft)
+// 1 Oct client ask: another free French source to raise the opportunity count.
+// ~6,500 purchasing PROJECTS published by public buyers ahead of the formal
+// tender (pre-call-for-tenders stage), free, no API key. A project has no
+// submission deadline yet, so deadline stays null and the row is stored as an
+// active early-stage opportunity.
+//
+// The sandbox could not reach this API (403), so the real field names were not
+// verifiable when this was written (scripts/inspectOpenDataset.js prints them).
+// Instead of hard-coding guesses, pickField() matches each wanted value against
+// several likely field names / name fragments and the full record is always
+// kept in raw_data - if a field is mapped wrong, fix the candidate lists below,
+// no data is lost. Opendatasoft refuses offset+limit above 10,000, which is
+// above the dataset size.
+// ============================================================================
+const APPROCH_HOST = 'data.economie.gouv.fr';
+const APPROCH_DATASET = process.env.APPROCH_DATASET || 'projets-dachats-publics';
+const APPROCH_PAGE = 100;
+const APPROCH_MAX_RECORDS_PER_RUN = Number(process.env.APPROCH_MAX_RECORDS_PER_RUN) > 0
+  ? Math.min(Number(process.env.APPROCH_MAX_RECORDS_PER_RUN), 9900)
+  : 9900;
+
+const approchNorm = (k: string) => k.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+
+// First non-empty value among exact field names, then among field names that
+// contain one of the fragments. Arrays/objects are flattened to text.
+const approchPick = (rec: any, exact: string[], fragments: string[] = []): string => {
+  const flat = (v: any): string => {
+    if (v == null) return '';
+    if (Array.isArray(v)) return v.map(flat).filter(Boolean).join(', ');
+    if (typeof v === 'object') return Object.values(v).map(flat).filter(Boolean).join(' ');
+    return String(v).trim();
+  };
+  const keys = Object.keys(rec || {});
+  const byNorm = new Map<string, string>();
+  for (const k of keys) byNorm.set(approchNorm(k), k);
+  for (const e of exact) {
+    const k = byNorm.get(approchNorm(e));
+    if (k) { const v = flat(rec[k]); if (v) return v; }
+  }
+  for (const f of fragments) {
+    const nf = approchNorm(f);
+    for (const k of keys) {
+      if (approchNorm(k).includes(nf)) { const v = flat(rec[k]); if (v) return v; }
+    }
+  }
+  return '';
+};
+
+const approchDate = (raw: string): Date | null => {
+  if (!raw) return null;
+  const d = new Date(raw);
+  return isNaN(d.getTime()) ? null : d;
+};
+
+export const normalizeApprochRecord = (record: any) => {
+  // Opendatasoft v2.1 returns fields flat; some datasets nest them under `fields`.
+  const rec = record?.fields && typeof record.fields === 'object' ? { ...record, ...record.fields } : record;
+
+  const ref = approchPick(rec, ['identifiant', 'id_projet', 'identifiant_projet', 'numero_projet', 'reference', 'id', 'recordid'], ['identifiant', 'idprojet', 'numeroprojet', 'reference']);
+  const title = approchPick(rec, ['intitule', 'objet', 'titre', 'libelle', 'nom_projet', 'intitule_projet', 'objet_du_projet'], ['intitule', 'objet', 'titre', 'libelle']);
+  const description = approchPick(rec, ['description', 'description_projet', 'descriptif', 'objet_detaille', 'resume'], ['descript', 'resume', 'detail']);
+  const buyer = approchPick(rec, ['acheteur', 'nom_acheteur', 'organisme', 'structure', 'entite', 'ministere', 'direction', 'service_acheteur'], ['acheteur', 'organisme', 'structure', 'entite', 'ministere']);
+  const city = approchPick(rec, ['ville', 'commune', 'lieu_execution', 'lieu'], ['ville', 'commune', 'lieu']);
+  const dept = approchPick(rec, ['departement', 'code_departement', 'dept'], ['departement']);
+  const region = approchPick(rec, ['region', 'nom_region'], ['region']);
+  const published = approchDate(approchPick(rec, ['date_publication', 'date_de_publication', 'date_mise_a_jour', 'date_creation'], ['datepublication', 'datemaj', 'datecreation']));
+  const launch = approchPick(rec, ['date_lancement', 'date_previsionnelle', 'date_de_lancement_previsionnelle', 'echeance', 'date_prevue'], ['lancement', 'previsionnelle', 'echeance']);
+  const amountRaw = approchPick(rec, ['montant', 'montant_estime', 'estimation', 'budget', 'valeur_estimee'], ['montant', 'estim', 'budget']);
+  const amountNum = parseFloat(amountRaw.replace(/\s/g, '').replace(',', '.'));
+  const cpv = approchPick(rec, ['cpv', 'code_cpv'], ['cpv']);
+
+  // Stable identity: dataset's own id when present, else a hash of title+buyer
+  // so re-runs upsert instead of duplicating.
+  let sourceRef = ref;
+  if (!sourceRef) {
+    const basis = `${title}|${buyer}|${launch}`;
+    if (!title) return null;
+    let h = 0;
+    for (let i = 0; i < basis.length; i++) h = (h * 31 + basis.charCodeAt(i)) | 0;
+    sourceRef = `approch-${Math.abs(h)}`;
+  }
+  if (!title && !description) return null;
+
+  const locationText = [dept, city, region].filter(Boolean).join(' ');
+  const deptCode = normalizeDepartmentCode(dept) || extractDepartmentCodeFromFreeText(locationText);
+  const derivedRegion = normalizeRegionName(region) || (deptCode ? regionForDepartmentCode(deptCode) : null);
+
+  const extra = [launch ? `Lancement prévisionnel : ${launch}` : '', cpv ? `CPV : ${cpv}` : ''].filter(Boolean).join(' - ');
+  const fullDescription = [description, extra].filter(Boolean).join('\n\n');
+
+  return {
+    title: decodeHtmlEntities(title) || (decodeHtmlEntities(description) || '').slice(0, 200),
+    description: decodeHtmlEntities(fullDescription) || '',
+    deadline: null,
+    publication_date: published || new Date(),
+    source_reference: sourceRef,
+    opportunity_type: 'public_procurement',
+    estimated_value: isFinite(amountNum) ? amountNum : null,
+    location_city: city || null,
+    location_region: derivedRegion,
+    location_department: deptCode || null,
+    location_country: 'FR',
+    buyer_name: buyer || null,
+    official_url: null,
+    status: 'active',
+    raw: record,
+  };
+};
+
+export const collectApprochData = async (sourceId: number) => {
+  const startedAt = new Date();
+  try {
+    await assertDbHasRoom();
+    logger.info(`[APProch] Starting collection (${APPROCH_DATASET})`);
+
+    const base = `https://${APPROCH_HOST}/api/explore/v2.1/catalog/datasets/${APPROCH_DATASET}/records`;
+    const rows: any[] = [];
+    let totalCount = 0;
+    for (let offset = 0; rows.length < APPROCH_MAX_RECORDS_PER_RUN && offset + APPROCH_PAGE <= 10000; offset += APPROCH_PAGE) {
+      const response = await axios.get(base, { params: { limit: APPROCH_PAGE, offset }, timeout: 60000 });
+      const batch: any[] = response.data?.results || [];
+      totalCount = response.data?.total_count ?? totalCount;
+      rows.push(...batch);
+      if (batch.length < APPROCH_PAGE) break;
+    }
+    logger.info(`[APProch] Fetched ${rows.length} projects (${totalCount || '?'} in dataset)`);
+
+    const normalized = rows.map(normalizeApprochRecord).filter(Boolean) as any[];
+    const skipped = rows.length - normalized.length;
+    if (rows.length > 0 && normalized.length === 0) {
+      throw new Error(`APProch: ${rows.length} rows fetched but none had a usable title/reference - field names probably differ from the mapping, run scripts/inspectOpenDataset.js and update normalizeApprochRecord`);
+    }
+
+    const typeRes = await db.query(`SELECT id FROM opportunity_types WHERE code = 'public_procurement'`);
+    const opportunityTypeId = typeRes.rows[0]?.id || null;
+    const bulk = await bulkUpsertOpportunities(sourceId, opportunityTypeId, normalized);
+    const errors = bulk.errors + skipped;
+
+    const duplicates = await deduplicateOpportunities();
+
+    await db.query(
+      `INSERT INTO connector_logs
+        (source_id, status, records_fetched, records_processed, records_failed, started_at, completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [sourceId, 'success', rows.length, bulk.inserted + bulk.updated, errors, startedAt, new Date()]
+    );
+    await db.query(
+      "UPDATE data_sources SET last_run = NOW(), next_run = NOW() + (frequency_hours || ' hours')::interval, total_imports = total_imports + $2 WHERE id = $1",
+      [sourceId, bulk.inserted]
+    );
+
+    logger.info(`[APProch] Collection complete: ${bulk.inserted} inserted, ${bulk.updated} updated, ${duplicates} duplicates merged`);
+    return { inserted: bulk.inserted, updated: bulk.updated, duplicates, errors };
+  } catch (err) {
+    logger.error(`[APProch] Collection failed:`, err);
+    await db.query(
+      `INSERT INTO connector_logs (source_id, status, error_message, started_at, completed_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [sourceId, 'failed', String(err), startedAt, new Date()]
+    );
+    throw err;
+  }
+};
+
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
@@ -1434,6 +1601,9 @@ export const scheduleDataCollection = async (force: boolean = false) => {
           break;
         case 'batiweb':
           await collectBatiwebData(source.id);
+          break;
+        case 'approch':
+          await collectApprochData(source.id);
           break;
         default:
           logger.warn(`Unknown source type: ${source.code}`);

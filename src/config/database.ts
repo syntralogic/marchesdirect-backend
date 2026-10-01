@@ -1007,6 +1007,16 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // way DECP was.
   await step(`UPDATE data_sources SET active = true WHERE code = 'batiweb'`);
 
+  // APProch (projets d'achats publics, data.economie.gouv.fr) - 1 Oct client
+  // ask for another free French source. Same INSERT ... ON CONFLICT + explicit
+  // UPDATE pattern as decp above (existing databases never re-run schema.sql).
+  await step(`
+    INSERT INTO data_sources (code, name, feed_type, frequency_hours, active)
+    VALUES ('approch', 'APProch - Projets d''achats publics (data.economie.gouv.fr)', 'api', 24, true)
+    ON CONFLICT (code) DO NOTHING
+  `);
+  await step(`UPDATE data_sources SET active = true WHERE code = 'approch'`);
+
   // Resume point for the bulk connectors (currently DECP). DECP's Parquet
   // file is far bigger than one run's cap, and the old loop restarted at
   // row 0 on every run - so every run re-upserted the same first
