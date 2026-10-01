@@ -6,6 +6,7 @@ import path from 'path';
 import { pipeline } from 'stream/promises';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { extractBoampLotsText, withLotsText } from '../utils/boampLots';
 import { deduplicateOpportunities } from './deduplicationService';
 import { v4 as uuid } from 'uuid';
 import { regionForDepartmentCode, normalizeDepartmentCode, normalizeRegionName, extractDepartmentCodeFromFreeText } from '../utils/departmentRegion';
@@ -275,7 +276,9 @@ export const normalizeBoampRecord = (record: any) => {
     // sometimes carries raw HTML character references (client's example:
     // "&#8211;" showing up as literal text instead of "–").
     title: decodeHtmlEntities(f.objet || f.titulaire || 'Sans titre'),
-    description: decodeHtmlEntities(f.objet || f.resume || ''),
+    // 30 Sep audit: lots (e.g. "Lot 4 : Électricité") live in `donnees` and
+    // were never searchable - see utils/boampLots.ts.
+    description: withLotsText(decodeHtmlEntities(f.objet || f.resume || '') || '', decodeHtmlEntities(extractBoampLotsText(f.donnees)) || ''),
     publication_date: f.dateparution || record.record_timestamp,
     deadline: f.datelimitereponse || null,
     estimated_value: f.montant ? parseFloat(f.montant) : null,
