@@ -7,6 +7,7 @@ import { logger } from '../utils/logger';
 import { reconcileOfficialFields } from '../utils/officialFields';
 import type { RefineAnswers } from '../services/matchEngine';
 import { naturePrestationLateral, NATURE_VALUES } from '../utils/naturePrestation';
+import { buildSourceAnalysisSections } from '../utils/sourceAnalysisSections';
 import { tokenizeQuery, tsqueryAlternatives, isTradeWord, matchTermsOf, domainMismatchExclusionSqlPattern, lotMatchSqlPattern, canMatchInsideTitle } from '../utils/searchQuery';
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts, generateOpportunityAnalysisSections } from '../services/aiService';
 import { ingestOpportunityDocuments } from '../services/documentIngestionService';
@@ -1506,6 +1507,17 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     ]);
     opportunity.ai_extracted_facts = extractedFacts;
     opportunity.ai_analysis_sections = analysisSections;
+    // 30 Sep audit, point 1: when the AI sections are missing/empty/failed, the
+    // fiche shows the source's own information in the same 3 accordions instead
+    // of staying on "Analyse en cours". Built from stored fields only.
+    if (!hasAnalysisContent(analysisSections)) {
+      try {
+        opportunity.ai_analysis_sections = buildSourceAnalysisSections(opportunity);
+        opportunity.ai_analysis_sections_source = 'source';
+      } catch (err) {
+        logger.warn(`Source fallback sections failed for ${opportunity.id}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
     // One value per official data point across header, details and score
     // (see utils/officialFields.ts).
     //
