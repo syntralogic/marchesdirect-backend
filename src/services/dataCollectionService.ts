@@ -996,7 +996,10 @@ export const collectTedData = async (sourceId: number) => {
       for (const n of batch) {
         const dl = firstText(n['deadline-date-lot']) || firstText(n.deadline);
         const t = dl ? new Date(dl).getTime() : NaN;
-        if (!isNaN(t) && t < nowMs) continue; // already closed
+        // No deadline = award / prior-information / modification notice, not an
+        // open call for tenders (the client's audit flagged exactly this kind of
+        // row showing as active). Keep only notices with a future deadline.
+        if (isNaN(t) || t < nowMs) continue;
         results.push(n);
       }
       if (batch.length < TED_PAGE) break;
