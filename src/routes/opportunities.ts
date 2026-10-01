@@ -678,6 +678,8 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         conditions.push(fullCond);
       }
     }
+    let regionCond: string | null = null;
+    let departmentCond: string | null = null;
     if (region) {
       // Client's map lets several regions be selected at once (e.g.
       // "Nouvelle-Aquitaine, Bretagne") - was a single ILIKE match, so
@@ -723,9 +725,11 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         // resolved to it; un-located rows remain visible (once, not
         // duplicated per zone) in the unfiltered/"whole map" view exactly
         // like before, since no location condition is added there at all.
-        conditions.push(
-          `unaccent(o.location_region) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p))`
-        );
+        // 30 Sep audit (3): a region AND a department chosen together
+        // (Dordogne + Bretagne) were AND-ed, so nothing could match both.
+        // They are now collected here and OR-ed with the department
+        // condition below ("résultats de Dordogne ou de Bretagne").
+        regionCond = `unaccent(o.location_region) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p))`;
         params.push(regions.map(r => `%${r}%`));
       }
     }
@@ -800,10 +804,13 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         }
         // No NULL-inclusion here (26 Sep fix - see the region filter above):
         // an un-geocoded row isn't "in" this département either.
-        conditions.push(`UPPER(TRIM(o.location_department)) = ANY($${idx++}::text[])`);
+        departmentCond = `UPPER(TRIM(o.location_department)) = ANY($${idx++}::text[])`;
         params.push(Array.from(departmentVariants));
       }
     }
+    if (regionCond && departmentCond) conditions.push(`(${regionCond} OR ${departmentCond})`);
+    else if (regionCond) conditions.push(regionCond);
+    else if (departmentCond) conditions.push(departmentCond);
     // Client (26 Sep audit, point 10): "le site accepte 100 000 € minimum
     // et 10 000 € maximum, puis affiche zéro résultat sans expliquer
     // l'erreur." An inverted range isn't "no opportunities happen to
