@@ -45,6 +45,35 @@ const APE_LABELS: Record<string, string> = {
 const apeLabelFor = (code: string | null | undefined): string | null =>
   code ? (APE_LABELS[String(code).replace(/[.\s]/g, '').toUpperCase()] || null) : null;
 
+
+// 1 Oct client report: raw codes such as BILANS_CARBONE were shown verbatim in
+// the "Certifications" row. Turn ALL_CAPS_WITH_UNDERSCORES codes into readable
+// French labels; text that is already human-readable is left untouched.
+const CERTIFICATION_LABELS: Record<string, string> = {
+  BILANS_CARBONE: 'Bilan carbone',
+  BILAN_CARBONE: 'Bilan carbone',
+  RGE: 'RGE',
+  QUALIBAT: 'Qualibat',
+  QUALIFELEC: 'Qualifelec',
+  QUALIPAC: 'QualiPAC',
+  QUALIPV: 'QualiPV',
+  QUALIBOIS: 'Qualibois',
+  QUALISOL: 'Qualisol',
+  ECOARTISAN: 'Eco Artisan',
+  ENTREPRISE_DU_PATRIMOINE_VIVANT: 'Entreprise du patrimoine vivant',
+  ENTREPRISE_GARANTIE_ASSURANCE: 'Garantie assurance',
+};
+function humanizeCertificationLabel(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  const t = raw.trim();
+  if (!t) return '';
+  const known = CERTIFICATION_LABELS[t.toUpperCase()];
+  if (known) return known;
+  if (!/^[A-Z0-9]+(_[A-Z0-9]+)+$/.test(t)) return t;
+  const words = t.toLowerCase().split('_').filter(Boolean);
+  return words[0].charAt(0).toUpperCase() + words[0].slice(1) + (words.length > 1 ? ' ' + words.slice(1).join(' ') : '');
+}
+
 interface CompanyData {
   name: string | null;
   legal: string | null;
@@ -159,7 +188,10 @@ async function lookupViaPappers(siret: string, apiKey: string): Promise<CompanyD
     .map(d => [d.prenom, d.nom].filter(Boolean).join(' ') || d.nom_complet || null)
     .filter((n, i, arr): n is string => !!n && arr.indexOf(n) === i); // dedupe (representants/dirigeants can overlap)
   const directorName = directorNames[0] || null;
-  const labels: string[] = Array.isArray(data.labels) ? data.labels.map((l: any) => l.label || l.nom || l).filter(Boolean) : [];
+  const labels: string[] = Array.isArray(data.labels)
+    ? data.labels.map((l: any) => humanizeCertificationLabel(l.label || l.nom || l)).filter(Boolean)
+        .filter((n: string, i: number, arr: string[]) => arr.indexOf(n) === i)
+    : [];
   // Pappers' RGE label usually names the certifying body directly, e.g.
   // "RGE Qualibat" or "Qualité RGE Qualit'ENR" - strip the "RGE"/"Qualité"
   // noise words to surface just the organisme name for the badge.

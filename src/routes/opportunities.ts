@@ -442,6 +442,151 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     // "Failed to search opportunities" comment above the route.
     const searchVectorExpr = q ? ((await hasSearchVectorColumn()) ? 'o.search_vector' : INLINE_SEARCH_VECTOR_EXPR) : 'o.search_vector';
 
+    // Single source of truth for "does this notice match this word" - used by the
+    // free-text box AND by the métier (trade_id) filter below, so typing
+    // "électricité" and picking the Électricité métier return the same set
+    // (1 Oct client report: 29 vs 62).
+    const buildWordCondition = (w: string): { wordCondition: string; tradeCond: string } => {
+      let wordCondition = '';
+        // Client report (25 Sep): "elec" matching "électronique" - fixed
+        // by dropping a known-ambiguous abbreviation's own raw substring
+        // from the match set (see matchTermsOf/AMBIGUOUS_ABBREVIATIONS in
+        // searchQuery.ts); everything else still matches exactly as
+        // before via its stem/synonym expansions.
+        const patterns = matchTermsOf(w).map(t => `%${t}%`);
+
+        const nameIdx = idx++;
+        params.push(patterns);
+        const matchedIdx = idx++;
+        params.push(patterns);
+        // BUG (found 19 Sep, client report "har search mein kam/koi result
+        // nahi hota"): the DB's accented trade name / matched-trades text
+        // ("Electricite" with accent) was compared straight against an
+        // unaccented typed pattern - ILIKE folds case, not accents.
+        // unaccent() on the column side + pre-folded patterns on the
+        // parameter side make the match accent-insensitive.
+        const tradeCond = `(unaccent(t.name) ILIKE ANY($${nameIdx}::text[]) OR unaccent(o.ai_matched_trades::text) ILIKE ANY($${matchedIdx}::text[]))`;
+
+        if (isTradeWord(w)) {
+          const titleIdx = idx++;
+          params.push(patterns);
+          // 30 Sep comparatif: the word also counts when it appears as a whole
+          // word in the description/lots (a lot "Électricité CFO-CFA" inside a
+          // global works title), same standard as the métier filter below.
+          const lotPattern = lotMatchSqlPattern(w);
+          let lotCond = '';
+          if (lotPattern) {
+            const lotIdx = idx++;
+            params.push(lotPattern);
+            lotCond = ` OR lower(unaccent(o.title || ' ' || COALESCE(o.description, ''))) ~ $${lotIdx}`;
+          }
+          let cond = `(unaccent(o.title) ILIKE ANY($${titleIdx}::text[]) OR ${tradeCond}${lotCond})`;
+          // Client audit (27 Sep, point 3): "CVC"/"ventilation" matching a
+          // biomedical-equipment market, "électricien" matching a
+          // commodity energy-supply market - see domainMismatchExclusion
+          // in searchQuery.ts. A genuine keyword/trade hit is still
+          // rejected when the notice's own text names one of these
+          // unrelated domains, checked over title+description together
+          // since it's the surrounding phrase (often in the body) that
+          // gives the domain away, not just the title.
+          const mismatchPattern = domainMismatchExclusionSqlPattern(w);
+          if (mismatchPattern) {
+            const mismatchIdx = idx++;
+            params.push(mismatchPattern);
+            cond = `((${cond}) AND NOT (lower(unaccent(o.title || ' ' || COALESCE(o.description, ''))) ~ $${mismatchIdx}))`;
+          }
+          wordCondition = cond;
+        } else {
+          const wordTsIdx = idx++;
+          // Reuses tsqueryAlternatives (the same helper the ORDER BY
+          // relevance tiebreak below uses) instead of re-deriving the
+          // same alternatives list inline, so the ambiguous-abbreviation
+          // fix there (see searchQuery.ts) can't drift out of sync here.
+          const alts = tsqueryAlternatives(w);
+          params.push(alts.length > 1 ? `(${alts.join(' | ')})` : alts[0]);
+          // A word glued to a reference in the title ("000321VALDAHON") is a
+          // single index token: also try a plain substring match on the title.
+          let titleSub = '';
+          if (canMatchInsideTitle(w)) {
+            const subIdx = idx++;
+            params.push(patterns);
+            titleSub = ` OR unaccent(o.title) ILIKE ANY($${subIdx}::text[])`;
+          }
+          wordCondition = `(${searchVectorExpr} @@ to_tsquery('french', unaccent($${wordTsIdx}))${titleSub})`;
+        }
+      return { wordCondition, tradeCond };
+    };
+
+    // Condition for "this notice belongs to these métiers" - shared by the
+    // trade_id filter and by a free-text query that is exactly a métier name.
+    const extraTrueConds: string[] = [];
+    const buildTradeCondition = async (ids: number[]): Promise<string | null> => {
+      if (ids.length === 0) return null;
+      {
+        // 27 Sep client audit, point 7: "Nettoyage" browsed as a category
+        // showed 134 results, all private, while typing "nettoyage" in the
+        // search box found 147 more, public. trade_id/ai_matched_trades are
+        // only ever written by classifyOpportunity(), an async AI batch job
+        // that lags well behind ingestion on high-volume public sources
+        // (BOAMP/PLACE) - see aiProcessing.ts. A category click must not
+        // silently depend on that backlog having cleared, so - same as the
+        // free-text word search a few lines above already does - this also
+        // falls back to a direct keyword hit on title/description for
+        // whichever real trades were picked, catching not-yet-classified
+        // rows the AI hasn't reached yet. domainMismatchExclusionSqlPattern
+        // keeps this from reopening the point-3 fix above (e.g. "CVC" still
+        // must not pull in biomedical-ventilation markets just because the
+        // word "ventilation" appears in their title/description).
+        const slugsResult = await db.query('SELECT slug, name FROM trades WHERE id = ANY($1::int[])', [ids]);
+        const slugs = slugsResult.rows.map((r) => r.slug).filter(Boolean);
+        const keywords = keywordsForSlugs(slugs);
+
+        const baseCond = ids.length === 1
+          ? `(o.trade_id = $${idx} OR unaccent(o.ai_matched_trades::text) ILIKE unaccent('%' || (SELECT name FROM trades WHERE id = $${idx}) || '%'))`
+          : `(o.trade_id = ANY($${idx}::int[]) OR EXISTS (SELECT 1 FROM trades tr WHERE tr.id = ANY($${idx}::int[]) AND unaccent(o.ai_matched_trades::text) ILIKE unaccent('%' || tr.name || '%')))`;
+        params.push(ids.length === 1 ? ids[0] : ids);
+        idx++;
+
+        let fullCond = baseCond;
+        if (keywords.length > 0) {
+          const kwIdx = idx++;
+          params.push(`\\y(${keywords.join('|')})\\y`);
+          let keywordCond = `unaccent(o.title || ' ' || COALESCE(o.description, '')) ~* $${kwIdx}`;
+          // AND-NOT any domain-mismatch exclusion any of these keywords
+          // trigger (deduplicated - the same rule can fire for several
+          // keywords of the same trade, e.g. "chauffage" and "ventilation"
+          // both point at the CVC/biomedical rule).
+          const exclusions = [...new Set(
+            keywords.map((k) => domainMismatchExclusionSqlPattern(k)).filter((p): p is string => !!p)
+          )];
+          for (const excl of exclusions) {
+            const exIdx = idx++;
+            params.push(excl);
+            keywordCond += ` AND unaccent(o.title || ' ' || COALESCE(o.description, '')) !~* $${exIdx}`;
+          }
+          fullCond = `(${baseCond} OR (${keywordCond}))`;
+        }
+        // 1 Oct client report (free search 29 vs métier 62): the métier filter
+        // must also accept everything the free-text box accepts for the same
+        // métier name, otherwise the two counts diverge. Reuses the exact same
+        // per-word predicate (title / lot-in-description / trade name).
+        const tradeNames: string[] = slugsResult.rows.map((r) => r.name).filter(Boolean);
+        const freeTextConds: string[] = [];
+        for (const name of tradeNames) {
+          for (const segment of String(name).split(/\s*(?:\/|,|\bet\b)\s*/i)) {
+            const words = tokenizeQuery(segment);
+            if (words.length === 0) continue;
+            const built = words.map((w) => buildWordCondition(w));
+            // keep every bound param referenced (see the 42P18 notes above)
+            extraTrueConds.push(`((${built.map((x) => x.tradeCond).join(' AND ')}) OR TRUE)`);
+            freeTextConds.push(`(${built.map((x) => x.wordCondition).join(' AND ')})`);
+          }
+        }
+        if (freeTextConds.length > 0) fullCond = `(${fullCond} OR ${freeTextConds.join(' OR ')})`;
+        return fullCond;
+      }
+    };
+
     if (journey) {
       // Client's journey step lets several opportunity types be selected
       // at once - was a single `=` match so the frontend picking 2+ types
@@ -550,75 +695,28 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
         const tradeConds: string[] = [];
         const wordConds: string[] = [];
         for (const w of qWords) {
-          // Client report (25 Sep): "elec" matching "électronique" - fixed
-          // by dropping a known-ambiguous abbreviation's own raw substring
-          // from the match set (see matchTermsOf/AMBIGUOUS_ABBREVIATIONS in
-          // searchQuery.ts); everything else still matches exactly as
-          // before via its stem/synonym expansions.
-          const patterns = matchTermsOf(w).map(t => `%${t}%`);
-
-          const nameIdx = idx++;
-          params.push(patterns);
-          const matchedIdx = idx++;
-          params.push(patterns);
-          // BUG (found 19 Sep, client report "har search mein kam/koi result
-          // nahi hota"): the DB's accented trade name / matched-trades text
-          // ("Electricite" with accent) was compared straight against an
-          // unaccented typed pattern - ILIKE folds case, not accents.
-          // unaccent() on the column side + pre-folded patterns on the
-          // parameter side make the match accent-insensitive.
-          const tradeCond = `(unaccent(t.name) ILIKE ANY($${nameIdx}::text[]) OR unaccent(o.ai_matched_trades::text) ILIKE ANY($${matchedIdx}::text[]))`;
+          const { wordCondition, tradeCond } = buildWordCondition(w);
           tradeConds.push(tradeCond);
-
-          if (isTradeWord(w)) {
-            const titleIdx = idx++;
-            params.push(patterns);
-            // 30 Sep comparatif: the word also counts when it appears as a whole
-            // word in the description/lots (a lot "Électricité CFO-CFA" inside a
-            // global works title), same standard as the métier filter below.
-            const lotPattern = lotMatchSqlPattern(w);
-            let lotCond = '';
-            if (lotPattern) {
-              const lotIdx = idx++;
-              params.push(lotPattern);
-              lotCond = ` OR lower(unaccent(o.title || ' ' || COALESCE(o.description, ''))) ~ $${lotIdx}`;
-            }
-            let cond = `(unaccent(o.title) ILIKE ANY($${titleIdx}::text[]) OR ${tradeCond}${lotCond})`;
-            // Client audit (27 Sep, point 3): "CVC"/"ventilation" matching a
-            // biomedical-equipment market, "électricien" matching a
-            // commodity energy-supply market - see domainMismatchExclusion
-            // in searchQuery.ts. A genuine keyword/trade hit is still
-            // rejected when the notice's own text names one of these
-            // unrelated domains, checked over title+description together
-            // since it's the surrounding phrase (often in the body) that
-            // gives the domain away, not just the title.
-            const mismatchPattern = domainMismatchExclusionSqlPattern(w);
-            if (mismatchPattern) {
-              const mismatchIdx = idx++;
-              params.push(mismatchPattern);
-              cond = `((${cond}) AND NOT (lower(unaccent(o.title || ' ' || COALESCE(o.description, ''))) ~ $${mismatchIdx}))`;
-            }
-            wordConds.push(cond);
-          } else {
-            const wordTsIdx = idx++;
-            // Reuses tsqueryAlternatives (the same helper the ORDER BY
-            // relevance tiebreak below uses) instead of re-deriving the
-            // same alternatives list inline, so the ambiguous-abbreviation
-            // fix there (see searchQuery.ts) can't drift out of sync here.
-            const alts = tsqueryAlternatives(w);
-            params.push(alts.length > 1 ? `(${alts.join(' | ')})` : alts[0]);
-            // A word glued to a reference in the title ("000321VALDAHON") is a
-            // single index token: also try a plain substring match on the title.
-            let titleSub = '';
-            if (canMatchInsideTitle(w)) {
-              const subIdx = idx++;
-              params.push(patterns);
-              titleSub = ` OR unaccent(o.title) ILIKE ANY($${subIdx}::text[])`;
-            }
-            wordConds.push(`(${searchVectorExpr} @@ to_tsquery('french', unaccent($${wordTsIdx}))${titleSub})`);
+          wordConds.push(wordCondition);
+        }
+        // 1 Oct client report (29 vs 62): when the typed text is exactly a
+        // métier name ("électricité"), also accept every notice the métier
+        // filter accepts (AI-classified trade, ai_matched_trades, trade keywords),
+        // so typing it and picking it from the list give the same results.
+        let wordCondition = wordConds.join(' AND ');
+        const exactTrade = await db.query(
+          `SELECT id FROM trades WHERE unaccent(lower(name)) = unaccent(lower($1))`,
+          [qWords.join(' ')]
+        );
+        if (exactTrade.rows.length > 0) {
+          const tradeOr = await buildTradeCondition(exactTrade.rows.map((r) => Number(r.id)).filter((n) => Number.isFinite(n)));
+          if (tradeOr) {
+            wordCondition = `((${wordCondition}) OR ${tradeOr})`;
+            for (const c of extraTrueConds) conditions.push(c);
+            extraTrueConds.length = 0;
           }
         }
-        conditions.push(wordConds.join(' AND '));
+        conditions.push(wordCondition);
         tradeMatchExpr = tradeConds.join(' AND ');
         // Same 42P18 "could not determine data type" issue as the tsIdx fix
         // above, but for every word's nameIdx/matchedIdx (trade-name /
@@ -650,52 +748,10 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       //   OR across them, never duplicated (o.trade_id is a single scalar
       //   column, so ANY(...) can't produce duplicate rows by itself).
       const ids = String(trade_id).split(',').map((v) => v.trim()).filter(Boolean).map(Number).filter((n) => Number.isFinite(n));
-      if (ids.length > 0) {
-        // 27 Sep client audit, point 7: "Nettoyage" browsed as a category
-        // showed 134 results, all private, while typing "nettoyage" in the
-        // search box found 147 more, public. trade_id/ai_matched_trades are
-        // only ever written by classifyOpportunity(), an async AI batch job
-        // that lags well behind ingestion on high-volume public sources
-        // (BOAMP/PLACE) - see aiProcessing.ts. A category click must not
-        // silently depend on that backlog having cleared, so - same as the
-        // free-text word search a few lines above already does - this also
-        // falls back to a direct keyword hit on title/description for
-        // whichever real trades were picked, catching not-yet-classified
-        // rows the AI hasn't reached yet. domainMismatchExclusionSqlPattern
-        // keeps this from reopening the point-3 fix above (e.g. "CVC" still
-        // must not pull in biomedical-ventilation markets just because the
-        // word "ventilation" appears in their title/description).
-        const slugsResult = await db.query('SELECT slug FROM trades WHERE id = ANY($1::int[])', [ids]);
-        const slugs = slugsResult.rows.map((r) => r.slug).filter(Boolean);
-        const keywords = keywordsForSlugs(slugs);
-
-        const baseCond = ids.length === 1
-          ? `(o.trade_id = $${idx} OR unaccent(o.ai_matched_trades::text) ILIKE unaccent('%' || (SELECT name FROM trades WHERE id = $${idx}) || '%'))`
-          : `(o.trade_id = ANY($${idx}::int[]) OR EXISTS (SELECT 1 FROM trades tr WHERE tr.id = ANY($${idx}::int[]) AND unaccent(o.ai_matched_trades::text) ILIKE unaccent('%' || tr.name || '%')))`;
-        params.push(ids.length === 1 ? ids[0] : ids);
-        idx++;
-
-        let fullCond = baseCond;
-        if (keywords.length > 0) {
-          const kwIdx = idx++;
-          params.push(`\\y(${keywords.join('|')})\\y`);
-          let keywordCond = `unaccent(o.title || ' ' || COALESCE(o.description, '')) ~* $${kwIdx}`;
-          // AND-NOT any domain-mismatch exclusion any of these keywords
-          // trigger (deduplicated - the same rule can fire for several
-          // keywords of the same trade, e.g. "chauffage" and "ventilation"
-          // both point at the CVC/biomedical rule).
-          const exclusions = [...new Set(
-            keywords.map((k) => domainMismatchExclusionSqlPattern(k)).filter((p): p is string => !!p)
-          )];
-          for (const excl of exclusions) {
-            const exIdx = idx++;
-            params.push(excl);
-            keywordCond += ` AND unaccent(o.title || ' ' || COALESCE(o.description, '')) !~* $${exIdx}`;
-          }
-          fullCond = `(${baseCond} OR (${keywordCond}))`;
-        }
-        conditions.push(fullCond);
-      }
+      const tradeCondition = await buildTradeCondition(ids);
+      if (tradeCondition) conditions.push(tradeCondition);
+      for (const c of extraTrueConds) conditions.push(c);
+      extraTrueConds.length = 0;
     }
     let regionCond: string | null = null;
     let departmentCond: string | null = null;
