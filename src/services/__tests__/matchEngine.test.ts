@@ -1,4 +1,4 @@
-import { evaluateMatch, tradeSlugsForCompany, CompanyProfile, MarketInput } from '../matchEngine';
+import { isUsableCoordinate, evaluateMatch, tradeSlugsForCompany, CompanyProfile, MarketInput } from '../matchEngine';
 import { extractTradeSlugs } from '../tradeResolver';
 
 // 25 Sep client audit: VERIFRANCE HABITAT (heating / air conditioning) got 37 %
@@ -33,6 +33,13 @@ describe('trade normalisation', () => {
   it('does not confuse look-alike words with a trade', () => {
     expect(extractTradeSlugs('Plan climat air énergie territorial')).toEqual([]);
     expect(extractTradeSlugs('Prestations de messagerie électronique')).toEqual([]);
+  });
+  it('a vehicle purchase is not an electrical or gardening job (30 Sep audit, camion électrique)', () => {
+    expect(extractTradeSlugs("Acquisition et livraison d'un camion neuf électrique avec hayon - Jardins de Nonères")).toEqual([]);
+    expect(extractTradeSlugs('Achat d’un véhicule utilitaire électrique')).toEqual([]);
+    // real works on electric-vehicle charging still name the métier
+    expect(extractTradeSlugs('Installation de bornes de recharge électrique pour véhicules')).toEqual(['electricite']);
+    expect(extractTradeSlugs('Travaux de réfection de l’installation électrique')).toEqual(['electricite']);
   });
   it('uses the APE code as an indication of the company activity', () => {
     expect(tradeSlugsForCompany('43.22B')).toEqual(['cvc']);
@@ -139,5 +146,31 @@ describe('evaluateMatch', () => {
 
   it('gives no percentage without a company', () => {
     expect(evaluateMatch(null, market('Installation de climatisation')).score).toBeNull();
+  });
+});
+
+describe('zone distance guard (30 Sep audit: Bordeaux-Bordeaux at 4 988 km)', () => {
+  it('treats the (0,0) geocode sentinel and out-of-range pairs as unusable', () => {
+    expect(isUsableCoordinate(0, 0)).toBe(false);
+    expect(isUsableCoordinate('0', '0')).toBe(false);
+    expect(isUsableCoordinate(null, 2)).toBe(false);
+    expect(isUsableCoordinate(95, 2)).toBe(false);
+    expect(isUsableCoordinate(44.84, -0.58)).toBe(true);
+  });
+
+  it('never prints a distance when the market geocode is the (0,0) sentinel', () => {
+    const c = company({ latitude: 44.84, longitude: -0.58, department: '33', radiusKm: 100 });
+    const m = market('Installation de climatisation', { latitude: 0, longitude: 0, department: '33' });
+    const zone = evaluateMatch(c, m).criteria.find((x) => x.key === 'zone')!;
+    expect(zone.detail).not.toMatch(/km/);
+    expect(zone.status).toBe('match'); // same department fallback
+  });
+
+  it('stays "to confirm" without any usable location or department', () => {
+    const c = company({ latitude: 44.84, longitude: -0.58, department: null });
+    const m = market('Installation de climatisation', { latitude: 0, longitude: 0, department: null });
+    const zone = evaluateMatch(c, m).criteria.find((x) => x.key === 'zone')!;
+    expect(zone.status).toBe('confirm');
+    expect(zone.detail).toMatch(/non évaluable/);
   });
 });

@@ -68,7 +68,24 @@ export const KEYWORD_TRADE_SLUG: Record<string, string> = {
 // used to compare what a market asks for with what a company does.
 // Keyword hits only - no fuzzy substring matching, so "plan climat" is not
 // "climatisation" and "messagerie électronique" is not "électricité".
+//
+// 30 Sep client audit: "Acquisition et livraison d'un camion neuf électrique
+// avec hayon - Jardins de Nonères" scored 100 % for an electrical contractor
+// (and read as electricité + espaces verts). "électrique" described the
+// vehicle, "Jardins" was part of the buyer's name - neither is a work trade.
+// A purchase of a vehicle/equipment (fourniture) is not a works contract for
+// any building trade, so such a title names no métier unless it also names
+// actual works (installation, pose, travaux, maintenance...).
+const VEHICLE_SUPPLY_RE = /\b(acquisition|achat|acheter|fourniture|livraison|location|renouvellement)\b[^.;]{0,80}\b(vehicules?|camions?|camionnettes?|fourgons?|fourgonnettes?|utilitaires?|voitures?|autobus|autocars?|bus|minibus|tracteurs?|tondeuses?|remorques?|engins?|velos?)\b/;
+const WORKS_WORD_RE = /\b(travaux|installation|installations|pose|maintenance|entretien|raccordement|deploiement|renovation|rehabilitation|reparation|construction|amenagement)\b/;
+
+export const isVehicleOrEquipmentSupply = (text: string | null | undefined): boolean => {
+  const f = fold(text || '');
+  return VEHICLE_SUPPLY_RE.test(f) && !WORKS_WORD_RE.test(f);
+};
+
 export function extractTradeSlugs(text: string | null | undefined): string[] {
+  if (isVehicleOrEquipmentSupply(text)) return [];
   const found = new Set<string>();
   for (const w of tokens(text || '')) {
     if (KEYWORD_TRADE_SLUG[w]) found.add(KEYWORD_TRADE_SLUG[w]);
