@@ -56,7 +56,7 @@ const DECP_MAX_RECORDS_PER_RUN = Number(process.env.DECP_MAX_RECORDS_PER_RUN) > 
 // docs.ted.europa.eu/reuse/search-api.html. Well under that ceiling.
 // Override with TED_MAX_RECORDS_PER_RUN (1 Oct: client wants as many genuinely
 // open French notices as the sources really hold).
-const TED_MAX_RECORDS_PER_RUN = Number(process.env.TED_MAX_RECORDS_PER_RUN) > 0 ? Number(process.env.TED_MAX_RECORDS_PER_RUN) : 250;
+const TED_MAX_RECORDS_PER_RUN = Number(process.env.TED_MAX_RECORDS_PER_RUN) > 0 ? Number(process.env.TED_MAX_RECORDS_PER_RUN) : 5000;
 
 // Exported for scripts/backfillMissingDeadlines.ts - re-fetches specific
 // known BOAMP notices by idweb to backfill deadline on rows ingested before
@@ -956,26 +956,44 @@ export const collectTedData = async (sourceId: number) => {
       return String(v);
     };
 
-    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000); // 30 days
+    // Open French notices only: buyer-country=FRA (non-FR rows were fetched but
+    // never shown anywhere - they only burned the 250-row cap), 120-day
+    // publication window (TED deadlines run 30-90 days), paged 250 at a time
+    // up to TED_MAX_RECORDS_PER_RUN (pagination mode allows 15,000 in total).
+    // Rows whose deadline already passed are dropped before insert.
+    const since = new Date(Date.now() - 120 * 24 * 60 * 60 * 1000);
     const sinceStr = since.toISOString().slice(0, 10).replace(/-/g, '');
-
-    const response = await axios.post(
-      'https://api.ted.europa.eu/v3/notices/search',
-      {
-        query: `publication-date >= ${sinceStr}`,
-        fields: [
-          'publication-number', 'notice-title', 'buyer-name', 'buyer-country',
-          'deadline-date-lot', 'publication-date', 'description-proc', 'classification-cpv',
-        ],
-        page: 1,
-        limit: TED_MAX_RECORDS_PER_RUN,
-        scope: 'ALL',
-      },
-      { timeout: 60000, headers: { 'Content-Type': 'application/json' } }
-    );
-
-    const results: any[] = response.data?.notices || response.data?.results || response.data?.items || [];
-    logger.info(`[TED] Fetched ${results.length} notices`);
+    const TED_PAGE = 250;
+    const tedFields = [
+      'publication-number', 'notice-title', 'buyer-name', 'buyer-country',
+      'deadline-date-lot', 'publication-date', 'description-proc', 'classification-cpv',
+    ];
+    const results: any[] = [];
+    for (let page = 1; results.length < TED_MAX_RECORDS_PER_RUN; page++) {
+      const response = await axios.post(
+        'https://api.ted.europa.eu/v3/notices/search',
+        {
+          query: `buyer-country=FRA AND publication-date>=${sinceStr}`,
+          fields: tedFields,
+          page,
+          limit: TED_PAGE,
+          scope: 'ALL',
+        },
+        { timeout: 60000, headers: { 'Content-Type': 'application/json' } }
+      );
+      const batch: any[] = response.data?.notices || response.data?.results || response.data?.items || [];
+      logger.info(`[TED] Page ${page}: ${batch.length} notices (${response.data?.totalNoticeCount ?? '?'} total matching)`);
+      const nowMs = Date.now();
+      for (const n of batch) {
+        const dl = firstText(n['deadline-date-lot']) || firstText(n.deadline);
+        const t = dl ? new Date(dl).getTime() : NaN;
+        if (!isNaN(t) && t < nowMs) continue; // already closed
+        results.push(n);
+      }
+      if (batch.length < TED_PAGE) break;
+    }
+    if (results.length > TED_MAX_RECORDS_PER_RUN) results.length = TED_MAX_RECORDS_PER_RUN;
+    logger.info(`[TED] Kept ${results.length} open French notices`);
 
     let inserted = 0;
     let updated = 0;
