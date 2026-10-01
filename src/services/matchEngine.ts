@@ -94,7 +94,7 @@ const BUILDING_TRADES = new Set(['maconnerie', 'charpente', 'couverture', 'isola
 // refine).
 export const APE_TRADE_SLUGS: Record<string, string[]> = {
   '4120A': ['batiment-general'], '4120B': ['batiment-general'],
-  '4211Z': ['vrd'], '4212Z': ['vrd'], '4213A': ['vrd'], '4213B': ['vrd'], '4221Z': ['vrd'], '4222Z': ['vrd'], '4291Z': ['vrd'], '4299Z': ['vrd'],
+  '4211Z': ['vrd'], '4212Z': ['vrd'], '4213A': ['vrd'], '4213B': ['vrd'], '4221Z': ['vrd'], '4222Z': ['electricite', 'vrd'], '4291Z': ['vrd'], '4299Z': ['vrd'],
   '4311Z': ['demolition'], '4312A': ['vrd'], '4312B': ['vrd'],
   '4321A': ['electricite'], '4321B': ['electricite'],
   '4322A': ['plomberie'], '4322B': ['cvc'],

@@ -16,7 +16,20 @@ import {
 
 const router = Router();
 
+// 30 Sep audit (SPIE CITYNETWORKS, 42.22Z): Pappers/INSEE return NAF codes
+// with a dot ("42.22Z", "43.21A") while these keys have none, so the lookup
+// below silently missed and the company's activity - hence its métier in the
+// concordance - stayed empty. Always look codes up through apeLabelFor().
 const APE_LABELS: Record<string, string> = {
+  '4221Z': 'Construction de réseaux pour fluides',
+  '4222Z': 'Construction de réseaux électriques et de télécommunications',
+  '4329A': "Travaux d'isolation",
+  '4322B': "Travaux d'installation d'équipements thermiques et de climatisation",
+  '4321B': "Travaux d'installation électrique sur la voie publique",
+  '4399A': "Travaux d'étanchéification",
+  '4399B': 'Travaux de montage de structures métalliques',
+  '8121Z': 'Nettoyage courant des bâtiments',
+  '8130Z': "Services d'aménagement paysager",
   '4120A': 'Construction de maisons individuelles',
   '4120B': "Construction d'autres bâtiments",
   '4211Z': 'Construction de routes et autoroutes',
@@ -28,6 +41,9 @@ const APE_LABELS: Record<string, string> = {
   '4391A': 'Travaux de charpente',
   '4399C': 'Travaux de maçonnerie générale',
 };
+
+const apeLabelFor = (code: string | null | undefined): string | null =>
+  code ? (APE_LABELS[String(code).replace(/[.\s]/g, '').toUpperCase()] || null) : null;
 
 interface CompanyData {
   name: string | null;
@@ -168,7 +184,7 @@ async function lookupViaPappers(siret: string, apiKey: string): Promise<CompanyD
     rgeOrganisme,
     employees: data.effectif || data.tranche_effectif || null,
     ape: data.code_naf || null,
-    activity: data.libelle_code_naf || (data.code_naf ? APE_LABELS[data.code_naf] || null : null),
+    activity: data.libelle_code_naf || apeLabelFor(data.code_naf),
     website: data.site_web || null,
     siren: data.siren || siret.slice(0, 9) || null,
     siret: data.siege?.siret || siret || null,
@@ -216,7 +232,7 @@ async function lookupViaInsee(siret: string, apiKey: string): Promise<CompanyDat
     rgeOrganisme: null, // INSEE Sirene has no certification/labels data
     employees: unite.trancheEffectifsUniteLegale || null,
     ape: apeCode,
-    activity: apeCode ? (APE_LABELS[apeCode] || null) : null,
+    activity: apeLabelFor(apeCode),
     website: null,
     siren: unite.siren || siret.slice(0, 9) || null,
     siret: siret || null,
@@ -265,7 +281,7 @@ async function searchCompaniesByName(name: string, apiKey: string): Promise<Comp
     city: r.siege?.ville || null,
     postal: r.siege?.code_postal || null,
     ape: r.code_naf || null,
-    activity: r.libelle_code_naf || (r.code_naf ? APE_LABELS[r.code_naf] || null : null),
+    activity: r.libelle_code_naf || apeLabelFor(r.code_naf),
     statut: r.entreprise_cessee === true ? 'Cessée' : (r.entreprise_cessee === false ? 'Active' : null),
   })).filter((c: CompanyCandidate) => !!c.siret);
 }
