@@ -61,22 +61,31 @@ const TED_MAX_RECORDS_PER_RUN = Number(process.env.TED_MAX_RECORDS_PER_RUN) > 0 
 // Exported for scripts/backfillMissingDeadlines.ts - re-fetches specific
 // known BOAMP notices by idweb to backfill deadline on rows ingested before
 // the datelimitereponse-based query filter above existed (see that comment).
-export async function fetchAllPages(endpoint: string, baseParams: Record<string, unknown>, label: string): Promise<any[]> {
+export async function fetchAllPages(
+  endpoint: string,
+  baseParams: Record<string, unknown>,
+  label: string,
+  // When given, each page is handed over and then dropped instead of being
+  // accumulated: holding ~7,500 BOAMP notices (with raw_data) at once pushed
+  // Render's 512 MB instance into "JavaScript heap out of memory" on 1 Oct.
+  onPage?: (page: any[]) => Promise<void>
+): Promise<any[]> {
   const all: any[] = [];
+  let seen = 0;
   let offset = 0;
-  while (all.length < MAX_RECORDS_PER_RUN) {
+  while ((onPage ? seen : all.length) < MAX_RECORDS_PER_RUN) {
     const response = await axios.get(endpoint, {
       params: { ...baseParams, limit: PAGE_SIZE, offset },
       timeout: 30000,
     });
     const page = response.data.results || [];
-    all.push(...page);
-    const totalCount = response.data.total_count ?? all.length;
-    logger.info(`[${label}] Fetched page at offset ${offset}: ${page.length} records (${all.length}/${totalCount} so far)`);
-    if (page.length < PAGE_SIZE || all.length >= totalCount) break; // no more pages
+    if (onPage) { await onPage(page); seen += page.length; } else { all.push(...page); seen = all.length; }
+    const totalCount = response.data.total_count ?? seen;
+    logger.info(`[${label}] Fetched page at offset ${offset}: ${page.length} records (${seen}/${totalCount} so far)`);
+    if (page.length < PAGE_SIZE || seen >= totalCount) break; // no more pages
     offset += PAGE_SIZE;
   }
-  return all.slice(0, MAX_RECORDS_PER_RUN);
+  return onPage ? [] : all.slice(0, MAX_RECORDS_PER_RUN);
 }
 
 const parser = new Parser();
@@ -167,20 +176,20 @@ export const collectBoampData = async (sourceId: number) => {
 
     let fetchedTotal = 0, inserted = 0, updated = 0, errors = 0;
     const processWindow = async (where: string) => {
-      const rawRecords = await fetchAllPages(endpoint, { where, order_by: 'datelimitereponse', ...authParams }, 'BOAMP');
-      const notices = rawRecords.map(normalizeBoampRecord);
-      // Chunked bulk upsert (500 rows per INSERT ... ON CONFLICT) instead of the
-      // old per-notice SELECT + INSERT/UPDATE loop (hours at 1-2s/query on the
-      // hosted DB). Every notice has datelimitereponse >= today, so the
-      // status = 'active' on conflict is right for all of them.
+      // Upsert page by page (100 notices at a time) so memory stays flat.
       // A notice with no reference can't be keyed (source_reference NOT NULL)
       // and would fail its whole chunk - count it as an error and skip it.
-      const usableNotices = notices.filter((n: any) => n.source_reference);
-      const bulk = await bulkUpsertOpportunities(sourceId, opportunityTypeId, usableNotices);
-      fetchedTotal += notices.length;
-      inserted += bulk.inserted;
-      updated += bulk.updated;
-      errors += bulk.errors + (notices.length - usableNotices.length);
+      // Every notice has datelimitereponse >= today, so status = 'active' on
+      // conflict is right for all of them.
+      await fetchAllPages(endpoint, { where, order_by: 'datelimitereponse', ...authParams }, 'BOAMP', async (page) => {
+        const notices = page.map(normalizeBoampRecord);
+        const usableNotices = notices.filter((n: any) => n.source_reference);
+        const bulk = await bulkUpsertOpportunities(sourceId, opportunityTypeId, usableNotices);
+        fetchedTotal += notices.length;
+        inserted += bulk.inserted;
+        updated += bulk.updated;
+        errors += bulk.errors + (notices.length - usableNotices.length);
+      });
     };
 
     const maxTotal = Number(process.env.BOAMP_MAX_TOTAL_PER_RUN) > 0 ? Number(process.env.BOAMP_MAX_TOTAL_PER_RUN) : 60000;
