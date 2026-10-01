@@ -144,7 +144,16 @@ async function lookupViaPappers(siret: string, apiKey: string): Promise<CompanyD
     timeout: 8000,
   });
 
+  // 30 Sep audit: SIRET 05680065902011 (établissement de Cernay-lès-Reims) was
+  // replaced by the siège's SIRET in Marseille, which skewed the distance. The
+  // establishment the visitor entered is kept: its own address/SIRET win over
+  // the siège's, while company-level data (name, capital...) stays the same.
   const siege = data.siege || {};
+  const wantedDigits = String(siret || '').replace(/\D/g, '');
+  const etablissement = wantedDigits && String(siege.siret || '').replace(/\D/g, '') !== wantedDigits
+    ? [data.etablissement, ...(Array.isArray(data.etablissements) ? data.etablissements : [])].find((e: any) => e && String(e.siret || '').replace(/\D/g, '') === wantedDigits)
+    : null;
+  const place = etablissement || siege;
   const allDirigeants: any[] = [...(data.representants || []), ...(data.dirigeants || [])];
   const directorNames = allDirigeants
     .map(d => [d.prenom, d.nom].filter(Boolean).join(' ') || d.nom_complet || null)
@@ -156,7 +165,10 @@ async function lookupViaPappers(siret: string, apiKey: string): Promise<CompanyD
   // noise words to surface just the organisme name for the badge.
   const rgeLabel = labels.find(l => /rge/i.test(l));
   const rgeOrganisme = rgeLabel
-    ? rgeLabel.replace(/qualit[ée]\s*/gi, '').replace(/rge/gi, '').trim() || null
+    // 30 Sep audit: a bare "RGE" label left rgeOrganisme empty and the badge said
+    // "Non détecté" although RGE was in the retrieved certifications. Keep the
+    // label itself when no certifying body can be read out of it.
+    ? (rgeLabel.replace(/qualit[ée]\s*/gi, '').replace(/rge/gi, '').trim() || 'RGE')
     : null;
   // Pappers returns `finances` newest-exercice-first; take the first entry
   // that actually has a turnover figure rather than assuming index 0 always
@@ -176,9 +188,9 @@ async function lookupViaPappers(siret: string, apiKey: string): Promise<CompanyD
     legal: data.forme_juridique || null,
     created: data.date_creation || null,
     capital: data.capital != null ? `${data.capital} ${data.devise_capital || 'EUR'}` : null,
-    address: siege.adresse_ligne_1 || null,
-    city: siege.ville || null,
-    postal: siege.code_postal || null,
+    address: place.adresse_ligne_1 || null,
+    city: place.ville || null,
+    postal: place.code_postal || null,
     director: directorName,
     directors: directorNames,
     rgeOrganisme,
@@ -187,7 +199,7 @@ async function lookupViaPappers(siret: string, apiKey: string): Promise<CompanyD
     activity: data.libelle_code_naf || apeLabelFor(data.code_naf),
     website: data.site_web || null,
     siren: data.siren || siret.slice(0, 9) || null,
-    siret: data.siege?.siret || siret || null,
+    siret: (etablissement?.siret || wantedDigits || data.siege?.siret || null),
     statut: data.entreprise_cessee ? 'Cessée' : (data.statut_rcs || (data.entreprise_cessee === false ? 'Active' : null)),
     revenue: latestFinance?.chiffre_affaires != null ? String(latestFinance.chiffre_affaires) : null,
     // Marked so the frontend can show "(estimé)" next to an estimated
@@ -342,7 +354,11 @@ async function getCompanyWithProtection(
     // it as a cache miss so it self-heals on the next lookup, instead of
     // silently keeping stale data forever.
     const isOutdatedShape = !('revenue' in cachedData) || !('siren' in cachedData) || !('statut' in cachedData);
-    if (!isOutdatedShape) {
+    // 30 Sep audit: the cache is keyed by SIREN, so an établissement SIRET was
+    // answered with the siège's cached address. Only serve the cache when it
+    // describes the very SIRET asked for.
+    const sameEstablishment = !cachedData.siret || String(cachedData.siret).replace(/\D/g, '') === siret.replace(/\D/g, '');
+    if (!isOutdatedShape && sameEstablishment) {
       return { ...cachedData, source: cached.rows[0].source };
     }
   }
