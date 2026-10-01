@@ -174,3 +174,21 @@ describe('zone distance guard (30 Sep audit: Bordeaux-Bordeaux at 4 988 km)', ()
     expect(zone.detail).toMatch(/non évaluable/);
   });
 });
+
+describe('company activity -> métier (30 Sep audit: SPIE CITYNETWORKS, réseaux électriques)', () => {
+  it('maps NAF 42.22Z (dotted, as Pappers/INSEE send it) to électricité', () => {
+    expect(tradeSlugsForCompany('42.22Z')).toContain('electricite');
+    expect(tradeSlugsForCompany('42.22Z', 'Construction de réseaux électriques et de télécommunications')).toContain('electricite');
+  });
+  it('an electrical-networks company matches an IRVE (électricité) market on the métier', () => {
+    const c = company({ tradeSlugs: tradeSlugsForCompany('42.22Z') });
+    const m = market('Installation de bornes IRVE - travaux électriques', { department: '21' });
+    expect(evaluateMatch(c, m).criteria.find((x) => x.key === 'metier')!.status).toBe('match');
+  });
+  it('shows the qualification the notice requires instead of "aucune"', () => {
+    const m = market('Installation de bornes de recharge électrique', { requiredQualifications: 'IRVE (Qualifelec ou équivalent)' });
+    const q = evaluateMatch(company({ tradeSlugs: ['electricite'] }), m).criteria.find((x) => x.key === 'qualifications')!;
+    expect(q.detail).toMatch(/IRVE/);
+    expect(q.detail).not.toMatch(/Aucune qualification/);
+  });
+});

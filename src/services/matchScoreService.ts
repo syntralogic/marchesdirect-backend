@@ -3,6 +3,7 @@ import { resolveTradeFromText } from './tradeResolver';
 import { reconcileOfficialFields } from '../utils/officialFields';
 import { extractTradeSlugs } from './tradeResolver';
 import { geocodeCity } from './geocodingService';
+import { extractQualificationsFromText } from '../utils/qualificationText';
 import { evaluateMatch, tradeSlugsForCompany, MatchCriterion, RefineAnswers, CompanyProfile } from './matchEngine';
 import { inferNaturePrestation, isNaturePrestation, NaturePrestation } from '../utils/naturePrestation';
 
@@ -360,7 +361,11 @@ export const computeMatchScore = async (
       department: opp.location_department || null,
       estimatedValue: toNumber(opp.estimated_value),
       deadline: opp.deadline || null,
-      requiredQualifications: facts?.required_qualifications?.available ? String(facts.required_qualifications.value) : null,
+      // Falls back to what the notice text itself states when the extracted
+      // fact is missing (30 Sep audit: IRVE/Qualifelec shown as "aucune").
+      requiredQualifications: facts?.required_qualifications?.available
+        ? String(facts.required_qualifications.value)
+        : extractQualificationsFromText(opp.description, opp.title),
     },
     options.answers || {}
   );
