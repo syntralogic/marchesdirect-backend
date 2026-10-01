@@ -180,7 +180,17 @@ router.post('/refresh', async (req: Request, res: Response) => {
     const result = await refreshAccessToken(req.body.refreshToken);
     res.json(result);
   } catch (err: any) {
-    res.status(401).json({ error: err.message || 'Token refresh failed' });
+    // Only a genuinely invalid/expired refresh token is a 401 (which ends the
+    // session client-side). Infrastructure failures (DB down, cold start) must
+    // not look like an invalid session, or users get logged out on a blip.
+    const name = err?.name || '';
+    const isTokenProblem =
+      name === 'JsonWebTokenError' || name === 'TokenExpiredError' || name === 'NotBeforeError' ||
+      /session expired|invalid|expired|jwt/i.test(err?.message || '');
+    if (isTokenProblem) {
+      return res.status(401).json({ error: err.message || 'Token refresh failed' });
+    }
+    res.status(503).json({ error: 'service_unavailable', message: 'Service momentanément indisponible, réessayez.' });
   }
 });
 
