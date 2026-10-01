@@ -54,7 +54,9 @@ const DECP_MAX_RECORDS_PER_RUN = Number(process.env.DECP_MAX_RECORDS_PER_RUN) > 
 // TED Search API's own pagination-mode cap is 250/page (15k total via
 // pagination mode without switching to iteration/scroll mode) - see
 // docs.ted.europa.eu/reuse/search-api.html. Well under that ceiling.
-const TED_MAX_RECORDS_PER_RUN = 250;
+// Override with TED_MAX_RECORDS_PER_RUN (1 Oct: client wants as many genuinely
+// open French notices as the sources really hold).
+const TED_MAX_RECORDS_PER_RUN = Number(process.env.TED_MAX_RECORDS_PER_RUN) > 0 ? Number(process.env.TED_MAX_RECORDS_PER_RUN) : 250;
 
 // Exported for scripts/backfillMissingDeadlines.ts - re-fetches specific
 // known BOAMP notices by idweb to backfill deadline on rows ingested before
