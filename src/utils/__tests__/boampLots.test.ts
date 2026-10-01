@@ -44,3 +44,15 @@ describe('withLotsText', () => {
     expect(withLotsText('Travaux', '')).toBe('Travaux');
   });
 });
+
+import { lotsFromDescription } from '../boampLots';
+describe('lotsFromDescription', () => {
+  it('splits the appended lots back into individual lots', () => {
+    const d = withLotsText('Réhabilitation administrative', 'Lot 2 : Etanchéité ; Lot 4 : Electricité CFO-CFA');
+    expect(lotsFromDescription(d)).toEqual(['Lot 2 : Etanchéité', 'Lot 4 : Electricité CFO-CFA']);
+  });
+  it('returns [] when there are no lots', () => {
+    expect(lotsFromDescription('Simple objet')).toEqual([]);
+    expect(lotsFromDescription(null)).toEqual([]);
+  });
+});

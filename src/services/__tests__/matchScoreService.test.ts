@@ -134,3 +134,15 @@ describe('criteriaFromFacts', () => {
     expect(criteriaFromFacts(facts)).toEqual([{ label: 'Prix', weight: 100 }]);
   });
 });
+
+describe('marketTradeSlugs reads lots (30 Sep comparatif)', () => {
+  const { marketTradeSlugs } = require('../matchScoreService');
+  it('a global works title with an électricité lot names électricité', () => {
+    const opp = { title: 'Travaux pour un micro-tomographe', description: 'Travaux\n\nLots : Lot 1 : Gros oeuvre ; Lot 5 : Electricité CFO-CFA' };
+    expect(marketTradeSlugs(opp, null)).toContain('electricite');
+  });
+  it('a vehicle purchase still names no métier', () => {
+    const opp = { title: 'Acquisition et livraison d’un camion neuf électrique - Jardins de Nonères', description: '' };
+    expect(marketTradeSlugs(opp, null)).toEqual([]);
+  });
+});
