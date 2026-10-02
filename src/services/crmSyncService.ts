@@ -37,6 +37,12 @@ type LeadRow = {
   location_city: string | null;
   location_region: string | null;
   lead_source: string | null;
+  message?: string | null;
+  appointment_mode?: string | null;
+  appointment_slot_at?: Date | string | null;
+  opportunity_id?: string | null;
+  opportunity_title?: string | null;
+  crm_contact_id?: string | null;
 };
 
 async function syncToPipedrive(lead: LeadRow): Promise<{ contactId: string }> {
@@ -48,23 +54,43 @@ async function syncToPipedrive(lead: LeadRow): Promise<{ contactId: string }> {
 
   const fullName = [lead.first_name, lead.last_name].filter(Boolean).join(' ') || lead.email;
 
-  // 1. Create (or this will duplicate on re-run - Pipedrive's Person API
-  //    doesn't upsert by email on this endpoint) the Person.
-  const personResp = await axios.post(
-    `${baseUrl}/persons`,
-    {
-      name: fullName,
-      email: [{ value: lead.email, primary: true }],
-      phone: lead.phone ? [{ value: lead.phone, primary: true }] : undefined,
-      org_name: lead.company_name || undefined,
-    },
-    { params: { api_token: apiKey }, timeout: 10000 }
-  );
+  // 1. Reuse the Person when one already exists. 30 Sep CRM check: every retry
+  //    (and every second form from the same visitor) created a NEW person, so
+  //    the sales team saw duplicates. We first reuse the id we stored on a
+  //    previous attempt, then look the person up by exact e-mail, and only
+  //    then create it.
+  let existingId: string | null = lead.crm_contact_id ? String(lead.crm_contact_id) : null;
+  if (!existingId) {
+    try {
+      const found = await axios.get(`${baseUrl}/persons/search`, {
+        params: { api_token: apiKey, term: lead.email, fields: 'email', exact_match: true, limit: 1 },
+        timeout: 10000,
+      });
+      const item = found.data?.data?.items?.[0]?.item;
+      if (item?.id) existingId = String(item.id);
+    } catch (err) {
+      logger.warn(`[CRM] Person lookup failed for ${lead.id}, creating a new person instead`);
+    }
+  }
+  const personResp = existingId
+    ? { data: { data: { id: existingId } } }
+    : await axios.post(
+        `${baseUrl}/persons`,
+        {
+          name: fullName,
+          email: [{ value: lead.email, primary: true }],
+          phone: lead.phone ? [{ value: lead.phone, primary: true }] : undefined,
+          org_name: lead.company_name || undefined,
+        },
+        { params: { api_token: apiKey }, timeout: 10000 }
+      );
 
   const personId = personResp.data?.data?.id;
   if (!personId) {
     throw new Error('Pipedrive did not return a person id');
   }
+  // Persist it right away: if the next call fails, the retry reuses this person.
+  await db.query('UPDATE crm_leads SET crm_contact_id = $1 WHERE id = $2', [String(personId), lead.id]);
 
   // 2. Create a Lead referencing that person, with our platform-specific
   //    fields folded into the lead's note since Pipedrive custom fields would
@@ -75,6 +101,14 @@ async function syncToPipedrive(lead: LeadRow): Promise<{ contactId: string }> {
     lead.location_city ? `Ville: ${lead.location_city}` : null,
     lead.location_region ? `Region: ${lead.location_region}` : null,
     lead.lead_source ? `Source: ${lead.lead_source}` : null,
+    // 30 Sep CRM check: none of this reached the CRM, so a salesperson saw a
+    // name with no reason to call. The visitor's message, the requested
+    // rendez-vous and the opportunity concerned are now part of the lead.
+    lead.opportunity_title ? `Opportunité: ${lead.opportunity_title}` : null,
+    lead.appointment_mode === 'slot' && lead.appointment_slot_at
+      ? `Rendez-vous demandé: ${new Date(lead.appointment_slot_at).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })}`
+      : lead.appointment_mode === 'callback' ? 'Demande: être rappelé' : null,
+    lead.message ? `Message: ${lead.message}` : null,
   ].filter(Boolean);
 
   await axios.post(
@@ -123,7 +157,11 @@ export const syncLeadToCrm = async (leadId: string): Promise<void> => {
   if (system === 'pipedrive' && !isCrmConfigured()) return;
 
   try {
-    const result = await db.query('SELECT * FROM crm_leads WHERE id = $1', [leadId]);
+    const result = await db.query(
+      `SELECT l.*, o.title AS opportunity_title FROM crm_leads l
+       LEFT JOIN opportunities o ON o.id = l.opportunity_id WHERE l.id = $1`,
+      [leadId]
+    );
     if (result.rows.length === 0) {
       logger.warn(`[CRM] Lead ${leadId} not found for sync`);
       return;
@@ -173,7 +211,7 @@ export const retryPendingCrmSyncs = async (limit: number = 50): Promise<number> 
   if (system === 'pipedrive' && !isCrmConfigured()) return 0;
 
   const result = await db.query(
-    `SELECT id FROM crm_leads WHERE crm_sync_status IN ('pending', 'failed') ORDER BY created_at ASC LIMIT $1`,
+    `SELECT id FROM crm_leads WHERE crm_sync_status IN ('pending', 'failed') ORDER BY crm_last_sync ASC NULLS FIRST, created_at ASC LIMIT $1`,
     [limit]
   );
   for (const row of result.rows) {
