@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { logger } from '../utils/logger';
 import { retryPendingCrmSyncs } from '../services/crmSyncService';
+import { retryFailedLeadNotifications } from '../services/leadNotificationService';
 import { trackJob } from '../utils/jobTracker';
 
 export const startCrmRetrySchedule = () => {
@@ -18,6 +19,14 @@ export const startCrmRetrySchedule = () => {
       } catch (err) {
         logger.error('[Job] CRM retry sweep failed:', err);
       }
+      // DEV-08: same cadence, separate failure domain - a CRM outage must not
+      // stop the team emails from being retried, and vice versa.
+      try {
+        const sent = await retryFailedLeadNotifications(20);
+        if (sent > 0) logger.info(`[Job] Lead notification retry: attempted ${sent} lead(s)`);
+      } catch (err) {
+        logger.error('[Job] Lead notification retry failed:', err);
+      }
     });
   });
 
@@ -31,6 +40,8 @@ export const startCrmRetrySchedule = () => {
       if (count > 0) logger.info(`[Job] Boot-time CRM retry sweep: attempted ${count} pending/failed lead(s)`);
     })
     .catch((err) => logger.error('[Job] Boot-time CRM retry sweep failed (non-fatal):', err));
+  trackJob('leadNotificationRetry:boot', () => retryFailedLeadNotifications(20))
+    .catch((err) => logger.error('[Job] Boot-time lead notification retry failed (non-fatal):', err));
 
   logger.info('✅ CRM retry job scheduled (every 30 minutes)');
 };

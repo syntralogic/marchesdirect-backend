@@ -908,6 +908,14 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS appointment_mode VARCHAR(20)`);
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS appointment_slot_at TIMESTAMP`);
 
+  // DEV-08: the "new request" email to the team is best-effort, so its outcome
+  // is tracked on the lead itself, separately from the CRM sync status, and a
+  // sweep (jobs/crmRetry.ts) re-sends the ones that failed.
+  // notification_status: NULL (not attempted / other flow) | 'sent' | 'failed' | 'no_recipient'
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS notification_status VARCHAR(20)`);
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS notification_attempts INTEGER NOT NULL DEFAULT 0`);
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS notification_last_attempt TIMESTAMP`);
+
   // Prototype V17 rule: `companyKnown` is a single global flag per browser
   // session, not per-opportunity - once a visitor identifies their company
   // via SIRET on any fiche, they're recognized everywhere without

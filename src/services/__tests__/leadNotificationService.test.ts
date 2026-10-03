@@ -3,7 +3,7 @@ jest.mock('../emailService', () => ({ sendEmail: jest.fn().mockResolvedValue(tru
 
 import { db } from '../../config/database';
 import { sendEmail } from '../emailService';
-import { buildLeadEmail, resolveLeadRecipients, notifyTeamOfNewLead, escapeHtml } from '../leadNotificationService';
+import { buildLeadEmail, resolveLeadRecipients, notifyTeamOfNewLead, retryFailedLeadNotifications, escapeHtml } from '../leadNotificationService';
 
 const q = db.query as jest.Mock;
 
@@ -48,5 +48,46 @@ describe('notifyTeamOfNewLead', () => {
     expect(sendEmail).toHaveBeenCalledTimes(2);
     (sendEmail as jest.Mock).mockRejectedValueOnce(new Error('boom'));
     await expect(notifyTeamOfNewLead({ id: '2' })).resolves.toBeUndefined();
+  });
+});
+
+describe('notification tracking and retry (DEV-08)', () => {
+  const statusUpdates = () =>
+    q.mock.calls.filter((c) => String(c[0]).includes('SET notification_status')).map((c) => c[1]);
+
+  it('records sent / failed / no_recipient on the lead row', async () => {
+    q.mockResolvedValue({ rows: [] });
+    process.env.LEAD_NOTIFICATION_EMAILS = 'a@x.fr';
+
+    (sendEmail as jest.Mock).mockResolvedValueOnce(true);
+    await notifyTeamOfNewLead({ id: 'L1' });
+    (sendEmail as jest.Mock).mockResolvedValueOnce(false);
+    await notifyTeamOfNewLead({ id: 'L2' });
+    (sendEmail as jest.Mock).mockRejectedValueOnce(new Error('boom'));
+    await notifyTeamOfNewLead({ id: 'L3' });
+
+    const withRecipient = statusUpdates();
+    expect(withRecipient).toEqual([['L1', 'sent'], ['L2', 'failed'], ['L3', 'failed']]);
+
+    delete process.env.LEAD_NOTIFICATION_EMAILS;
+    q.mockReset();
+    q.mockResolvedValue({ rows: [] }); // supportEmail setting + admins both empty
+    await notifyTeamOfNewLead({ id: 'L4' });
+    expect(statusUpdates()).toEqual([['L4', 'no_recipient']]);
+  });
+
+  it('retry re-sends only what the query returns and reports the count', async () => {
+    process.env.LEAD_NOTIFICATION_EMAILS = 'a@x.fr';
+    q.mockReset();
+    q.mockResolvedValueOnce({ rows: [{ id: 'R1', first_name: 'Ali', lead_source: 'contact_form', message: 'hi' }] })
+     .mockResolvedValue({ rows: [] });
+    (sendEmail as jest.Mock).mockResolvedValue(true);
+
+    expect(await retryFailedLeadNotifications(20)).toBe(1);
+    const sql = String(q.mock.calls[0][0]);
+    expect(sql).toContain("notification_status IN ('failed', 'no_recipient')");
+    expect(sql).toContain('notification_attempts < 5');
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(statusUpdates()).toEqual([['R1', 'sent']]);
   });
 });
