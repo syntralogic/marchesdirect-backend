@@ -66,6 +66,12 @@ export function buildSourceAnalysisSections(opp: Record<string, any>): SourceSec
   if (start) cond.push(`Démarrage prévu : ${start}.`);
   const quals = extractQualificationsFromText(description, title);
   cond.push(quals ? `Qualifications mentionnées : ${quals}.` : 'Qualifications exigées : aucune mention dans les données disponibles — à vérifier dans le règlement de consultation.');
+  // DEV-03: a mandatory visit must be visible before the visitor applies. Read
+  // from the notice text only; absent is "à vérifier", never "no visit".
+  const hay = `${title} ${description}`;
+  if (/visite[^.\n]{0,80}(facultative|non obligatoire|pas obligatoire)|(non|pas)\s+obligatoire[^.\n]{0,40}visite/i.test(hay)) cond.push('Visite des lieux : non obligatoire selon l’avis.');
+  else if (/visite[^.\n]{0,80}obligatoire|obligatoire[^.\n]{0,40}visite/i.test(hay)) cond.push('Visite des lieux : OBLIGATOIRE selon l’avis — à planifier avant de répondre.');
+  else cond.push('Visite des lieux : non indiquée dans les données disponibles — à vérifier dans le règlement de consultation.');
   cond.push('Points à vérifier : pièces du dossier de consultation, critères de jugement et conditions de participation, dans l’avis officiel.');
 
   // --- Entreprises concernées

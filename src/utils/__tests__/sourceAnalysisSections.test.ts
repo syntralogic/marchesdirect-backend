@@ -26,3 +26,19 @@ describe('buildSourceAnalysisSections (30 Sep audit, point 1)', () => {
     expect(JSON.stringify(s)).not.toContain('Secret');
   });
 });
+
+describe('visit of the premises (DEV-03)', () => {
+  it('flags a mandatory visit stated by the source', () => {
+    const s = buildSourceAnalysisSections({ title: 'Travaux', description: 'Une visite sur site est obligatoire avant la remise des offres.' });
+    expect(s.conditions).toContain('OBLIGATOIRE');
+  });
+  it('does not turn "non obligatoire" into mandatory', () => {
+    const s = buildSourceAnalysisSections({ title: 'Travaux', description: 'La visite est facultative.' });
+    expect(s.conditions).toContain('non obligatoire');
+    expect(s.conditions).not.toContain('OBLIGATOIRE');
+  });
+  it('says "à vérifier" when the source says nothing', () => {
+    const s = buildSourceAnalysisSections({ title: 'Travaux', description: 'Réfection de toiture.' });
+    expect(s.conditions).toContain('à vérifier dans le règlement');
+  });
+});
