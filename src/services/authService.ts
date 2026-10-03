@@ -1,3 +1,4 @@
+import { escapeHtml } from './leadNotificationService';
 import bcrypt from 'bcryptjs';
 import { v4 as uuid } from 'uuid';
 import { db } from '../config/database';
@@ -624,11 +625,11 @@ export const requestMagicLink = async (email: string, purpose: 'login' | 'welcom
   const { subject, html } = purpose === 'welcome'
     ? {
         subject: 'Votre espace Marchés Direct est prêt',
-        html: `<p>Bonjour ${firstName},</p><p>Votre espace Marchés Direct est prêt. Confirmez votre adresse e-mail et retrouvez votre espace à tout moment avec ce lien :</p><p><a href="${link}">${link}</a></p><p>Ce lien est valable 1 heure.</p>`,
+        html: `<p>Bonjour ${escapeHtml(firstName)},</p><p>Votre espace Marchés Direct est prêt. Confirmez votre adresse e-mail et retrouvez votre espace à tout moment avec ce lien :</p><p><a href="${link}">${link}</a></p><p>Ce lien est valable 1 heure.</p>`,
       }
     : {
         subject: 'Votre lien de connexion Marchés Direct',
-        html: `<p>Bonjour ${firstName},</p><p>Cliquez sur ce lien pour accéder à votre espace Marchés Direct :</p><p><a href="${link}">${link}</a></p><p>Ce lien est valable 1 heure. Si vous n'avez pas demandé cette connexion, ignorez cet e-mail.</p>`,
+        html: `<p>Bonjour ${escapeHtml(firstName)},</p><p>Cliquez sur ce lien pour accéder à votre espace Marchés Direct :</p><p><a href="${link}">${link}</a></p><p>Ce lien est valable 1 heure. Si vous n'avez pas demandé cette connexion, ignorez cet e-mail.</p>`,
       };
 
   await sendEmail({ to: normalizedEmail, subject, html });
