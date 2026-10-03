@@ -72,6 +72,31 @@ router.post(
       } = req.body;
       const phone = normalizeLeadPhone(req.body.phone);
 
+      // DEV-08: "prévenir les demandes en double lors d'un double-clic ou
+      // d'une relance réseau". A double-click (button re-enabled between
+      // renders) or an axios retry on a timed-out-but-actually-succeeded
+      // request used to insert a second crm_leads row - which meant a second
+      // CRM sync and a second "nouvelle demande" email to the team for one
+      // visitor action. ContactPage/CallbackModal/AppointmentModal all send
+      // the same stable per-visit sessionId (getSessionId()), so a same
+      // brand+session submission in the last 20s is almost certainly a
+      // retry, not a second genuine request - return the existing lead's id
+      // instead of inserting again. Scoped tight (20s, same session) so a
+      // visitor who legitimately submits twice later in the same visit
+      // (e.g. callback now, contact form later) is never blocked.
+      if (sessionId) {
+        const dup = await db.query(
+          `SELECT id, created_at FROM crm_leads
+           WHERE brand_id = $1 AND session_id = $2 AND created_at > NOW() - INTERVAL '20 seconds'
+           ORDER BY created_at DESC LIMIT 1`,
+          [brandId, sessionId]
+        );
+        if (dup.rows.length > 0) {
+          logger.info(`Duplicate lead submission suppressed (session ${sessionId}, existing id ${dup.rows[0].id})`);
+          return res.status(200).json({ success: true, id: dup.rows[0].id, duplicate: true });
+        }
+      }
+
       const result = await db.query(
         `INSERT INTO crm_leads
           (brand_id, first_name, last_name, email, phone, company_name, industry_trade,
