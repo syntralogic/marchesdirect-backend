@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import Stripe from 'stripe';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { clearCache } from '../utils/ttlCache';
 import { AuthRequest, requireRole } from '../middleware/auth';
 import { verifyDeduplicationQuality, getDeduplicationReport, deduplicateOpportunities } from '../services/deduplicationService';
 import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities, generateAnalysisSectionsForOpportunities, generateOpportunityAnalysisSections } from '../services/aiService';
@@ -227,6 +228,13 @@ router.put('/settings', async (req: AuthRequest, res: Response) => {
         [key, JSON.stringify(values[key]), req.user?.id || null]
       );
     }
+
+    // maintenanceMode/maintenanceMessage are read through a short-lived
+    // cache by server.ts's maintenance gate (see its own comment) so every
+    // API request doesn't hit the DB - without this, an admin toggling
+    // maintenance on/off here would see stale behaviour on the live site
+    // for up to that cache's TTL after saving.
+    clearCache();
 
     res.json(values);
   } catch (err: any) {

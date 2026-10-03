@@ -207,6 +207,78 @@ app.get('/health', (req: Request, res: Response) => {
   res.json({ status: 'ok', timestamp: new Date() });
 });
 
+// Client audit (found while fixing Site Name/Support Email persistence):
+// maintenanceMode has been saveable from AdminSettings since 30 Sep, but
+// schema.sql's own comment on app_settings said it plainly - "stored here
+// but NOT YET ENFORCED anywhere - no route currently checks it to actually
+// block visitor traffic". Toggling it in the admin panel did (and still
+// does) nothing to the live site. These two pieces are what actually
+// enforce it:
+//
+// - GET /api/site-status: cheap, public, unauthenticated - the frontend
+//   calls this once on load to decide whether to show a maintenance page.
+// - maintenanceGate below: the actual enforcement for every other request.
+//
+// Read through the same short-TTL cache stats already use (ttlCache.ts) -
+// this now runs on every single API request, so a straight DB query per
+// request would add exactly the connection-pool-exhaustion risk that cache
+// was built to prevent. 5s (not stats' longer TTLs) because an admin who
+// just flipped this toggle reasonably expects it to take effect in
+// roughly the time it takes to reload the page, not minutes.
+const MAINTENANCE_CACHE_TTL_MS = 5000;
+const loadMaintenanceState = async (): Promise<{ maintenanceMode: boolean; maintenanceMessage: string }> => {
+  const result = await db.query(
+    `SELECT key, value FROM app_settings WHERE key IN ('maintenanceMode', 'maintenanceMessage')`
+  );
+  const row = (key: string) => result.rows.find((r) => r.key === key)?.value;
+  return {
+    maintenanceMode: row('maintenanceMode') === true,
+    maintenanceMessage: (row('maintenanceMessage') as string) || 'Site en maintenance. Merci de revenir bientôt.',
+  };
+};
+
+app.get('/api/site-status', async (req: Request, res: Response) => {
+  try {
+    const state = await cached('site-status', MAINTENANCE_CACHE_TTL_MS, loadMaintenanceState);
+    res.json(state);
+  } catch (err) {
+    // A status-check failing must never itself look like "site is down" -
+    // fail open (report no maintenance) rather than block every visitor
+    // because this one query had a hiccup.
+    logger.error('Site status check failed:', err);
+    res.json({ maintenanceMode: false, maintenanceMessage: '' });
+  }
+});
+
+// Blocks visitor-facing API traffic while maintenanceMode is on. Admin
+// (already behind its own auth+role check) and auth (an admin still needs
+// to be able to log in to turn this back off) are exempt, same as the
+// health check and the status endpoint itself - otherwise turning
+// maintenance on could lock everyone, including the admin who turned it
+// on, out of the one place that can turn it back off.
+app.use(async (req: Request, res: Response, next: NextFunction) => {
+  if (
+    !req.path.startsWith('/api/') ||
+    req.path === '/api/site-status' ||
+    req.path.startsWith('/api/auth/') ||
+    req.path.startsWith('/api/admin/')
+  ) {
+    return next();
+  }
+  try {
+    const { maintenanceMode, maintenanceMessage } = await cached('site-status', MAINTENANCE_CACHE_TTL_MS, loadMaintenanceState);
+    if (maintenanceMode) {
+      return res.status(503).json({ error: 'maintenance', message: maintenanceMessage });
+    }
+    next();
+  } catch (err) {
+    // Same fail-open reasoning as the status endpoint above - a broken
+    // maintenance check must never itself take the whole site down.
+    logger.error('Maintenance gate check failed:', err);
+    next();
+  }
+});
+
 // Public routes
 app.use('/api/auth', require('./routes/auth').default);
 app.use('/api/opportunities', require('./routes/opportunities').default);
