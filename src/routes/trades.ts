@@ -2,8 +2,44 @@ import { Router, Request, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { suggestPhrases } from '../services/tradeSuggestions';
+import { countOpportunitiesFor } from './opportunities';
 
 const router = Router();
+
+// DEV-04 (3 Oct plan): the badge on each métier must equal what its link shows.
+// Instead of a second hand-written COUNT, ask the list itself (same predicate:
+// trade, lots, keywords, exclusions) for its total - once with status=active
+// ("En cours", what the Secteurs link opens) and once with no status filter
+// (catalogue). Computed in the background and cached 15 min so /trades stays
+// fast; until the first pass finishes the SQL counts below are served as-is.
+const TRADE_COUNTS_TTL_MS = 15 * 60 * 1000;
+let tradeCountsCache: { at: number; byId: Map<number, { open: number; total: number }> } | null = null;
+let tradeCountsRefreshing = false;
+
+async function refreshTradeCounts(): Promise<void> {
+  if (tradeCountsRefreshing) return;
+  tradeCountsRefreshing = true;
+  try {
+    const ids = await db.query('SELECT id FROM trades ORDER BY id');
+    const byId = new Map<number, { open: number; total: number }>();
+    for (const row of ids.rows) {
+      const id = String(row.id);
+      const open = await countOpportunitiesFor({ trade_id: id, status: 'active' });
+      // 'Tous' on the search page (status=all in the URL) sends no status filter
+      const total = await countOpportunitiesFor({ trade_id: id });
+      byId.set(Number(row.id), { open, total });
+    }
+    tradeCountsCache = { at: Date.now(), byId };
+  } catch (err: any) {
+    logger.warn(`Trade counts refresh failed (SQL counts keep being served): ${err?.message}`);
+  } finally {
+    tradeCountsRefreshing = false;
+  }
+}
+
+export function warmTradeCounts(): void {
+  void refreshTradeCounts();
+}
 
 // GET /api/trades - list all trades (for filter dropdowns, and the
 // "Secteurs" homepage/page cards - see below for why that matters).
@@ -51,7 +87,12 @@ router.get('/', async (req: Request, res: Response) => {
        GROUP BY t.id, t.name, t.slug, t.description, c.code
        ORDER BY t.name ASC`
     );
-    res.json(result.rows);
+    if (!tradeCountsCache || Date.now() - tradeCountsCache.at > TRADE_COUNTS_TTL_MS) void refreshTradeCounts();
+    const exact = tradeCountsCache?.byId;
+    res.json(exact ? result.rows.map((r: any) => {
+      const c = exact.get(Number(r.id));
+      return c ? { ...r, opportunity_count: c.total, open_count: c.open } : r;
+    }) : result.rows);
   } catch (err: any) {
     logger.error('Trades list error:', err);
     res.status(500).json({ error: 'Failed to fetch trades' });
