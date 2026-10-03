@@ -1,5 +1,6 @@
 import { Router, Response } from 'express';
 import { db } from '../config/database';
+import { isOpportunityClosed } from '../utils/opportunityStatus';
 import { logger } from '../utils/logger';
 import { AuthRequest } from '../middleware/auth';
 
@@ -68,6 +69,18 @@ router.post('/:opportunityId/generate', async (req: AuthRequest, res: Response) 
       return res.status(403).json({
         error: 'accompaniment_required',
         message: 'Cette demande est réservée aux clients accompagnés. Prenez rendez-vous avec un chargé d’affaires pour démarrer.',
+      });
+    }
+    // DEV-02 (plan de corrections, 3 Oct): the status is checked again AT THE
+    // MOMENT OF THE REQUEST - a fiche opened before its deadline can be submitted
+    // after it. A closed/awarded/cancelled marché never produces a request
+    // presented as an open candidature.
+    const opp = await db.query('SELECT status, deadline FROM opportunities WHERE id = $1', [req.params.opportunityId]);
+    if (opp.rows.length === 0) return res.status(404).json({ error: 'Opportunity not found' });
+    if (isOpportunityClosed(opp.rows[0])) {
+      return res.status(409).json({
+        error: 'opportunity_closed',
+        message: 'Ce marché est clôturé : la candidature n’est plus possible. Consultez des marchés similaires encore ouverts.',
       });
     }
     const { response_text, partners, checklist } = req.body;
