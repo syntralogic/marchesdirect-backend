@@ -1771,6 +1771,34 @@ router.post(
         brandId = brandResult.rows[0]?.id;
       }
 
+      // DEV-08 (plan de corrections, 3 Oct): same fix as crmPublic.ts's
+      // POST / - a double-click (button disables only on the next render,
+      // not the instant it's clicked) or an axios retry on a
+      // timed-out-but-actually-succeeded request can fire this handler
+      // twice almost simultaneously. The opportunity_id+email lookup below
+      // already prevents a *second, later* submission from ever creating a
+      // new row - but two requests landing close enough together can both
+      // run that SELECT before either INSERT commits, so both see zero
+      // rows and both insert: a genuine duplicate, not just a theoretical
+      // one, since there's no DB-level unique constraint to catch it.
+      // Checked first and scoped tight (sessionId, same opportunity, last
+      // 20s) so it only ever collapses an actual same-click/retry pair -
+      // a visitor requesting a slot now and a callback on the same
+      // opportunity minutes later still gets both recorded via the
+      // opportunity_id+email path below.
+      if (sessionId) {
+        const recentDup = await db.query(
+          `SELECT id FROM crm_leads
+           WHERE opportunity_id = $1 AND session_id = $2 AND created_at > NOW() - INTERVAL '20 seconds'
+           ORDER BY created_at DESC LIMIT 1`,
+          [req.params.id, sessionId]
+        );
+        if (recentDup.rows.length > 0) {
+          logger.info(`Duplicate request-access submission suppressed (opportunity ${req.params.id}, session ${sessionId}, existing id ${recentDup.rows[0].id})`);
+          return res.json({ identityUnlocked: mode === 'slot', duplicate: true });
+        }
+      }
+
       const existing = await db.query(
         `SELECT id FROM crm_leads WHERE opportunity_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
         [req.params.id, email]
