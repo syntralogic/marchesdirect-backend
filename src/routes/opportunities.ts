@@ -1121,7 +1121,10 @@ async function searchOpportunities(req: Request, res: Response) {
               -- fallback otherwise, NULL when genuinely unreadable) so the result
               -- card can say "Fournitures" out loud instead of the visitor having
               -- to open a spare-parts notice to find out.
-              np.nature AS nature_prestation
+              np.nature AS nature_prestation,
+              -- 1 Oct client request: templated catalogue rows (no real source) must be
+              -- identified as demonstration examples, never look like real tenders.
+              (ds.code = 'editorial_catalog') AS is_demo
        FROM opportunities o
        LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
        LEFT JOIN trades t ON o.trade_id = t.id
@@ -1581,11 +1584,13 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
   try {
     const result = await db.query(
       `SELECT o.*, ot.code as journey, ot.name as journey_name, t.name as trade_name,
-              c.code as cpv_display
+              c.code as cpv_display,
+              (ds.code = 'editorial_catalog') AS is_demo
        FROM opportunities o
        LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
        LEFT JOIN trades t ON o.trade_id = t.id
        LEFT JOIN cpv_codes c ON o.cpv_code_id = c.id
+       LEFT JOIN data_sources ds ON o.source_id = ds.id
        WHERE o.id = $1 AND o.deleted_at IS NULL`,
       [req.params.id]
     );
