@@ -1064,13 +1064,10 @@ async function searchOpportunities(req: Request, res: Response) {
     }
     // R03/R04 boost: an AI-classified trade match outranks a same-word,
     // wrong-métier text match, regardless of which sort the visitor chose.
-    // DEV-01: these relevance/nature boosts (here and below) are skipped for the
-    // time-left order. They sat IN FRONT of the deadline sort, so with a métier
-    // selected a 30-day notice that was a text-only match or tagged fournitures
-    // landed after every 1-day notice - the opposite of what DEV-01 asks. The
-    // métier/nature FILTERS still apply (WHERE); only the reordering is skipped,
-    // so the whole filtered result is ordered by time left before pagination.
-    if (tradeMatchExpr && !wantsTimeLeft) {
+    // DEV-01: the trade-match boost stays for every sort, time_left included
+    // (client R03/R04). Only the two nature reorderings further down are skipped
+    // for time_left; the nature FILTER itself (WHERE) still applies.
+    if (tradeMatchExpr) {
       orderClause = `(CASE WHEN (${tradeMatchExpr}) THEN 0 ELSE 1 END) ASC, ${orderClause}`;
     }
     // R04 (deeper fix, needs nature_prestation - see database.ts migration
