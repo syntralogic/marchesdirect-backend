@@ -1,3 +1,4 @@
+import rateLimit from 'express-rate-limit';
 import { Router, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
@@ -5,6 +6,15 @@ import { AuthRequest } from '../middleware/auth';
 import { chatbot } from '../services/aiService';
 
 const router = Router();
+
+// Security: anonymous callers could otherwise burn AI credits in a loop.
+const chatbotMessageLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many messages, please try again later.' },
+});
 
 // The FAQ brief is explicit that public-market search must work for an
 // anonymous visitor with no account, and the chatbot is the primary search
@@ -94,11 +104,16 @@ router.get('/conversations/:id/messages', async (req: AuthRequest, res: Response
 });
 
 // POST /api/chatbot/conversations/:id/messages - send a message, get AI response
-router.post('/conversations/:id/messages', async (req: AuthRequest, res: Response) => {
+router.post('/conversations/:id/messages', chatbotMessageLimiter, async (req: AuthRequest, res: Response) => {
   try {
     const { message } = req.body;
-    if (!message || !message.trim()) {
+    if (typeof message !== 'string' || !message.trim()) {
       return res.status(400).json({ error: 'Message is required' });
+    }
+    // Security: this endpoint is reachable anonymously and every call costs an
+    // AI request, so cap the size of a single message.
+    if (message.length > 2000) {
+      return res.status(400).json({ error: 'Message too long (2000 characters max)' });
     }
 
     const { companyId, sessionId } = identity(req);
