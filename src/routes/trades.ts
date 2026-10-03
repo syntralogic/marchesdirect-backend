@@ -34,13 +34,20 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const result = await db.query(
       `SELECT t.id, t.name, t.slug, t.description, c.code as cpv_code,
-              COUNT(DISTINCT o.id) FILTER (WHERE o.deleted_at IS NULL AND o.status != 'merged')::int AS opportunity_count
+              COUNT(DISTINCT o.id) FILTER (WHERE o.deleted_at IS NULL AND o.status != 'merged'
+                AND (ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA')))::int AS opportunity_count,
+              -- DEV-04 (plan de corrections, 3 Oct): the badge has to say what it counts.
+              -- Open = the "En cours" filter the link opens (status 'active'), with the
+              -- same base exclusions as the search list (deleted, merged, non-French TED).
+              COUNT(DISTINCT o.id) FILTER (WHERE o.deleted_at IS NULL AND o.status = 'active'
+                AND (ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA')))::int AS open_count
        FROM trades t
        LEFT JOIN cpv_codes c ON t.cpv_code_id = c.id
        LEFT JOIN opportunities o ON (
          o.trade_id = t.id
          OR unaccent(o.ai_matched_trades::text) ILIKE unaccent('%' || t.name || '%')
        )
+       LEFT JOIN data_sources ds ON o.source_id = ds.id
        GROUP BY t.id, t.name, t.slug, t.description, c.code
        ORDER BY t.name ASC`
     );
