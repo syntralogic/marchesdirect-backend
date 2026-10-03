@@ -351,6 +351,7 @@ const startServer = async () => {
     dbReady = true;
     // Warm the homepage counts cache (fire-and-forget; never blocks boot).
     setTimeout(() => { require('./routes/opportunities').warmOpportunityCounts().catch(() => {}); }, 3000);
+    setTimeout(() => { require('./routes/trades').warmTradeCounts(); }, 20000);
 
     // 26 Sep fix (Render: "Port scan timeout reached, no open ports
     // detected" - deploy killed even though the build succeeded and the DB

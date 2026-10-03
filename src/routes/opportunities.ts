@@ -339,8 +339,13 @@ const LIST_SCOPE_SQL = `o.deleted_at IS NULL
   AND COALESCE(o.status, '') != 'merged'
   AND (ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))`;
 
-router.get('/', optionalAuth, async (req: Request, res: Response) => {
+// The list handler is a named function so the counters (Secteurs badges, see
+// countOpportunitiesFor below) run EXACTLY the same predicate as the list they
+// link to (DEV-04, 3 Oct plan: "utiliser le même calcul pour les compteurs et
+// les résultats"). `countOnly` skips the page query and returns only the total.
+async function searchOpportunities(req: Request, res: Response) {
   try {
+    const countOnly = (req as any).__countOnly === true;
     const {
       journey,       // 'tender' | 'public_procurement' | 'subcontracting'
       q,             // free text search
@@ -1094,7 +1099,7 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
       orderClause = `(CASE WHEN np.nature IN (${naturesLiteral}) THEN 0 ELSE 1 END) ASC, ${orderClause}`;
     }
 
-    const listResult = await db.query(
+    const listResult: { rows: any[] } = countOnly ? { rows: [] } : await db.query(
       `SELECT o.id, o.title, o.description, o.deadline, o.publication_date,
               o.estimated_value, o.currency, o.location_city, o.location_region,
               o.location_department, o.estimated_start_date, o.estimated_end_date,
@@ -1185,7 +1190,31 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     // French copy.
     res.status(500).json({ error: 'search_failed', message: 'Impossible de charger les opportunités. Réessayez.' });
   }
-});
+}
+router.get('/', optionalAuth, searchOpportunities);
+
+/**
+ * Total the list would show for these query-string filters (same code path as
+ * GET /api/opportunities, no separate counting rules to drift out of sync).
+ * Used for the badges that promise "N marchés" before a click.
+ */
+export async function countOpportunitiesFor(query: Record<string, string>): Promise<number> {
+  let total = 0;
+  let failed = false;
+  const fakeRes: any = {
+    statusCode: 200,
+    status(code: number) { this.statusCode = code; return this; },
+    set() { return this; },
+    json(body: any) {
+      if (this.statusCode >= 400) failed = true;
+      else total = Number(body?.pagination?.total) || 0;
+      return this;
+    },
+  };
+  await searchOpportunities({ query: { ...query, limit: '1' }, __countOnly: true } as any, fakeRes);
+  if (failed) throw new Error('countOpportunitiesFor failed');
+  return total;
+}
 
 // Best-effort link to the original notice on its source platform, extracted
 // from raw_data. The open-data feeds we ingest (BOAMP etc.) publish notice
