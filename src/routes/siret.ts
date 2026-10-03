@@ -4,6 +4,7 @@ import axios from 'axios';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { syncLeadToCrm } from '../services/crmSyncService';
+import { isOpportunityClosed } from '../utils/opportunityStatus';
 import { sendPrefilledDossierEmail, generatePrefilledDossierPdf } from '../services/prefilledDossierService';
 import { AuthRequest } from '../middleware/auth';
 import {
@@ -656,7 +657,7 @@ async function handleLeadCapture(
     if (opportunityId) {
       try {
         const oppFactsResult = await db.query(
-          `SELECT title, buyer_name, source_reference, location_city, deadline, estimated_value, currency
+          `SELECT title, buyer_name, source_reference, location_city, deadline, estimated_value, currency, status
            FROM opportunities WHERE id = $1 AND deleted_at IS NULL`,
           [opportunityId]
         );
@@ -672,6 +673,7 @@ async function handleLeadCapture(
             submissionDeadline: o.deadline ? new Date(o.deadline).toLocaleDateString('fr-FR') : null,
             estimatedValue: o.estimated_value ? Number(o.estimated_value) : null,
             currency: o.currency,
+            isClosed: isOpportunityClosed({ status: o.status, deadline: o.deadline }),
           });
         }
       } catch (err) {
@@ -742,7 +744,7 @@ async function loadPrefilledDossierInput(sessionId: string, opportunityId: strin
   }
 
   const oppResult = await db.query(
-    `SELECT title, buyer_name, source_reference, location_city, deadline, estimated_value, currency
+    `SELECT title, buyer_name, source_reference, location_city, deadline, estimated_value, currency, status
      FROM opportunities WHERE id = $1 AND deleted_at IS NULL`,
     [opportunityId]
   );
@@ -763,6 +765,7 @@ async function loadPrefilledDossierInput(sessionId: string, opportunityId: strin
       submissionDeadline: o.deadline ? new Date(o.deadline).toLocaleDateString('fr-FR') : null,
       estimatedValue: o.estimated_value ? Number(o.estimated_value) : null,
       currency: o.currency,
+      isClosed: isOpportunityClosed({ status: o.status, deadline: o.deadline }),
     },
   };
 }
