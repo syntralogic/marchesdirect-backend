@@ -29,6 +29,13 @@ export interface PrefilledDossierInput {
   estimatedValue?: number | null;
   currency?: string | null;
   matchScore?: number | null;
+  // DEV-02/DEV-09: true when the marché is closed (declared status or deadline
+  // passed) at generation time - the document must not promise an open candidature.
+  isClosed?: boolean;
+}
+
+function escapeHtml(v: string): string {
+  return v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 export function generatePrefilledDossierPdf(input: PrefilledDossierInput): Promise<Buffer> {
@@ -41,29 +48,57 @@ export function generatePrefilledDossierPdf(input: PrefilledDossierInput): Promi
 
     doc.fontSize(18).font('Helvetica-Bold').text('Votre dossier pré-rempli', { align: 'left' });
     doc.fontSize(10).font('Helvetica').fillColor('#5B6B80')
-      .text('Marchés Direct - document préparatoire offert, non contractuel', { align: 'left' });
-    doc.moveDown(1.5);
-
-    doc.fillColor('#000000').fontSize(13).font('Helvetica-Bold').text(input.companyName);
-    if (input.siret) {
-      doc.fontSize(10).font('Helvetica').fillColor('#5B6B80').text(`SIRET : ${input.siret}`);
-    }
+      .text('Marchés Direct - aperçu préparatoire offert, non contractuel. Ce n\'est pas un dossier prêt au dépôt.', { align: 'left' });
     doc.moveDown(1);
 
-    doc.fillColor('#000000').fontSize(13).font('Helvetica-Bold').text(input.opportunityTitle);
+    if (input.isClosed) {
+      doc.fillColor('#B42318').fontSize(11).font('Helvetica-Bold')
+        .text('Marché clôturé : la candidature n\'est plus possible. Ce document ne sert que d\'exemple.');
+      doc.moveDown(1);
+    }
+
+    doc.fillColor('#000000').fontSize(11).font('Helvetica-Bold').text('Sommaire');
+    doc.fontSize(10).font('Helvetica').list([
+      '1. Entreprise',
+      '2. Marché concerné',
+      '3. Éléments à compléter ou à vérifier',
+      '4. Pour finaliser votre candidature',
+    ], { bulletRadius: 0.1, textIndent: 6 });
+    doc.moveDown(1.2);
+
+    doc.fillColor('#000000').fontSize(12).font('Helvetica-Bold').text('1. Entreprise');
+    doc.moveDown(0.3);
+    doc.fontSize(13).text(input.companyName);
+    doc.fontSize(10).font('Helvetica').fillColor('#5B6B80')
+      .text(input.siret ? `SIRET : ${input.siret}` : 'SIRET : non communiqué');
+    doc.moveDown(1.2);
+
+    doc.fillColor('#000000').fontSize(12).font('Helvetica-Bold').text('2. Marché concerné');
+    doc.moveDown(0.3);
+    doc.fontSize(13).text(input.opportunityTitle);
     doc.moveDown(0.3);
     const facts: string[] = [];
-    if (input.buyerName) facts.push(`Donneur d'ordre : ${input.buyerName}`);
-    if (input.reference) facts.push(`Référence : ${input.reference}`);
-    if (input.locationCity) facts.push(`Lieu : ${input.locationCity}`);
-    if (input.submissionDeadline) facts.push(`Échéance de dépôt : ${input.submissionDeadline}`);
-    if (input.estimatedValue) facts.push(`Montant estimé : ${input.estimatedValue.toLocaleString('fr-FR')} ${input.currency || 'EUR'}`);
+    const missing: string[] = [];
+    if (input.buyerName) facts.push(`Donneur d'ordre : ${input.buyerName}`); else missing.push("Donneur d'ordre");
+    if (input.reference) facts.push(`Référence : ${input.reference}`); else missing.push('Référence de l\'avis');
+    if (input.locationCity) facts.push(`Lieu : ${input.locationCity}`); else missing.push("Lieu d'exécution");
+    if (input.submissionDeadline) facts.push(`Échéance de dépôt : ${input.submissionDeadline}`); else missing.push("Date limite de dépôt");
+    if (input.estimatedValue) facts.push(`Montant estimé : ${input.estimatedValue.toLocaleString('fr-FR')} ${input.currency || 'EUR'}`); else missing.push('Montant estimé');
     if (typeof input.matchScore === 'number') facts.push(`Score de compatibilité : ${Math.round(input.matchScore)}%`);
-    doc.fontSize(10).font('Helvetica');
+    doc.fontSize(10).font('Helvetica').fillColor('#000000');
     facts.forEach(f => doc.text(f));
-    doc.moveDown(1.5);
+    doc.moveDown(1.2);
 
-    doc.fontSize(11).font('Helvetica-Bold').text('Pour finaliser votre candidature');
+    doc.fontSize(12).font('Helvetica-Bold').text('3. Éléments à compléter ou à vérifier');
+    doc.moveDown(0.3);
+    doc.fontSize(10).font('Helvetica').list([
+      ...missing.map(m => `Non communiqué par la source : ${m} (à vérifier dans l'avis officiel).`),
+      'Références de votre entreprise, moyens humains et techniques, périmètre de votre réponse.',
+      'Pièces administratives demandées par le règlement de consultation.',
+    ], { bulletRadius: 2 });
+    doc.moveDown(1.2);
+
+    doc.fontSize(12).font('Helvetica-Bold').text('4. Pour finaliser votre candidature');
     doc.moveDown(0.3);
     doc.fontSize(10).font('Helvetica').list([
       'Confirmer les informations et la situation de votre entreprise.',
@@ -96,7 +131,8 @@ export async function sendPrefilledDossierEmail(
     const pdf = await generatePrefilledDossierPdf(input);
     const html = `
       <p>Bonjour,</p>
-      <p>Voici votre dossier pré-rempli pour <strong>${input.opportunityTitle}</strong>, préparé à partir des informations de votre entreprise et de cette opportunité.</p>
+      <p>Voici votre dossier pré-rempli (aperçu préparatoire, pas un dossier prêt au dépôt) pour <strong>${escapeHtml(input.opportunityTitle)}</strong>, préparé à partir des informations de votre entreprise et de cette opportunité.</p>
+      ${input.isClosed ? '<p><strong>Ce marché est clôturé : la candidature n\'est plus possible.</strong></p>' : ''}
       <p>Vous pouvez retrouver ce document et la suite de votre accompagnement à tout moment depuis la page "Votre dossier" de cette opportunité.</p>
       <p>— L'équipe Marchés Direct</p>
     `;
