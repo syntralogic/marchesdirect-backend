@@ -1021,7 +1021,21 @@ router.get('/', optionalAuth, async (req: Request, res: Response) => {
     // Open notices outrank relevance in the default order, so a closed notice
     // with a slightly better text score can't push open ones down the list.
     let orderClause = `${LIVE_EXPR} DESC, ${relevanceTiebreak}${AFTER_LIVE_ORDER}`;
-    if (sort === 'deadline') {
+    // DEV-01 (plan de corrections, 3 Oct): public marchés now open on the ones that
+    // leave the MOST time to answer (30 j, 21 j, 15 j, 10 j, 3 j, 1 j), short
+    // deadlines at the end, unknown deadlines after the dated ones. Sorted in the
+    // SQL, before pagination (reordering the 100 cards already loaded is not
+    // enough). Ties: most recent publication, then stable id, so no row moves or
+    // repeats between pages. Closed rows still come after the open ones.
+    const TIME_LEFT_ORDER = `${LIVE_EXPR} DESC, o.deadline DESC NULLS LAST, o.publication_date DESC NULLS LAST, o.id ASC`;
+    const journeyList = journey ? journey.split(',').map((j: string) => j.trim()).filter(Boolean) : [];
+    const publicOnly = journeyList.length === 1 && journeyList[0] === 'public_procurement';
+    // Explicit choice always wins; the new default only applies when the visitor
+    // chose nothing, and only to public marchés (other families unchanged).
+    const wantsTimeLeft = sort === 'time_left' || (!sort && publicOnly);
+    if (wantsTimeLeft) {
+      orderClause = TIME_LEFT_ORDER;
+    } else if (sort === 'deadline') {
       // Client (26 Sep audit, point 10): "climatisation" search, "Échéance
       // proche (défaut)" selected, a 28 septembre notice appeared AFTER a
       // 7 octobre one. Root cause: 'deadline' fell through to the same
