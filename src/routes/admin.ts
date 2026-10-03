@@ -243,6 +243,81 @@ router.put('/settings', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// DEV-03 (plan de corrections, 3 Oct): internal list of published fiches that
+// are still missing something a visitor needs to decide (deadline, official
+// link, a real description, or the extracted facts). Lets the team work the
+// backlog fiche by fiche instead of guessing from per-source percentages.
+// GET /api/admin/incomplete-opportunities?limit=100&offset=0&source=boamp
+// GET /api/admin/incomplete-opportunities?format=csv  (Excel-ready, ; separator)
+const INCOMPLETE_CONDITIONS = `
+  o.deleted_at IS NULL
+  AND o.status = 'active'
+  AND (
+    o.deadline IS NULL
+    OR o.official_url IS NULL OR o.official_url = ''
+    OR o.description IS NULL OR length(o.description) < 100
+    OR o.ai_extracted_facts IS NULL
+  )`;
+
+function adminCsvCell(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  let s = v instanceof Date ? v.toISOString() : String(v);
+  // Neutralise spreadsheet-formula injection.
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
+router.get('/incomplete-opportunities', async (req: AuthRequest, res: Response) => {
+  try {
+    const { format, source } = req.query as Record<string, string>;
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 100, 1), 1000);
+    const offset = Math.max(parseInt(String(req.query.offset), 10) || 0, 0);
+    const params: any[] = [];
+    let sourceCond = '';
+    if (source) { params.push(source); sourceCond = ` AND ds.code = $${params.length}`; }
+
+    const select = `
+      SELECT o.id, o.title, ds.code AS source, o.publication_date, o.deadline, o.official_url,
+             ARRAY_REMOVE(ARRAY[
+               CASE WHEN o.deadline IS NULL THEN 'deadline' END,
+               CASE WHEN o.official_url IS NULL OR o.official_url = '' THEN 'official_url' END,
+               CASE WHEN o.description IS NULL OR length(o.description) < 100 THEN 'description' END,
+               CASE WHEN o.ai_extracted_facts IS NULL THEN 'facts' END
+             ], NULL) AS missing
+      FROM opportunities o
+      LEFT JOIN data_sources ds ON ds.id = o.source_id
+      WHERE ${INCOMPLETE_CONDITIONS}${sourceCond}
+      ORDER BY o.publication_date DESC NULLS LAST, o.id ASC`;
+
+    if (format === 'csv') {
+      const result = await db.query(`${select} LIMIT 50000`, params);
+      const cols: [string, string][] = [
+        ['id', 'ID'], ['title', 'Titre'], ['source', 'Source'], ['publication_date', 'Publication'],
+        ['deadline', 'Échéance'], ['official_url', 'Lien officiel'], ['missing', 'Manque'],
+      ];
+      const lines = [cols.map(([, h]) => adminCsvCell(h)).join(';')];
+      for (const row of result.rows) {
+        lines.push(cols.map(([k]) => adminCsvCell(k === 'missing' ? (row.missing || []).join(', ') : (row as any)[k])).join(';'));
+      }
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="fiches-incompletes-${new Date().toISOString().slice(0, 10)}.csv"`);
+      return res.send('\uFEFF' + lines.join('\r\n'));
+    }
+
+    const countResult = await db.query(
+      `SELECT COUNT(*)::int AS total FROM opportunities o
+       LEFT JOIN data_sources ds ON ds.id = o.source_id
+       WHERE ${INCOMPLETE_CONDITIONS}${sourceCond}`,
+      params
+    );
+    const result = await db.query(`${select} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, [...params, limit, offset]);
+    res.json({ total: countResult.rows[0].total, limit, offset, results: result.rows });
+  } catch (err: any) {
+    logger.error('Incomplete opportunities list error:', err);
+    res.status(500).json({ error: 'Failed to list incomplete opportunities' });
+  }
+});
+
 // GET /api/admin/data-sources - connector status (proof for Milestone 2)
 //
 // Client's ask (10 Sep, WhatsApp): "which sources are you actually using,
