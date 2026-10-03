@@ -104,17 +104,69 @@ export const buildLeadEmail = (lead: LeadForNotification) => {
   return { subject, html };
 };
 
+// Records how the team email went, on the lead row, so a failure is visible
+// and can be retried instead of existing only in the logs. Never throws.
+const recordNotification = async (leadId: string, status: 'sent' | 'failed' | 'no_recipient') => {
+  try {
+    await db.query(
+      `UPDATE crm_leads
+       SET notification_status = $2, notification_attempts = notification_attempts + 1, notification_last_attempt = NOW()
+       WHERE id = $1`,
+      [leadId, status]
+    );
+  } catch (err) {
+    logger.warn(`Lead ${leadId}: could not record notification status:`, err);
+  }
+};
+
 export const notifyTeamOfNewLead = async (lead: LeadForNotification): Promise<void> => {
   try {
     const recipients = await resolveLeadRecipients();
     if (recipients.length === 0) {
       logger.warn(`Lead ${lead.id}: no notification recipient configured (set LEAD_NOTIFICATION_EMAILS)`);
+      await recordNotification(lead.id, 'no_recipient');
       return;
     }
     const { subject, html } = buildLeadEmail(lead);
     const results = await Promise.all(recipients.map((to) => sendEmail({ to, subject, html })));
-    logger.info(`Lead ${lead.id}: team notified ${results.filter(Boolean).length}/${recipients.length}`);
+    const delivered = results.filter(Boolean).length;
+    logger.info(`Lead ${lead.id}: team notified ${delivered}/${recipients.length}`);
+    await recordNotification(lead.id, delivered > 0 ? 'sent' : 'failed');
   } catch (err) {
     logger.error(`Lead ${lead.id}: team notification failed:`, err);
+    await recordNotification(lead.id, 'failed');
   }
+};
+
+// Re-sends the team email for leads whose first attempt failed (or found no
+// recipient configured yet). Capped at 5 attempts and 3 days so a permanently
+// broken setup cannot loop forever.
+export const retryFailedLeadNotifications = async (limit = 20): Promise<number> => {
+  const result = await db.query(
+    `SELECT id, first_name, last_name, email, phone, company_name, industry_trade,
+            location_city, location_region, lead_source, message
+     FROM crm_leads
+     WHERE notification_status IN ('failed', 'no_recipient')
+       AND notification_attempts < 5
+       AND created_at > NOW() - INTERVAL '3 days'
+     ORDER BY created_at ASC
+     LIMIT $1`,
+    [limit]
+  );
+  for (const r of result.rows) {
+    await notifyTeamOfNewLead({
+      id: r.id,
+      firstName: r.first_name,
+      lastName: r.last_name,
+      email: r.email,
+      phone: r.phone,
+      companyName: r.company_name,
+      industryTrade: r.industry_trade,
+      locationCity: r.location_city,
+      locationRegion: r.location_region,
+      leadSource: r.lead_source,
+      message: r.message,
+    });
+  }
+  return result.rows.length;
 };

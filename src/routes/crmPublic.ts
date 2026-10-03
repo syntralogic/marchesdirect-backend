@@ -5,6 +5,7 @@ import { logger } from '../utils/logger';
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { toE164French } from '../services/smsService';
 import { notifyTeamOfNewLead } from '../services/leadNotificationService';
+import { isValidLeadPhone } from '../utils/leadValidation';
 
 // Contre-audit follow-up: crm_leads.phone was stored exactly as typed
 // ("06 00 00 00 00", "0033600000000", "+33 6 00 00 00 00", ...), so the
@@ -42,13 +43,16 @@ router.post(
   '/',
   [
     body('brandId').notEmpty().withMessage('brandId manquant'),
+    // DEV-08: server-side validation of the same fields the forms mark as required.
+    body('firstName').isString().trim().notEmpty().withMessage('Le nom est requis.').bail()
+      .isLength({ max: 100 }).withMessage('Le nom est trop long (100 caractères maximum).'),
+    body('message').optional({ checkFalsy: true }).isString().isLength({ max: 5000 }).withMessage('Le message est trop long (5000 caractères maximum).'),
     body('email').optional({ checkFalsy: true }).trim().isEmail().withMessage("L'adresse e-mail n'est pas valide.").normalizeEmail(),
-    // Was isLength({ min: 6 }) - rejected a visitor with a generic "Validation
-    // failed" the moment their phone was under 6 characters after trim
-    // (e.g. a partial number, or a single leftover space that trims to '').
-    // This field is informational for a human callback, not dialed
-    // automatically - not worth hard-rejecting the whole form over.
-    body('phone').optional({ checkFalsy: true }).isString().trim(),
+    // DEV-08: a phone, when given, must be a complete dialable number (the old
+    // "informational, never reject" stance let truncated/garbage numbers reach
+    // the team). Still optional here - email OR phone is required below.
+    body('phone').optional({ checkFalsy: true }).isString().trim()
+      .custom((v) => isValidLeadPhone(v)).withMessage('Le numéro de téléphone n\'est pas valide.'),
     body('sessionId').optional({ checkFalsy: true }).isString().trim().isLength({ max: 100 }),
   ],
   async (req: Request, res: Response) => {
@@ -84,12 +88,21 @@ router.post(
       // instead of inserting again. Scoped tight (20s, same session) so a
       // visitor who legitimately submits twice later in the same visit
       // (e.g. callback now, contact form later) is never blocked.
+      // Same-session AND same content: the earlier version matched on session
+      // alone, so a visitor who sent a callback and then, within 20 s, a contact
+      // message got the second one silently dropped while being told it had
+      // succeeded - a success must only be confirmed for a request that was
+      // really recorded. A retry/double-click repeats the exact same payload.
       if (sessionId) {
         const dup = await db.query(
           `SELECT id, created_at FROM crm_leads
            WHERE brand_id = $1 AND session_id = $2 AND created_at > NOW() - INTERVAL '20 seconds'
+             AND lead_source = $3
+             AND COALESCE(email, '') = $4
+             AND COALESCE(phone, '') = $5
+             AND COALESCE(message, '') = $6
            ORDER BY created_at DESC LIMIT 1`,
-          [brandId, sessionId]
+          [brandId, sessionId, leadSource || 'website_form', email || '', phone || '', message || '']
         );
         if (dup.rows.length > 0) {
           logger.info(`Duplicate lead submission suppressed (session ${sessionId}, existing id ${dup.rows[0].id})`);
