@@ -19,7 +19,7 @@ router.post(
   '/',
   [
     body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
-    body('eventType').isString().trim().isIn(['search', 'view_opportunity', 'view_seo_page']),
+    body('eventType').isString().trim().isIn(['search', 'view_opportunity', 'view_seo_page', 'company_identified', 'concordance_shown', 'form_started', 'request_submitted']),
     body('eventLabel').optional({ checkFalsy: true }).isString().trim().isLength({ max: 500 }),
     body('brandId').optional({ checkFalsy: true }).isString(),
   ],

@@ -887,7 +887,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
       id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
       session_id VARCHAR(100) NOT NULL,
       brand_id UUID REFERENCES brands(id),
-      event_type VARCHAR(50) NOT NULL,   -- 'search', 'view_opportunity', 'view_seo_page'
+      event_type VARCHAR(50) NOT NULL,   -- 'search', 'view_opportunity', 'view_seo_page', 'company_identified', 'concordance_shown', 'form_started', 'request_submitted'
       event_label VARCHAR(500),          -- human-readable summary shown to staff
       event_data JSONB,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
