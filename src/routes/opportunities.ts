@@ -1064,7 +1064,13 @@ async function searchOpportunities(req: Request, res: Response) {
     }
     // R03/R04 boost: an AI-classified trade match outranks a same-word,
     // wrong-métier text match, regardless of which sort the visitor chose.
-    if (tradeMatchExpr) {
+    // DEV-01: these relevance/nature boosts (here and below) are skipped for the
+    // time-left order. They sat IN FRONT of the deadline sort, so with a métier
+    // selected a 30-day notice that was a text-only match or tagged fournitures
+    // landed after every 1-day notice - the opposite of what DEV-01 asks. The
+    // métier/nature FILTERS still apply (WHERE); only the reordering is skipped,
+    // so the whole filtered result is ordered by time left before pagination.
+    if (tradeMatchExpr && !wantsTimeLeft) {
       orderClause = `(CASE WHEN (${tradeMatchExpr}) THEN 0 ELSE 1 END) ASC, ${orderClause}`;
     }
     // R04 (deeper fix, needs nature_prestation - see database.ts migration
@@ -1088,13 +1094,13 @@ async function searchOpportunities(req: Request, res: Response) {
     // wording otherwise, so this works on the whole corpus from the first
     // request instead of waiting on a reclassification backlog. Rows the
     // fallback still can't read stay NULL and are still not demoted.
-    if (tradeMatchExpr) {
+    if (tradeMatchExpr && !wantsTimeLeft) {
       orderClause = `(CASE WHEN np.nature IN ('fournitures', 'etudes') THEN 1 ELSE 0 END) ASC, ${orderClause}`;
     }
     // R02: when the visitor picked a nature explicitly, rows that actually
     // match it come first and the unknown-nature rows kept by the filter
     // follow - narrowing changes the order of the page, not just its length.
-    if (requestedNatures.length > 0) {
+    if (requestedNatures.length > 0 && !wantsTimeLeft) {
       const naturesLiteral = requestedNatures.map((n) => `'${n}'`).join(', ');
       orderClause = `(CASE WHEN np.nature IN (${naturesLiteral}) THEN 0 ELSE 1 END) ASC, ${orderClause}`;
     }
