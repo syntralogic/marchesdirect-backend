@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs';
 import { db } from '../../config/database';
-import { changePassword } from '../authService';
+import { changePassword, requestPasswordReset } from '../authService';
+import { sendEmail } from '../emailService';
 
 jest.mock('../../config/database', () => ({
   db: { query: jest.fn() },
@@ -12,6 +13,11 @@ jest.mock('bcryptjs', () => ({
   genSalt: jest.fn(async () => 'salt'),
 }));
 
+jest.mock('../emailService', () => ({
+  sendEmail: jest.fn(async () => true),
+}));
+
+const mockedSendEmail = sendEmail as unknown as jest.Mock;
 const mockedDb = db as unknown as { query: jest.Mock };
 const mockedBcrypt = bcrypt as unknown as { compare: jest.Mock; hash: jest.Mock; genSalt: jest.Mock };
 
@@ -187,5 +193,52 @@ describe('MFA (2FA)', () => {
     mockedBcrypt.compare.mockResolvedValueOnce(true);
     await expect(disableMFA('u1', 'pw', validCode())).resolves.toEqual({ success: true });
     expect(mockedDb.query.mock.calls[3][0]).toContain('mfa_enabled = false');
+  });
+});
+
+describe('requestPasswordReset', () => {
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockedDb.query.mockReset();
+  });
+
+  it('never returns a token and answers identically for an unknown email', async () => {
+    mockedDb.query.mockResolvedValue({ rows: [] });
+
+    const result = await requestPasswordReset('nobody@example.com');
+    await flush();
+
+    expect(result).toEqual({ success: true });
+    expect(mockedSendEmail).not.toHaveBeenCalled();
+  });
+
+  it('never returns a token for an existing account either, and emails a sign-in link instead', async () => {
+    mockedDb.query
+      .mockResolvedValueOnce({ rows: [{ id: 'user-1', first_name: 'Awa' }] }) // SELECT user
+      .mockResolvedValueOnce({ rows: [] }); // INSERT magic_link_tokens
+
+    const result = await requestPasswordReset('awa@example.com');
+    await flush();
+
+    // Same shape as the unknown-email case: no resetToken, no hint the account exists.
+    expect(result).toEqual({ success: true });
+    expect(Object.keys(result)).toEqual(['success']);
+    expect(mockedSendEmail).toHaveBeenCalledTimes(1);
+    expect(mockedSendEmail.mock.calls[0][0].to).toBe('awa@example.com');
+    // The old flow stuffed the token into user_sessions (which refresh tokens trust).
+    const sqls = mockedDb.query.mock.calls.map((c: any[]) => String(c[0]));
+    expect(sqls.some((q) => q.includes('user_sessions'))).toBe(false);
+  });
+
+  it('still succeeds when the email provider fails (no existence oracle via errors)', async () => {
+    mockedDb.query
+      .mockResolvedValueOnce({ rows: [{ id: 'user-1', first_name: 'Awa' }] })
+      .mockResolvedValueOnce({ rows: [] });
+    mockedSendEmail.mockRejectedValueOnce(new Error('smtp down'));
+
+    await expect(requestPasswordReset('awa@example.com')).resolves.toEqual({ success: true });
+    await flush();
   });
 });

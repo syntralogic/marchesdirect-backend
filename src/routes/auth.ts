@@ -7,7 +7,6 @@ import {
   loginWithGoogle,
   refreshAccessToken,
   requestPasswordReset,
-  resetPassword,
   changePassword,
   requestMagicLink,
   verifyMagicLink,
@@ -212,23 +211,30 @@ router.post('/refresh', async (req: Request, res: Response) => {
 });
 
 // POST /api/auth/password-reset/request
+// Sends a sign-in link to the address (see requestPasswordReset). Always
+// answers { success: true } for a well-formed email, whether or not an
+// account exists, and never returns any token.
 router.post('/password-reset/request', [body('email').isEmail()], async (req: Request, res: Response) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ error: "L'adresse e-mail n'est pas valide." });
   try {
     const result = await requestPasswordReset(req.body.email);
     res.json(result);
   } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Password reset request failed' });
+    logger.error('Password reset request error:', err);
+    res.json({ success: true });
   }
 });
 
-// POST /api/auth/password-reset/confirm (requires auth after reset link click flow)
-router.post('/password-reset/confirm', authenticate, async (req: AuthRequest, res: Response) => {
-  try {
-    const result = await resetPassword(req.user!.id, req.body.newPassword);
-    res.json(result);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Password reset failed' });
-  }
+// POST /api/auth/password-reset/confirm - REMOVED.
+// It only required a logged-in session (never verified any reset token) and
+// set a new password without the current one, so a stolen access token could
+// be turned into permanent account takeover. Use the emailed sign-in link,
+// then POST /api/auth/change-password (verifies the current password).
+router.post('/password-reset/confirm', (_req: Request, res: Response) => {
+  res.status(410).json({
+    error: 'Endpoint supprimé. Utilisez le lien de connexion reçu par e-mail, puis changez votre mot de passe depuis les paramètres de sécurité.',
+  });
 });
 
 // POST /api/auth/change-password - Sécurité tab on ProfilPage (logged-in
