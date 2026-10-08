@@ -18,6 +18,7 @@ import { resolveTradeFromText, keywordsForSlugs } from '../services/tradeResolve
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { geocodeCity } from '../services/geocodingService';
 import { optionalAuth, authenticate, requireRole, AuthRequest } from '../middleware/auth';
+import { getIdentityLookupKeys } from '../utils/identityAccess';
 
 const router = Router();
 
@@ -1709,8 +1710,7 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     await ensureTradeResolved(opportunity);
     kickOffDocumentIngestionIfPending(opportunity.id, opportunity.dce_documents_status);
 
-    const sessionId = (req.query.sessionId as string) || '';
-    const email = (req.user?.email || (req.query.email as string) || '');
+    const { sessionId, email } = getIdentityLookupKeys(req);
     const unlocked = await resolveIdentityUnlocked(req.params.id, opportunity.journey, sessionId, email);
 
     // Computed from the real buyer_name *before* it's redacted below - the
@@ -1766,8 +1766,7 @@ router.get('/:id/access', optionalAuth, async (req: AuthRequest, res: Response) 
     if (oppResult.rows.length === 0) {
       return res.status(404).json({ error: 'Opportunity not found' });
     }
-    const sessionId = (req.query.sessionId as string) || '';
-    const email = (req.user?.email || (req.query.email as string) || '');
+    const { sessionId, email } = getIdentityLookupKeys(req);
     const unlocked = await resolveIdentityUnlocked(req.params.id, oppResult.rows[0].journey, sessionId, email);
     res.json({ identityUnlocked: unlocked });
   } catch (err: any) {

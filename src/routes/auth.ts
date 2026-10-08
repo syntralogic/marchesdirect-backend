@@ -6,6 +6,7 @@ import {
   loginUser,
   loginWithGoogle,
   refreshAccessToken,
+  logoutSession,
   requestPasswordReset,
   changePassword,
   requestMagicLink,
@@ -208,6 +209,14 @@ router.post('/refresh', async (req: Request, res: Response) => {
     }
     res.status(503).json({ error: 'service_unavailable', message: 'Service momentanément indisponible, réessayez.' });
   }
+});
+
+// POST /api/auth/logout - revokes the session behind the given refresh token.
+// Public on purpose (the access token may already be expired) and idempotent:
+// always 200, never says whether the token was known.
+router.post('/logout', async (req: Request, res: Response) => {
+  await logoutSession(req.body?.refreshToken);
+  res.json({ success: true });
 });
 
 // POST /api/auth/password-reset/request

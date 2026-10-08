@@ -365,7 +365,9 @@ CREATE INDEX users_role ON users(role);
 CREATE TABLE user_sessions (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  refresh_token_hash VARCHAR(255),
+  refresh_token_hash VARCHAR(255),          -- SHA-256 hex of the current refresh token
+  prev_refresh_token_hash VARCHAR(255),     -- previous token, honoured for a short grace window after rotation
+  rotated_at TIMESTAMP,
   ip_address VARCHAR(50),
   user_agent TEXT,
   expires_at TIMESTAMP NOT NULL,

@@ -94,6 +94,12 @@ describe('registerCompanyAndUser', () => {
       'brand-1'
     );
 
+    // The refresh token it hands back must be refreshable: a session row holding
+    // its SHA-256 (never the raw token, never bcrypt - bcrypt truncates JWTs).
+    const sessionInsert = mockedDb.query.mock.calls.find((c: any[]) => /INSERT INTO user_sessions/.test(String(c[0])));
+    expect(sessionInsert).toBeDefined();
+    expect(sessionInsert![1][1]).toMatch(/^[0-9a-f]{64}$/);
+
     const userInsert = calls.find((c) => /INSERT INTO users/.test(c.sql));
     expect(userInsert).toBeDefined();
     // params order: id, company_id, email, password_hash, first_name, last_name, phone, role, status
@@ -240,5 +246,79 @@ describe('requestPasswordReset', () => {
 
     await expect(requestPasswordReset('awa@example.com')).resolves.toEqual({ success: true });
     await flush();
+  });
+});
+
+describe('refreshAccessToken / logoutSession', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const crypto = require('crypto');
+  const sha = (t: string) => crypto.createHash('sha256').update(t).digest('hex');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockedDb.query.mockReset();
+  });
+
+  it('rejects a perfectly valid refresh JWT that matches no stored session (no more "any row will do")', async () => {
+    const { refreshAccessToken } = await import('../authService');
+    const { generateTokens } = await import('../../middleware/auth');
+    const { refreshToken } = generateTokens('user-1', 'a@b.c');
+    mockedDb.query
+      .mockResolvedValueOnce({ rows: [] }) // rotation UPDATE: no current/prev match
+      .mockResolvedValueOnce({ rows: [] }); // legacy bcrypt rows: none
+
+    await expect(refreshAccessToken(refreshToken)).rejects.toThrow('Session expired');
+  });
+
+  it('rotates: stores only the new token\'s SHA-256, matched against the presented token\'s SHA-256', async () => {
+    const { refreshAccessToken } = await import('../authService');
+    const { generateTokens } = await import('../../middleware/auth');
+    const { refreshToken } = generateTokens('user-1', 'a@b.c');
+    mockedDb.query.mockResolvedValueOnce({ rows: [{ id: 'sess-1' }] });
+
+    const out = await refreshAccessToken(refreshToken);
+
+    expect(out.refreshToken).not.toBe(refreshToken); // rotated, not reused
+    const [sql, params] = mockedDb.query.mock.calls[0];
+    expect(String(sql)).toMatch(/UPDATE user_sessions/);
+    expect(params[0]).toBe('user-1');
+    expect(params[1]).toBe(sha(refreshToken)); // presented token is looked up by hash
+    expect(params[2]).toBe(sha(out.refreshToken)); // only the new token's hash is stored
+    expect(JSON.stringify(params)).not.toContain(out.refreshToken); // never the raw token
+  });
+
+  it('upgrades a legacy bcrypt session once instead of logging everyone out on deploy', async () => {
+    const { refreshAccessToken } = await import('../authService');
+    const { generateTokens } = await import('../../middleware/auth');
+    const { refreshToken } = generateTokens('user-1', 'a@b.c');
+    mockedDb.query
+      .mockResolvedValueOnce({ rows: [] }) // no sha match
+      .mockResolvedValueOnce({ rows: [{ id: 'old-1', refresh_token_hash: '$2a$05$legacy' }] })
+      .mockResolvedValueOnce({ rows: [] }); // upgrade UPDATE
+    mockedBcrypt.compare.mockResolvedValueOnce(true);
+
+    const out = await refreshAccessToken(refreshToken);
+
+    expect(out.accessToken).toBeTruthy();
+    const upgrade = mockedDb.query.mock.calls[2];
+    expect(upgrade[1]).toEqual(['old-1', sha(out.refreshToken)]);
+  });
+
+  it('rejects a forged / garbage token before touching the database', async () => {
+    const { refreshAccessToken } = await import('../authService');
+    await expect(refreshAccessToken('not.a.jwt')).rejects.toThrow();
+    await expect(refreshAccessToken(undefined as any)).rejects.toThrow();
+    expect(mockedDb.query).not.toHaveBeenCalled();
+  });
+
+  it('logout deletes the session by token hash and never throws', async () => {
+    const { logoutSession } = await import('../authService');
+    mockedDb.query.mockResolvedValueOnce({ rows: [] });
+    await logoutSession('some-refresh-token');
+    expect(mockedDb.query.mock.calls[0][1]).toEqual([sha('some-refresh-token')]);
+
+    mockedDb.query.mockRejectedValueOnce(new Error('db down'));
+    await expect(logoutSession('x')).resolves.toBeUndefined();
+    await expect(logoutSession(undefined as any)).resolves.toBeUndefined();
   });
 });

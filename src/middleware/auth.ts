@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { resolveAvatarUrl } from '../services/storageService';
@@ -190,13 +191,19 @@ export const generateTokens = (userId: string, email: string) => {
   const accessToken = jwt.sign(
     { userId, email },
     JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' } as jwt.SignOptions
+    // Short-lived: the frontend silently refreshes on 401, and a short TTL is
+    // what makes logout / password change / session revocation actually take
+    // effect (a stateless access token can't be revoked, only outlived).
+    { expiresIn: process.env.JWT_EXPIRES_IN || '1h' } as jwt.SignOptions
   );
 
   const refreshToken = jwt.sign(
     { userId, email },
     REFRESH_TOKEN_SECRET,
-    { expiresIn: process.env.REFRESH_TOKEN_EXPIRES_IN || '30d' } as jwt.SignOptions
+    // jwtid makes every refresh token unique even when two are minted in the
+    // same second (identical iat/exp would otherwise yield identical tokens),
+    // which refresh-token rotation relies on.
+    { expiresIn: process.env.REFRESH_TOKEN_EXPIRES_IN || '30d', jwtid: crypto.randomUUID() } as jwt.SignOptions
   );
 
   return { accessToken, refreshToken };
