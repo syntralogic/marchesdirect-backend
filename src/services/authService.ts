@@ -1,5 +1,6 @@
 import { escapeHtml } from './leadNotificationService';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { v4 as uuid } from 'uuid';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
@@ -232,8 +233,9 @@ export const registerCompanyAndUser = async (data: RegisterParams, brandId?: str
 
     logger.info(`✅ Registered new company: ${data.companyName} (${companyId})`);
 
-    // Generate tokens
+    // Generate tokens (+ the session row that makes the refresh token usable)
     const { accessToken, refreshToken } = generateTokens(userId, data.email);
+    await createSession(userId, refreshToken);
 
     return {
       userId,
@@ -334,12 +336,7 @@ export const loginUser = async (email: string, password: string) => {
     const { accessToken, refreshToken } = generateTokens(user.id, user.email);
 
     // Store refresh token
-    const tokenHash = await bcrypt.hash(refreshToken, 5);
-    await db.query(
-      `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
-       VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
-      [user.id, tokenHash]
-    );
+    await createSession(user.id, refreshToken);
 
     logger.info(`✅ User logged in: ${user.email}`);
 
@@ -469,12 +466,7 @@ export const verifyMFALogin = async (challengeToken: string, code: string) => {
     await db.query('INSERT INTO login_attempts (email, success) VALUES ($1, $2)', [user.email, true]);
 
     const { accessToken, refreshToken } = generateTokens(user.id, user.email);
-    const tokenHash = await bcrypt.hash(refreshToken, 5);
-    await db.query(
-      `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
-       VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
-      [user.id, tokenHash]
-    );
+    await createSession(user.id, refreshToken);
 
     logger.info(`✅ MFA login verified for user ${user.id}`);
 
@@ -524,33 +516,125 @@ export const disableMFA = async (userId: string, password: string, code: string)
 };
 
 // ============================================================================
-// REFRESH TOKEN
+// SESSIONS / REFRESH TOKENS
+// ============================================================================
+// user_sessions.refresh_token_hash holds the SHA-256 (hex) of the exact refresh
+// token string. Before, it held bcrypt(token): bcrypt only reads the first 72
+// bytes, and the first 72 bytes of a JWT are the (identical) header plus the
+// start of the payload, so EVERY refresh token of a user "matched" every stored
+// hash - and refreshAccessToken never compared them anyway (it only checked
+// that the user had some session row). Logout/rotation/revocation were
+// therefore meaningless. SHA-256 is right here (the token is a high-entropy
+// secret, not a password) and is indexable.
+
+const MAX_SESSIONS_PER_USER = 10;
+const REFRESH_GRACE_SECONDS = 60;
+
+const hashRefreshToken = (token: string): string =>
+  crypto.createHash('sha256').update(token).digest('hex');
+
+// Registers a freshly minted refresh token. Every place that mints tokens must
+// call this, or that session can never be refreshed.
+const createSession = async (userId: string, refreshToken: string): Promise<void> => {
+  await db.query(
+    `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
+     VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
+    [userId, hashRefreshToken(refreshToken)]
+  );
+  // Housekeeping: drop expired rows and keep only the newest N sessions.
+  try {
+    await db.query(
+      `DELETE FROM user_sessions
+        WHERE user_id = $1
+          AND (expires_at < NOW()
+               OR id IN (SELECT id FROM user_sessions WHERE user_id = $1
+                         ORDER BY created_at DESC OFFSET $2))`,
+      [userId, MAX_SESSIONS_PER_USER]
+    );
+  } catch (err) {
+    logger.warn('Session cleanup failed (non-fatal):', err);
+  }
+};
+
+// ============================================================================
+// REFRESH TOKEN (verified + rotated)
 // ============================================================================
 
 export const refreshAccessToken = async (refreshToken: string) => {
   try {
-    const decoded = verifyRefreshToken(refreshToken);
-
-    // Verify session exists
-    const sessionResult = await db.query(
-      'SELECT * FROM user_sessions WHERE user_id = $1 AND expires_at > NOW()',
-      [decoded.userId]
-    );
-
-    if (sessionResult.rows.length === 0) {
-      throw new Error('Session expired');
+    if (typeof refreshToken !== 'string' || !refreshToken) {
+      throw new Error('Invalid refresh token');
     }
+    const decoded = verifyRefreshToken(refreshToken); // signature + exp, throws if bad
+    const presentedHash = hashRefreshToken(refreshToken);
 
-    // Generate new access token
-    const { accessToken, refreshToken: newRefreshToken } = generateTokens(
-      decoded.userId,
-      decoded.email
+    const { accessToken, refreshToken: newRefreshToken } = generateTokens(decoded.userId, decoded.email);
+    const newHash = hashRefreshToken(newRefreshToken);
+
+    // Atomic rotation. The presented token must be this session's CURRENT token,
+    // or its immediate predecessor within a short grace window (a response lost
+    // on a flaky mobile connection, or two tabs refreshing at once, must not log
+    // the user out). The session's absolute expiry (30d from login) is untouched.
+    const rotated = await db.query(
+      `UPDATE user_sessions
+          SET prev_refresh_token_hash = refresh_token_hash,
+              refresh_token_hash = $3,
+              rotated_at = NOW()
+        WHERE id = (
+          SELECT id FROM user_sessions
+           WHERE user_id = $1 AND expires_at > NOW()
+             AND (refresh_token_hash = $2
+                  OR (prev_refresh_token_hash = $2
+                      AND rotated_at > NOW() - make_interval(secs => $4)))
+           LIMIT 1
+           FOR UPDATE)
+        RETURNING id`,
+      [decoded.userId, presentedHash, newHash, REFRESH_GRACE_SECONDS]
     );
+
+    if (rotated.rows.length === 0) {
+      // Sessions created before this fix store a legacy bcrypt hash ('$2...').
+      // Accept them once so nobody is logged out by the deploy, and upgrade the
+      // row to the SHA-256 scheme. These rows die within 30 days.
+      const legacy = await db.query(
+        `SELECT id, refresh_token_hash FROM user_sessions
+          WHERE user_id = $1 AND expires_at > NOW() AND LEFT(refresh_token_hash, 2) = $2
+          ORDER BY created_at DESC LIMIT 5`,
+        [decoded.userId, '$2']
+      );
+      let legacyId: string | null = null;
+      for (const row of legacy.rows) {
+        if (await bcrypt.compare(refreshToken, row.refresh_token_hash)) { legacyId = row.id; break; }
+      }
+      if (!legacyId) {
+        throw new Error('Session expired');
+      }
+      await db.query(
+        `UPDATE user_sessions SET refresh_token_hash = $2, prev_refresh_token_hash = NULL, rotated_at = NOW()
+          WHERE id = $1`,
+        [legacyId, newHash]
+      );
+    }
 
     return { accessToken, refreshToken: newRefreshToken };
   } catch (err) {
     logger.error('Refresh token error:', err);
     throw err;
+  }
+};
+
+// Ends one session: deletes the row for the presented refresh token. Never
+// throws and never reveals whether the token was known (idempotent logout).
+export const logoutSession = async (refreshToken: string): Promise<void> => {
+  try {
+    if (typeof refreshToken !== 'string' || !refreshToken) return;
+    const h = hashRefreshToken(refreshToken);
+    await db.query(
+      'DELETE FROM user_sessions WHERE refresh_token_hash = $1 OR prev_refresh_token_hash = $1',
+      [h]
+    );
+  } catch (err) {
+    logger.warn('Logout session cleanup failed:', err);
   }
 };
 
@@ -709,6 +793,7 @@ export const verifyMagicLink = async (token: string, email: string) => {
     return { mfaRequired: true, mfaToken: signMfaChallenge(user.id), userId: user.id };
   }
   const { accessToken, refreshToken } = generateTokens(user.id, user.email);
+  await createSession(user.id, refreshToken);
   return { accessToken, refreshToken, userId: user.id, email: user.email };
 };
 
@@ -765,12 +850,7 @@ export const loginWithGoogle = async (idToken: string, brandId?: string | null) 
       brandId
     );
     await db.query('UPDATE users SET last_login = NOW() WHERE id = $1', [created.userId]);
-    const tokenHash = await bcrypt.hash(created.refreshToken, 5);
-    await db.query(
-      `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
-       VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
-      [created.userId, tokenHash]
-    );
+    // (registerCompanyAndUser already created this session.)
     logger.info(`✅ New account via Google: ${email}`);
     return { ...created, firstName, role: 'user', isNewUser: true };
   }
@@ -779,25 +859,18 @@ export const loginWithGoogle = async (idToken: string, brandId?: string | null) 
 
   // Existing account: keep 2FA enforced, Google must not bypass it.
   if (user.mfa_enabled) {
-    const tempToken = uuid();
-    await db.query(
-      `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
-       VALUES ($1, $2, NOW() + INTERVAL '10 minutes')`,
-      [user.id, tempToken]
-    );
-    return { mfaRequired: true, mfaToken: tempToken, userId: user.id };
+    // Same signed, short-lived challenge as the password and magic-link flows
+    // (verifyMFALogin only accepts this). It used to be a raw uuid stored in
+    // user_sessions, which verifyMFALogin could not validate - and which counted
+    // as a "session" for refresh.
+    return { mfaRequired: true, mfaToken: signMfaChallenge(user.id), userId: user.id };
   }
 
   await db.query('UPDATE users SET last_login = NOW() WHERE id = $1', [user.id]);
   await db.query('INSERT INTO login_attempts (email, success) VALUES ($1, $2)', [email, true]);
 
   const { accessToken, refreshToken } = generateTokens(user.id, user.email);
-  const tokenHash = await bcrypt.hash(refreshToken, 5);
-  await db.query(
-    `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
-     VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
-    [user.id, tokenHash]
-  );
+  await createSession(user.id, refreshToken);
 
   logger.info(`✅ User logged in via Google: ${user.email}`);
   return {

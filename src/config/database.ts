@@ -1450,6 +1450,13 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     )
   `);
 
+  // Refresh-token rotation (authService.refreshAccessToken): previous token's
+  // hash + rotation time (grace window), and an index for the lookups.
+  await step(`ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS prev_refresh_token_hash VARCHAR(255)`);
+  await step(`ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS rotated_at TIMESTAMP`);
+  await step(`CREATE INDEX IF NOT EXISTS user_sessions_user_hash ON user_sessions(user_id, refresh_token_hash)`);
+  await step(`CREATE INDEX IF NOT EXISTS user_sessions_user_prev_hash ON user_sessions(user_id, prev_refresh_token_hash)`);
+
   // SECURITY (Supabase advisory rls_disabled_in_public, CRITICAL): keep Row-Level
   // Security enabled (deny-all for the anon/authenticated API roles) on every
   // public table, including ones added by future steps above. This backend uses
