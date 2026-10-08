@@ -559,51 +559,50 @@ export const refreshAccessToken = async (refreshToken: string) => {
 // ============================================================================
 
 export const requestPasswordReset = async (email: string) => {
+  // SECURITY: this used to generate a uuid "reset token", store it in
+  // user_sessions and RETURN it in the HTTP response (leaking it to whoever
+  // asked, and revealing which emails exist since unknown emails got no
+  // token). The matching /password-reset/confirm never verified that token
+  // anyway. Accounts here are passwordless-first, and the frontend's
+  // "mot de passe oublié" already uses the magic-link email, so recovery is
+  // simply a sign-in link sent to the address (MFA still applies on
+  // verification). The response is identical whether or not the account
+  // exists, nothing secret is ever returned, and the email send is not
+  // awaited so response timing doesn't reveal account existence either.
+  void requestMagicLink(email, 'login').catch((err) =>
+    logger.error('Password reset (magic-link) email failed:', err)
+  );
+  return { success: true };
+};
+
+// Sets a new bcrypt password hash and invalidates every existing session.
+// Private: only changePassword (which verifies the current password first)
+// may call it. The old exported resetPassword/confirm flow was removed.
+const setPasswordAndInvalidateSessions = async (userId: string, newPassword: string) => {
   try {
-    const userResult = await db.query(
-      'SELECT id FROM users WHERE LOWER(email) = LOWER($1)',
-      [email]
-    );
+    const salt = await bcrypt.genSalt(parseInt(process.env.PASSWORD_SALT_ROUNDS || '10'));
+    const passwordHash = await bcrypt.hash(newPassword, salt);
 
-    if (userResult.rows.length === 0) {
-      // Don't reveal if email exists (security best practice)
-      logger.info(`Password reset requested for non-existent email: ${email}`);
-      return { success: true };
-    }
+    await db.query('UPDATE users SET password_hash = $1 WHERE id = $2', [passwordHash, userId]);
 
-    const userId = userResult.rows[0].id;
-    const resetToken = uuid();
-    const resetTokenHash = await bcrypt.hash(resetToken, 5);
+    // Invalidate all existing sessions
+    await db.query('DELETE FROM user_sessions WHERE user_id = $1', [userId]);
 
-    // Store reset token (expires in 1 hour)
-    await db.query(
-      `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
-       VALUES ($1, $2, NOW() + INTERVAL '1 hour')`,
-      [userId, resetTokenHash]
-    );
-
-    // In production, send email with reset link
-    logger.info(`Password reset token generated for ${email}`);
-
-    return { success: true, resetToken }; // In production, send via email
+    logger.info(`✅ Password changed for user ${userId}`);
+    return { success: true };
   } catch (err) {
-    logger.error('Password reset request error:', err);
+    logger.error('Password change error:', err);
     throw err;
   }
 };
 
 // changePassword — logged-in user changing their own password from the
-// Sécurité tab (ProfilPage). Distinct from resetPassword above: resetPassword
-// is reached via the forgot-password email link, where possession of the
-// one-time reset token already proves account ownership, so no current
-// password is needed there. This flow instead reuses a live session token,
-// which a visitor could have without knowing the actual password (a leaked/
-// stolen JWT, a shared device left logged in), so it has to independently
-// verify the current password before accepting a new one - previously the
-// frontend collected a "mot de passe actuel" field but silently never sent
-// it, and the endpoint it called (password-reset/confirm) never checked one
-// either, so anyone holding a valid access token could overwrite the
-// password with no proof they knew the old one.
+// Sécurité tab (ProfilPage). It reuses a live session token, which a visitor
+// could have without knowing the actual password (a leaked/stolen JWT, a
+// shared device left logged in), so it independently verifies the current
+// password before accepting a new one. (The old /password-reset/confirm
+// endpoint skipped that check and has been removed - account recovery is the
+// emailed sign-in link, see requestPasswordReset.)
 export const changePassword = async (userId: string, currentPassword: string, newPassword: string) => {
   const userResult = await db.query('SELECT password_hash FROM users WHERE id = $1', [userId]);
   if (userResult.rows.length === 0) {
@@ -620,32 +619,7 @@ export const changePassword = async (userId: string, currentPassword: string, ne
     throw new Error('Mot de passe actuel incorrect.');
   }
 
-  return resetPassword(userId, newPassword);
-};
-
-export const resetPassword = async (userId: string, newPassword: string) => {
-  try {
-    const salt = await bcrypt.genSalt(parseInt(process.env.PASSWORD_SALT_ROUNDS || '10'));
-    const passwordHash = await bcrypt.hash(newPassword, salt);
-
-    await db.query(
-      'UPDATE users SET password_hash = $1 WHERE id = $2',
-      [passwordHash, userId]
-    );
-
-    // Invalidate all existing sessions
-    await db.query(
-      'DELETE FROM user_sessions WHERE user_id = $1',
-      [userId]
-    );
-
-    logger.info(`✅ Password reset for user ${userId}`);
-
-    return { success: true };
-  } catch (err) {
-    logger.error('Password reset error:', err);
-    throw err;
-  }
+  return setPasswordAndInvalidateSessions(userId, newPassword);
 };
 
 // ============================================================================
