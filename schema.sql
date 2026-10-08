@@ -1430,3 +1430,27 @@ CREATE TABLE IF NOT EXISTS app_settings (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_by UUID REFERENCES users(id)
 );
+
+
+-- ---------------------------------------------------------------------------
+-- SECURITY: lock the public schema away from Supabase's auto-generated REST
+-- API (PostgREST). The backend connects directly via DATABASE_URL, so the
+-- anon/authenticated API roles need no access. RLS enabled with no policies =
+-- deny-all for those roles; the owning/postgres role used by the backend is
+-- unaffected. Re-applied on every boot by applyIncrementalMigrations().
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE r record; role_name text;
+BEGIN
+  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', r.tablename);
+  END LOOP;
+  FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+      EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %I', role_name);
+      EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM %I', role_name);
+      EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM %I', role_name);
+      EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM %I', role_name);
+    END IF;
+  END LOOP;
+END $$;
