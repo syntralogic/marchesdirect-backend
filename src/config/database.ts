@@ -1449,6 +1449,45 @@ const applyIncrementalMigrations = async (): Promise<void> => {
       updated_by UUID REFERENCES users(id)
     )
   `);
+
+  // SECURITY (Supabase advisory 3 Oct 2026: "RLS disabled in public"):
+  // Supabase auto-exposes every table in the public schema through its
+  // PostgREST API to anyone holding the (public) anon key. This backend
+  // talks to Postgres directly via DATABASE_URL and the frontend never uses
+  // the Supabase client, so the API roles need no access at all. Enable RLS
+  // on every public table (no policies => deny-all for anon/authenticated)
+  // and strip their grants. The backend role owns the tables / is the
+  // postgres role, so it is unaffected. Idempotent; also covers tables
+  // created by earlier steps in this function and any added in the future.
+  await step(`
+    DO $$
+    DECLARE r record;
+    BEGIN
+      FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+        BEGIN
+          EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', r.tablename);
+        EXCEPTION WHEN insufficient_privilege THEN
+          RAISE WARNING 'RLS: not owner of public.%, skipped', r.tablename;
+        END;
+      END LOOP;
+    END $$;
+  `);
+  await step(`
+    DO $$
+    DECLARE role_name text;
+    BEGIN
+      FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+          EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %I', role_name);
+          EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM %I', role_name);
+          EXECUTE format('REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM %I', role_name);
+          EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM %I', role_name);
+          EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM %I', role_name);
+          EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON FUNCTIONS FROM %I', role_name);
+        END IF;
+      END LOOP;
+    END $$;
+  `);
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old
