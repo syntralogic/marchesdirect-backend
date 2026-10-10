@@ -1,0 +1,31 @@
+name: Sync from upstream
+
+# Runs ONLY in the client repo. Pulls main from the public upstream repo
+# using this repo's own GITHUB_TOKEN, so it does not depend on any personal
+# account or access token.
+on:
+  schedule:
+    - cron: '37 */2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-from-upstream
+  cancel-in-progress: false
+
+jobs:
+  pull:
+    if: github.repository == 'hedi4060/Marche-direct-back'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fast-forward main from upstream
+        run: |
+          git fetch https://github.com/syntralogic/marchesdirect-backend.git main
+          git merge --ff-only FETCH_HEAD
+          git push origin HEAD:main

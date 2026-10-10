@@ -17,6 +17,7 @@ jobs:
           persist-credentials: false
 
       - name: Push to client repo
+        continue-on-error: true  # fallback: client repo pulls on its own schedule
         env:
           CLIENT_PAT: ${{ secrets.CLIENT_PAT }}
         run: |
