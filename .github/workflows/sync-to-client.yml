@@ -1,0 +1,23 @@
+name: Sync to client repo
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  sync:
+    # only run in our own repo, never in the client's copy
+    if: github.repository == 'syntralogic/marchesdirect-backend'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push to client repo
+        env:
+          CLIENT_PAT: ${{ secrets.CLIENT_PAT }}
+        run: |
+          git remote add client https://x-access-token:${CLIENT_PAT}@github.com/hedi4060/Marche-direct-back.git
+          git push client HEAD:main
