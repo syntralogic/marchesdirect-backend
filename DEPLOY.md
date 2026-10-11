@@ -69,3 +69,12 @@ Vercel.
   live URL (including `https://`, no trailing slash).
 - **Stripe webhook 400s**: `STRIPE_WEBHOOK_SECRET` must match the endpoint
   you register in the Stripe dashboard, not the one from local `stripe listen`.
+
+## Facebook page + Google reviews (company info)
+
+Set `GOOGLE_PLACES_API_KEY` (Google Cloud > enable "Places API (New)" > API key) on the backend.
+Without it the Facebook / Google reviews fields simply stay empty (nothing is invented).
+- Google rating + review count come from Places, matched on the company's postal code.
+- The Facebook page is the facebook.com link published on the company's own website.
+- Results are stored in `company_lookup_cache` and refreshed every 30 days; companies already
+  cached are filled in on their next lookup (no extra Pappers call).

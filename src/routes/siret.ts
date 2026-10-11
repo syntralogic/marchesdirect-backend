@@ -3,6 +3,7 @@ import { body, validationResult } from 'express-validator';
 import axios from 'axios';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { lookupCompanyPresence, isPresenceConfigured } from '../services/companyPresenceService';
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { isOpportunityClosed } from '../utils/opportunityStatus';
 import { sendPrefilledDossierEmail, generatePrefilledDossierPdf } from '../services/prefilledDossierService';
@@ -113,6 +114,9 @@ interface CompanyData {
   // champs_supplementaires=labels, which INSEE Sirene has no equivalent
   // for at all.
   certifications: string[];
+  // ISO date of the last Facebook/Google-reviews lookup (client item 4); lets
+  // the cache refresh that data without re-calling the paid registry APIs.
+  presenceCheckedAt?: string | null;
   source: 'pappers' | 'insee' | 'demo';
 }
 
@@ -358,6 +362,39 @@ async function searchCompaniesByName(name: string, apiKey: string): Promise<Comp
 //     could query, not an automatic alert.
 const THROTTLE_MAX_COMPANIES_PER_IP = 2;
 
+// Client item 4: Facebook page + Google rating/reviews. Pappers and INSEE have
+// neither, so they are filled from companyPresenceService. Refreshed at most
+// every PRESENCE_REFRESH_DAYS and only stamped when the lookup could run (key
+// configured), so a company looked up before the key existed is retried.
+const PRESENCE_REFRESH_DAYS = 30;
+
+function presenceIsStale(c: Partial<CompanyData>): boolean {
+  if (!c.presenceCheckedAt) return true;
+  const age = Date.now() - new Date(c.presenceCheckedAt).getTime();
+  return !(age >= 0 && age < PRESENCE_REFRESH_DAYS * 86400000);
+}
+
+async function withPresence(company: CompanyData): Promise<CompanyData> {
+  if (!isPresenceConfigured() || company.source === 'demo') return company;
+  try {
+    const p = await lookupCompanyPresence({
+      name: company.name, city: company.city, postal: company.postal,
+      address: company.address, website: company.website,
+    });
+    return {
+      ...company,
+      website: company.website || p.website,
+      facebook: p.facebook ?? company.facebook ?? null,
+      googleRating: p.googleRating ?? company.googleRating ?? null,
+      googleReviewCount: p.googleReviewCount ?? company.googleReviewCount ?? null,
+      presenceCheckedAt: new Date().toISOString(),
+    };
+  } catch (err: any) {
+    logger.error('Presence enrichment failed:', err.message);
+    return company;
+  }
+}
+
 class SiretThrottleError extends Error {}
 
 async function getCompanyWithProtection(
@@ -392,7 +429,17 @@ async function getCompanyWithProtection(
     // describes the very SIRET asked for.
     const sameEstablishment = !cachedData.siret || String(cachedData.siret).replace(/\D/g, '') === siret.replace(/\D/g, '');
     if (!isOutdatedShape && sameEstablishment) {
-      return { ...cachedData, source: cached.rows[0].source };
+      const fromCache: CompanyData = { ...cachedData, source: cached.rows[0].source };
+      // Client item 4: companies cached before Facebook/Google reviews existed
+      // (or whose last check is old) get them filled in now, no registry call.
+      if (isPresenceConfigured() && fromCache.source !== 'demo' && presenceIsStale(fromCache)) {
+        const enriched = await withPresence(fromCache);
+        if (enriched.presenceCheckedAt) {
+          await db.query('UPDATE company_lookup_cache SET company_data = $2 WHERE siren = $1', [siren, JSON.stringify(enriched)]);
+        }
+        return enriched;
+      }
+      return fromCache;
     }
   }
 
@@ -404,8 +451,9 @@ async function getCompanyWithProtection(
     }
   }
 
-  const company = await fetchFn();
-  if (!company) return null;
+  const fetched = await fetchFn();
+  if (!fetched) return null;
+  const company = await withPresence(fetched);
 
   await db.query(
     `INSERT INTO company_lookup_cache (siren, company_data, source)
