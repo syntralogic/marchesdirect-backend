@@ -1,4 +1,5 @@
-import { cached } from '../utils/ttlCache';
+import { cached, createBoundedCache } from '../utils/ttlCache';
+import { createHash } from 'crypto';
 import { Router, Request, Response } from 'express';
 import { isUuid } from '../utils/uuid';
 import { body, validationResult } from 'express-validator';
@@ -343,6 +344,22 @@ const LIST_SCOPE_SQL = `o.deleted_at IS NULL
 // countOpportunitiesFor below) run EXACTLY the same predicate as the list they
 // link to (DEV-04, 3 Oct plan: "utiliser le même calcul pour les compteurs et
 // les résultats"). `countOnly` skips the page query and returns only the total.
+// 11 Oct client report (item 1): searching by métier took 5-10s. The two heavy
+// costs were (a) the count and the list queries ran one after the other, each
+// re-scanning every matching row, and (b) the ~20-regex "nature" LATERAL ran for
+// every matching row in BOTH queries although the count never reads it and the
+// list only needs it for the 20-100 rows it returns. Results change only when a
+// connector run lands (every 6h+), so a short cache is safe; it is bounded and
+// keyed on the exact SQL + params, so two different searches can never collide.
+const searchListCache = createBoundedCache(100);
+const searchCountCache = createBoundedCache(500);
+const SEARCH_LIST_TTL_MS = 2 * 60 * 1000;
+const SEARCH_COUNT_TTL_MS = 5 * 60 * 1000;
+const searchCacheKey = (...parts: unknown[]): string =>
+  createHash('sha1').update(JSON.stringify(parts)).digest('hex');
+// Tiny reference tables (trades): no need to hit the DB on every search.
+const TRADE_LOOKUP_TTL_MS = 10 * 60 * 1000;
+
 async function searchOpportunities(req: Request, res: Response) {
   try {
     const countOnly = (req as any).__countOnly === true;
@@ -550,7 +567,7 @@ async function searchOpportunities(req: Request, res: Response) {
         // keeps this from reopening the point-3 fix above (e.g. "CVC" still
         // must not pull in biomedical-ventilation markets just because the
         // word "ventilation" appears in their title/description).
-        const slugsResult = await db.query('SELECT slug, name FROM trades WHERE id = ANY($1::int[])', [ids]);
+        const slugsResult = await cached(`trades:byIds:${[...ids].sort((a, b) => a - b).join(',')}`, TRADE_LOOKUP_TTL_MS, () => db.query('SELECT slug, name FROM trades WHERE id = ANY($1::int[])', [ids]));
         const slugs = slugsResult.rows.map((r) => r.slug).filter(Boolean);
         const keywords = keywordsForSlugs(slugs);
 
@@ -717,10 +734,10 @@ async function searchOpportunities(req: Request, res: Response) {
         // filter accepts (AI-classified trade, ai_matched_trades, trade keywords),
         // so typing it and picking it from the list give the same results.
         let wordCondition = wordConds.join(' AND ');
-        const exactTrade = await db.query(
+        const exactTrade = await cached(`trades:exact:${qWords.join(' ')}`, TRADE_LOOKUP_TTL_MS, () => db.query(
           `SELECT id FROM trades WHERE unaccent(lower(name)) = unaccent(lower($1))`,
           [qWords.join(' ')]
-        );
+        ));
         if (exactTrade.rows.length > 0) {
           const tradeOr = await buildTradeCondition(exactTrade.rows.map((r) => Number(r.id)).filter((n) => Number.isFinite(n)));
           if (tradeOr) {
@@ -1102,88 +1119,103 @@ async function searchOpportunities(req: Request, res: Response) {
       orderClause = `(CASE WHEN np.nature IN (${naturesLiteral}) THEN 0 ELSE 1 END) ASC, ${orderClause}`;
     }
 
-    const listResult: { rows: any[] } = countOnly ? { rows: [] } : await db.query(
-      `SELECT o.id, o.title, o.description, o.deadline, o.publication_date,
+    // The resolved nature (np.nature) is only needed when the WHERE or ORDER BY
+    // actually reads it (explicit nature filter, or the métier-match ranking
+    // that demotes fournitures/études). Otherwise it is only for display, so it
+    // is computed for the returned page alone instead of for every match.
+    const natureInWhere = whereClause.includes('np.nature');
+    const natureInOrder = orderClause.includes('np.nature');
+
+    const LIST_COLUMNS = `o.id, o.title, o.description, o.deadline, o.publication_date,
               o.estimated_value, o.currency, o.location_city, o.location_region,
               o.location_department, o.estimated_start_date, o.estimated_end_date,
               o.ai_classification_status, o.ai_summary, o.ai_matched_trades, o.status,
               ot.code as journey, t.name as trade_name, o.buyer_name,
-              -- 25 Sep client audit follow-up: this route never reconciled
-              -- estimated_value/buyer_name against ai_extracted_facts the way
-              -- the fiche detail route does (see utils/officialFields.ts), so
-              -- a card here could show "Montant non communiqué" while the
-              -- same opportunity's fiche showed the real figure. Selected
-              -- here only to compute that fallback below, then stripped
-              -- before the response goes out - the list payload never
-              -- carried ai_extracted_facts before and doesn't need to.
+              -- selected only to reconcile estimated_value/buyer_name against
+              -- ai_extracted_facts (utils/officialFields.ts), then stripped
+              -- before the response goes out.
               o.ai_extracted_facts, o.raw_data,
-              -- R02: the resolved nature (AI value when classified, notice-wording
-              -- fallback otherwise, NULL when genuinely unreadable) so the result
-              -- card can say "Fournitures" out loud instead of the visitor having
-              -- to open a spare-parts notice to find out.
+              -- R02: resolved nature, so the card can say "Fournitures" out loud.
               np.nature AS nature_prestation,
-              -- 1 Oct client request: templated catalogue rows (no real source) must be
-              -- identified as demonstration examples, never look like real tenders.
-              (ds.code = 'editorial_catalog') AS is_demo
-       FROM opportunities o
-       LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+              -- 1 Oct client request: templated catalogue rows are demonstration examples.
+              (ds.code = 'editorial_catalog') AS is_demo`;
+    const SCOPE_JOINS = `LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
        LEFT JOIN trades t ON o.trade_id = t.id
-       LEFT JOIN data_sources ds ON o.source_id = ds.id
+       LEFT JOIN data_sources ds ON o.source_id = ds.id`;
+    const limitIdx = idx++;
+    const offsetIdx = idx++;
+    const listParams = [...params, limitNum, offset];
+
+    const loadList = async (): Promise<any[]> => {
+      let listSql: string;
+      if (natureInWhere || natureInOrder) {
+        listSql = `SELECT ${LIST_COLUMNS}
+       FROM opportunities o
+       ${SCOPE_JOINS}
        ${naturePrestationLateral('o')}
        WHERE ${whereClause}
        ORDER BY ${orderClause}
-       LIMIT $${idx++} OFFSET $${idx++}`,
-      [...params, limitNum, offset]
-    );
-
-    const countResult = await db.query(
-      `SELECT COUNT(*) as total
-       FROM opportunities o
-       LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
-       LEFT JOIN trades t ON o.trade_id = t.id
-       LEFT JOIN data_sources ds ON o.source_id = ds.id
+       LIMIT $${limitIdx} OFFSET $${offsetIdx}`;
+      } else {
+        // Two-stage: pick the page's ids with the cheap filters/ordering first
+        // (ARRAY(subquery) keeps the subquery's ORDER BY), then fetch the full
+        // rows and compute the nature for just those ids.
+        listSql = `SELECT ${LIST_COLUMNS}
+       FROM unnest(ARRAY(
+         SELECT o.id FROM opportunities o
+         ${SCOPE_JOINS}
+         WHERE ${whereClause}
+         ORDER BY ${orderClause}
+         LIMIT $${limitIdx} OFFSET $${offsetIdx}
+       )) WITH ORDINALITY AS pg(id, ord)
+       JOIN opportunities o ON o.id = pg.id
+       ${SCOPE_JOINS}
        ${naturePrestationLateral('o')}
-       WHERE ${whereClause}`,
-      params
-    );
-
-    // Same one-value-per-official-data-point pass the fiche detail route
-    // runs, so a result card never disagrees with its own fiche (25 Sep
-    // audit follow-up). ai_extracted_facts/raw_data were only selected to
-    // compute this and are never part of the list payload.
-    //
-    // 2nd 27 Sep client audit, point 8: "un retour aux résultats publics a
-    // affiché une erreur de chargement", cause not identifiable from the
-    // browser. reconcileOfficialFields ran here with no per-row isolation -
-    // unlike every other per-item enrichment step in this file
-    // (ensureFactsExtracted, ensureAnalysisSectionsGenerated, ensureClassified,
-    // ensureSummaryGenerated all already isolate their own failures), one
-    // malformed row (an unexpected ai_extracted_facts/raw_data shape from
-    // whichever source produced it - BOAMP/PLACE/TED/DECP each have their
-    // own quirks) threw and took the ENTIRE page of results down with it.
-    // "Marchés publics" is by far this platform's largest and most
-    // heterogeneous dataset (real government feeds vs. the small curated
-    // Appels d'offres/Sous-traitance demo listings) - exactly why a visitor
-    // would hit this there and not on the other two journeys. Isolating it
-    // per row means one bad row now just keeps its raw (un-reconciled)
-    // column values instead of failing the other 99.
-    for (const row of listResult.rows) {
-      try {
-        reconcileOfficialFields(row);
-      } catch (err) {
-        logger.warn(`reconcileOfficialFields failed for opportunity ${row.id} in a list response: ${err instanceof Error ? err.message : err}`);
+       ORDER BY pg.ord`;
       }
-      delete row.ai_extracted_facts;
-      delete row.raw_data;
-    }
+      const result = await db.query(listSql, listParams);
+      for (const row of result.rows) {
+        try {
+          reconcileOfficialFields(row);
+        } catch (err) {
+          logger.warn(`reconcileOfficialFields failed for opportunity ${row.id} in a list response: ${err instanceof Error ? err.message : err}`);
+        }
+        delete row.ai_extracted_facts;
+        delete row.raw_data;
+      }
+      return result.rows;
+    };
+
+    const loadCount = async (): Promise<number> => {
+      // Same joins and WHERE as the list; the nature LATERAL is only joined
+      // when the WHERE reads it (explicit nature filter).
+      const countResult = await db.query(
+        `SELECT COUNT(*) as total
+       FROM opportunities o
+       ${SCOPE_JOINS}
+       ${natureInWhere ? naturePrestationLateral('o') : ''}
+       WHERE ${whereClause}`,
+        params
+      );
+      return parseInt(countResult.rows[0].total);
+    };
+
+    // Count and list are independent: run them together, and reuse a cached
+    // count for "Voir plus" pages (same filters, only limit/offset differ).
+    const [rows, total] = await Promise.all([
+      countOnly
+        ? Promise.resolve([] as any[])
+        : searchListCache(searchCacheKey('list', whereClause, orderClause, listParams), SEARCH_LIST_TTL_MS, loadList),
+      searchCountCache(searchCacheKey('count', whereClause, params), SEARCH_COUNT_TTL_MS, loadCount),
+    ]);
 
     res.json({
-      results: listResult.rows,
+      results: rows,
       pagination: {
         page: pageNum,
         limit: limitNum,
-        total: parseInt(countResult.rows[0].total),
-        totalPages: Math.ceil(parseInt(countResult.rows[0].total) / limitNum),
+        total,
+        totalPages: Math.ceil(total / limitNum),
       },
     });
   } catch (err: any) {

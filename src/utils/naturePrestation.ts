@@ -182,7 +182,14 @@ export function inferNaturePrestation(title: string | null, description?: string
 // constant from this file, nothing from the request reaches it.
 
 function sqlRegexAny(column: string, patterns: string[]): string {
-  return patterns.map((p) => `${column} ~ '${p.replace(/'/g, "''")}'`).join(' OR ');
+  // One alternation per group instead of `col ~ p1 OR col ~ p2 OR ...`: identical
+  // match result (a string matches p1|p2 iff it matches p1 or p2), but Postgres
+  // only caches 32 compiled regexes per backend. This expression used ~60
+  // distinct patterns, so they were evicted and RECOMPILED for every row
+  // (~1 ms/row, measured: 6,000 rows = 6 s in the métier search's ranking).
+  // Merged, there are only ~8 distinct patterns and they stay cached.
+  const merged = patterns.length === 1 ? patterns[0] : patterns.map((p) => `(?:${p})`).join('|');
+  return `${column} ~ '${merged.replace(/'/g, "''")}'`;
 }
 
 // Postgres regex flavour: no \b, use the POSIX \y word boundary instead.
@@ -200,9 +207,16 @@ const PG_SUPPLY_WITH_WORKS = toPgPattern(SUPPLY_WITH_WORKS);
  * SQL expression resolving to 'travaux' | 'fournitures' | 'etudes' | 'mixte'
  * | NULL for a row of `opportunities` aliased as `alias`.
  */
-export function naturePrestationSql(alias = 'o'): string {
-  const title = `lower(unaccent(COALESCE(${alias}.title, '')))`;
-  const body = `left(lower(unaccent(COALESCE(${alias}.title, '') || ' ' || COALESCE(${alias}.description, ''))), 2000)`;
+export function naturePrestationSql(
+  alias = 'o',
+  // Optional pre-normalised title/body expressions (see naturePrestationLateral):
+  // the regex lists below repeat the column expression once per pattern, so
+  // passing a plain column here makes the unaccent()/lower() run once per row
+  // instead of once per pattern. Defaults reproduce the original inline form.
+  cols?: { title: string; body: string },
+): string {
+  const title = cols?.title ?? `lower(unaccent(COALESCE(${alias}.title, '')))`;
+  const body = cols?.body ?? `left(lower(unaccent(COALESCE(${alias}.title, '') || ' ' || COALESCE(${alias}.description, ''))), 2000)`;
 
   const supplyTitle = `(${sqlRegexAny(title, PG_SUPPLY)})`;
   const studyTitle = `(${sqlRegexAny(title, PG_STUDY)})`;
@@ -259,5 +273,21 @@ export function naturePrestationLateral(alias = 'o', as = 'np'): string {
   // Nested Loop replaces the inlined Seq Scan filter, 4.8s -> 2.4s on the
   // same data - the regex cost itself is still real, see
   // natureBackfillJob.ts for the actual fix to that).
-  return `CROSS JOIN LATERAL (SELECT ${naturePrestationSql(alias)} AS nature OFFSET 0) ${as}`;
+  //
+  // 11 Oct client report (métier search 5-10s): even materialised once per
+  // row, the CASE above repeated `lower(unaccent(title || description))` for
+  // every one of its ~15 regexes, and unaccent() over a full description is
+  // the expensive part (~1 ms/row measured). The normalised title/body are now
+  // computed ONCE per row in their own fenced LATERAL and the CASE reads those
+  // columns - same expression, same result, a fraction of the work. They are
+  // only computed when the row has no stored nature (the COALESCE's first
+  // branch wins otherwise, so the text was never going to be read).
+  const nz = `${as}_txt`;
+  const needsText = `${alias}.nature_prestation IS NULL`;
+  const normalised = `CROSS JOIN LATERAL (SELECT
+      CASE WHEN ${needsText} THEN lower(unaccent(COALESCE(${alias}.title, ''))) END AS t,
+      CASE WHEN ${needsText} THEN left(lower(unaccent(COALESCE(${alias}.title, '') || ' ' || COALESCE(${alias}.description, ''))), 2000) END AS b
+      OFFSET 0) ${nz}`;
+  return `${normalised}
+       CROSS JOIN LATERAL (SELECT ${naturePrestationSql(alias, { title: `${nz}.t`, body: `${nz}.b` })} AS nature OFFSET 0) ${as}`;
 }
