@@ -43,7 +43,7 @@ const AT_RISK_SQL = `
     OR (buyer_name IS NOT NULL AND lower(trim(location_city)) = lower(trim(buyer_name)))
   )`;
 
-async function ensureTables(): Promise<void> {
+export async function ensureTables(): Promise<void> {
   await db.query(
     `CREATE TABLE IF NOT EXISTS app_once_migrations (key TEXT PRIMARY KEY, done_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`
   );
@@ -62,6 +62,7 @@ async function markDone(key: string): Promise<void> {
 }
 
 export async function repairBuyerNameLocations(): Promise<number> {
+  await ensureTables();
   if (await isDone(BUYER_KEY)) return 0;
   let touched = 0;
   let lastId = NIL_UUID;
@@ -91,6 +92,7 @@ export async function repairBuyerNameLocations(): Promise<number> {
 }
 
 export async function backfillBoampLotsBatch(): Promise<{ updated: number; done: boolean }> {
+  await ensureTables();
   if (await isDone(LOTS_KEY)) return { updated: 0, done: true };
 
   const cur = await db.query('SELECT last_id FROM legacy_repair_cursor WHERE key = $1', [LOTS_KEY]);
