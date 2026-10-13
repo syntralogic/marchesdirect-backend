@@ -171,7 +171,10 @@ const DOMAIN_MISMATCH_RULES: Array<{ triggers: Set<string>; exclude: RegExp }> =
   },
   {
     triggers: new Set(['electricite', 'electricien', 'elec']),
-    exclude: /\b(fourniture\s+(et\s+acheminement\s+)?d'?electricite|acheminement\s+d'?energie|achat\s+d'?electricite|fournisseurs?\s+d'?electricite|marche\s+de\s+l'?energie|contrat\s+de\s+fourniture\s+d'?(electricite|energie|gaz))\b/,
+    exclude: /\b(fourniture\s+(et\s+acheminement\s+)?d'?electricite|acheminement\s+d'?energie|achat\s+d'?electricite|fournisseurs?\s+d'?electricite|marche\s+de\s+l'?energie|contrat\s+de\s+fourniture\s+d'?(electricite|energie|gaz))\b|\b(camions?|vehicules?|voitures?|utilitaires?|fourgons?|autobus|minibus|bus|velos?|trottinettes?|scooters?|motos?|tracteurs?|chariots?|balayeuses?|bennes?|engins?)\s+(?:\w+\s+){0,2}electriques?\b(?!.*\b(?:bornes?|recharge|installation\s+electrique|raccordement)\b)/,
+    // 1 Oct client report: an electric truck / vehicle is a vehicle purchase, not
+    // electrician work ("camion électrique" must not answer an "électricité"
+    // search). Notices that also mention charging points / installation are kept.
   },
   {
     // 3rd client audit, point 6: "la location de matériel de déneigement

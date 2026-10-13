@@ -214,3 +214,17 @@ describe('lot / description matching for trade words (30 Sep comparatif)', () =>
     expect(canMatchInsideTitle('26')).toBe(false);
   });
 });
+
+describe('électricité rule excludes electric vehicles but keeps real electrical work (1 Oct client report)', () => {
+  const rule = domainMismatchExclusion('électricité')!;
+  it.each([
+    'fourniture d’un camion electrique pour les services techniques',
+    'acquisition de 3 vehicules electriques',
+    'achat d’un velo electrique',
+  ])('excludes %s', (t) => expect(rule.test(t.replace('’', "'"))).toBe(true));
+  it.each([
+    'installation electrique du gymnase',
+    'fourniture de vehicules electriques et de bornes de recharge',
+    'travaux d’electricite courants forts',
+  ])('keeps %s', (t) => expect(rule.test(t.replace('’', "'"))).toBe(false));
+});
