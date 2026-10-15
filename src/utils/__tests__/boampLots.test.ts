@@ -56,3 +56,30 @@ describe('lotsFromDescription', () => {
     expect(lotsFromDescription(null)).toEqual([]);
   });
 });
+
+import { isJunkLot, scrubLotsInDescription } from '../boampLots';
+describe('junk lots (15 Oct client report, Saint-Cyr-en-Val)', () => {
+  it('flags code-list tokens, appeal boilerplate and cross-references', () => {
+    expect(isJunkLot('non-restricted-document')).toBe(true);
+    expect(isJunkLot("Cf. le greffe du Tribunal Administratif à l'adresse ci-dessus")).toBe(true);
+    expect(isJunkLot('Lot 4 : Electricité CFO-CFA')).toBe(false);
+    expect(isJunkLot('Plomberie, sanitaire, Chauffage et Climatisation (hors maintenance)')).toBe(false);
+  });
+  it('does not take organisation names / access rules found under lot-ish keys', () => {
+    const t = extractBoampLotsText({ 'cac:ProcurementProjectLot': [{
+      'cbc:ID': 'LOT-0001',
+      'cac:ProcurementProject': { 'cbc:Name': 'Peinture, vitrerie, revêtements muraux' },
+      'cac:TenderingTerms': { 'cbc:DocumentRestrictionCode': 'non-restricted-document' },
+      'cac:AppealTerms': { 'cac:AppealReceiverParty': { 'cbc:Name': 'Cf. le greffe du Tribunal Administratif' } },
+      'cac:ContractingParty': { 'cbc:Name': 'AW Solutions' },
+    }] });
+    expect(t).toBe('Peinture, vitrerie, revêtements muraux');
+  });
+  it('scrubs junk from an already stored Lots tail, idempotently', () => {
+    const stored = 'Travaux d\'entretien\n\nLots : non-restricted-document ; Cf. le greffe du Tribunal Administratif ; Peinture, vitrerie';
+    const once = scrubLotsInDescription(stored);
+    expect(once).toBe('Travaux d\'entretien\n\nLots : Peinture, vitrerie');
+    expect(scrubLotsInDescription(once)).toBe(once);
+    expect(scrubLotsInDescription('Travaux\n\nLots : non-restricted-document')).toBe('Travaux');
+  });
+});
