@@ -526,6 +526,17 @@ const startServer = async () => {
     // migrations just needs to be "eventually after", not exact-order.
     // Set SKIP_EDITORIAL_SEED=true to turn this off later once a real
     // private-listings feed replaces it.
+    // 16 Oct: diversified demo listings (scripts/seedDiverseListings.js). No shell on
+    // Render free, so it runs at boot ONLY when SEED_DIVERSE_LISTINGS=true (idempotent).
+    // DIVERSE_TARGET = rows per journey (default 18000). Remove the env var afterwards.
+    if (process.env.SEED_DIVERSE_LISTINGS === 'true') {
+      const diversePath = require('path').resolve(process.cwd(), 'scripts', 'seedDiverseListings.js');
+      queueBootScript(diversePath, (err: any, stdout: string, stderr: string) => {
+        if (stdout) logger.info(`[diverse seed] ${stdout.trim()}`);
+        if (err) logger.error('[diverse seed] failed (non-fatal):', stderr || err.message);
+      });
+    }
+
     if (process.env.SKIP_EDITORIAL_SEED !== 'true') {
       const editorialSeedPath = require('path').resolve(process.cwd(), 'scripts', 'seedEditorialListings.js');
       queueBootScript(editorialSeedPath, (err: any, stdout: string, stderr: string) => {

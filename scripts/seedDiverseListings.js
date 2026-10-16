@@ -22,7 +22,7 @@ const { CITIES } = require("./seedEditorialListings");
 
 const args = Object.fromEntries(process.argv.slice(2).map((a) => { const [k, v] = a.replace(/^--/, "").split("="); return [k, v ?? true]; }));
 const DRY = Boolean(args["dry-run"]);
-const TARGET = parseInt(args.target || "18000", 10);
+const TARGET = parseInt(args.target || process.env.DIVERSE_TARGET || "18000", 10);
 const pool = new Pool(process.env.DATABASE_URL
   ? { connectionString: process.env.DATABASE_URL, ssl: process.env.DB_SSL === "false" ? false : { rejectUnauthorized: false } }
   : { user: process.env.DB_USER, password: process.env.DB_PASSWORD, host: process.env.DB_HOST, port: parseInt(process.env.DB_PORT || "5432", 10), database: process.env.DB_NAME, ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false });
