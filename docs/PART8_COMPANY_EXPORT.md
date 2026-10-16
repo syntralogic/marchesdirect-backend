@@ -3,7 +3,7 @@
 Both files are generated from one column definition (`EXPORT_COLUMNS` in `src/services/prospectExport.ts`), so the table, the CSV and the Excel file cannot disagree.
 
 ## What is in the files
-- 48 columns: identifiers (SIRET, SIREN), identity and legal data, NAF activity and métier, address and GPS, phone, e-mail, website, Facebook / Instagram / LinkedIn, directors, headcount range, revenue and net result, certifications, history, Google profile link, rating, total reviews, positive reviews (count / %), match confidence, Place ID, per-field sources and per-field status of empty cells.
+- 45 columns: identifiers (SIRET, SIREN), identity and legal data, NAF activity and métier, address and GPS, phone, e-mail, website, Facebook / Instagram / LinkedIn, directors, headcount range, revenue and net result, certifications, history, Google profile link, rating, total reviews, positive reviews (count / %), match confidence, Place ID, per-field sources and per-field status of empty cells.
 - Excel also has a **Légende** sheet: export date, row count, applied filters, description and source of every column, and the fields that need another provider.
 
 ## Format rules
