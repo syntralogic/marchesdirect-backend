@@ -103,11 +103,53 @@ export const mergeExactDuplicates = async (): Promise<number> => {
   }
 };
 
+/**
+ * Part 5: near-identical private tender / sous-traitance rows. mergeExactDuplicates
+ * can never group these: private rows have no buyer_name and no deadline, so its
+ * fallback key (source + acheteur_id-or-own-id) is unique per row. The same
+ * article re-published under a second guid/URL therefore stayed as two cards.
+ *
+ * Groups ONLY on identical normalized title + identical normalized description +
+ * same city + same source. Distinct tenders that merely share a title differ in
+ * description/city and are never merged. The templated editorial_catalog rows
+ * (is_demo) are excluded on purpose - they are deliberately generated per city.
+ */
+export const mergeExactPrivateDuplicates = async (): Promise<number> => {
+  try {
+    const groups = await db.query(`
+      SELECT array_agg(o.id ORDER BY o.created_at ASC, o.id ASC) AS ids
+      FROM opportunities o
+      JOIN opportunity_types ot ON ot.id = o.opportunity_type_id AND ot.code IN ('tender', 'subcontracting')
+      JOIN data_sources ds ON ds.id = o.source_id AND ds.code <> 'editorial_catalog'
+      WHERE o.deleted_at IS NULL AND COALESCE(o.status, '') NOT IN ('merged')
+        AND length(trim(COALESCE(o.description, ''))) > 0
+      GROUP BY o.source_id,
+        regexp_replace(lower(unaccent(trim(o.title))), '\\s+', ' ', 'g'),
+        md5(regexp_replace(lower(unaccent(trim(o.description))), '\\s+', ' ', 'g')),
+        lower(unaccent(trim(COALESCE(o.location_city, ''))))
+      HAVING COUNT(*) > 1
+      LIMIT 500
+    `);
+    let mergedCount = 0;
+    for (const row of groups.rows) {
+      const [primaryId, ...duplicateIds] = row.ids as string[];
+      for (const dupId of duplicateIds) {
+        if (await mergeDuplicates(primaryId, dupId, 1.0, { exact_match: true, private_notice: true })) mergedCount++;
+      }
+    }
+    if (mergedCount > 0) logger.info(`Merged ${mergedCount} identical private/sous-traitance rows (${groups.rows.length} groups)`);
+    return mergedCount;
+  } catch (err) {
+    logger.error('Private exact-duplicate merge error:', err);
+    return 0;
+  }
+};
+
 export const deduplicateOpportunities = async (): Promise<number> => {
   // Exact-duplicate pass first (cheap, no scoring needed) - see
   // mergeExactDuplicates' own comment for why this is a separate pass from
   // the fuzzy one below.
-  const exactMerged = await mergeExactDuplicates();
+  const exactMerged = (await mergeExactDuplicates()) + (await mergeExactPrivateDuplicates());
   try {
     // Cast a wider net at the SQL level than the old fixed thresholds (title
     // similarity > 0.75, deadline within 24h) - the buyer_name/montant

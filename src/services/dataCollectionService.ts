@@ -13,6 +13,7 @@ import { regionForDepartmentCode, normalizeDepartmentCode, normalizeRegionName, 
 import { buildOfficialUrl } from '../utils/officialUrl';
 import { closedRoomLeft, pruneClosedOpportunities } from './opportunityRetention';
 import { decodeHtmlEntities, truncateForColumn } from '../utils/textSanitize';
+import { classifyPrivateNotice, cleanNoticeText } from '../utils/privateNoticeFilter';
 
 // v2.1 caps each request at 100 records - a real collection run needs to
 // page through `offset` to get anywhere near the "several thousand, even
@@ -832,9 +833,30 @@ export const collectBatiwebData = async (sourceId: number) => {
     await assertDbHasRoom();
     logger.info('[Batiweb] Starting collection');
 
-    const feedUrl = process.env.BATIWEB_FEED_URL || 'https://www.batiweb.com/rss/actualites.xml';
-    const feed = await parser.parseURL(feedUrl);
-    logger.info(`[Batiweb] Fetched ${feed.items?.length || 0} items`);
+    // Part 5: more verified private-tender / sous-traitance volume can only come
+    // from more real feeds - BATIWEB_FEED_URLS takes a comma-separated list
+    // (BATIWEB_FEED_URL stays supported). Nothing is invented: a feed that fails
+    // is logged and skipped, the others still run, and an item present in
+    // several feeds is processed once (same guid/link).
+    const feedUrls = (process.env.BATIWEB_FEED_URLS || process.env.BATIWEB_FEED_URL || 'https://www.batiweb.com/rss/actualites.xml')
+      .split(',').map((u) => u.trim()).filter(Boolean);
+    const seenRefs = new Set<string>();
+    const items: any[] = [];
+    for (const feedUrl of feedUrls) {
+      try {
+        const f = await parser.parseURL(feedUrl);
+        for (const it of f.items || []) {
+          const r = it.guid || it.link;
+          if (!r || seenRefs.has(r)) continue;
+          seenRefs.add(r);
+          items.push(it);
+        }
+      } catch (err) {
+        logger.error(`[Batiweb] Feed ${feedUrl} failed, continuing with the others:`, err);
+      }
+    }
+    const feed = { items };
+    logger.info(`[Batiweb] Fetched ${items.length} unique items from ${feedUrls.length} feed(s)`);
 
     let inserted = 0;
     let updated = 0;
@@ -843,13 +865,15 @@ export const collectBatiwebData = async (sourceId: number) => {
 
     for (const item of feed.items || []) {
       try {
-        const text = `${item.title || ''} ${item.contentSnippet || item.content || ''}`.toLowerCase();
+        const bodyText = cleanNoticeText(item.contentSnippet || item.content);
         // Batiweb's general news feed mixes product launches, opinion pieces,
         // etc. with actual marché/appel d'offres announcements - only the
         // latter are opportunities. Keyword-filter rather than ingesting
         // everything as a fake "opportunity".
-        const looksLikeTender = /marché|appel d.offres|consultation|avis de|attribu/i.test(text);
-        if (!looksLikeTender) { skippedNonTender++; continue; }
+        // Part 5: the old /marché|attribu.../ test let market commentary and
+        // contract-award news through and filed everything as 'tender'.
+        const noticeKind = classifyPrivateNotice(decodeHtmlEntities(item.title) || '', bodyText);
+        if (noticeKind === 'skip') { skippedNonTender++; continue; }
 
         const ref = item.guid || item.link;
         const existing = await db.query(
@@ -860,7 +884,7 @@ export const collectBatiwebData = async (sourceId: number) => {
         const opportunity = {
           source_reference: ref,
           title: decodeHtmlEntities(item.title) || '',
-          description: decodeHtmlEntities(item.contentSnippet || item.content) || '',
+          description: decodeHtmlEntities(bodyText) || '',
           publication_date: item.isoDate ? new Date(item.isoDate) : new Date(),
           deadline: null,
           // A news article almost never states a structured buyer/amount -
@@ -873,7 +897,8 @@ export const collectBatiwebData = async (sourceId: number) => {
           // field is what actually makes that distinction now that
           // insertOpportunity reads it instead of hardcoding
           // public_procurement for every source.
-          opportunity_type: 'tender',
+          // sous-traitance wording routes to the Sous-traitance journey
+          opportunity_type: noticeKind,
           raw: item,
         };
 
