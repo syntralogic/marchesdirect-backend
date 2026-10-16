@@ -24,7 +24,7 @@
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { trackJob } from '../utils/jobTracker';
-import { extractBoampLotsText, withLotsText } from '../utils/boampLots';
+import { extractBoampLotsText, withLotsText, scrubLotsInDescription } from '../utils/boampLots';
 import {
   extractDepartmentCode,
   extractDepartmentCodeFromFreeText,
@@ -33,7 +33,7 @@ import {
 } from '../utils/departmentRegion';
 
 const BUYER_KEY = 'repair_buyer_name_locations_v1';
-const LOTS_KEY = 'backfill_boamp_lots_v1';
+const LOTS_KEY = 'backfill_boamp_lots_v2';
 const LOTS_BATCH = 300;
 const NIL_UUID = '00000000-0000-0000-0000-000000000000';
 
@@ -119,9 +119,12 @@ export async function backfillBoampLotsBatch(): Promise<{ updated: number; done:
     const raw = r.raw_data && typeof r.raw_data === 'string' ? safeParse(r.raw_data) : r.raw_data;
     const fields = raw?.fields ?? raw;
     const lots = extractBoampLotsText(fields?.donnees);
-    if (!lots) continue;
     const current: string = r.description || '';
-    const next = withLotsText(current, lots);
+    // v2 (15 Oct client report): rows enriched by v1 may hold junk "lots"
+    // (code-list tokens, appeal-body text, organisation names) - scrub them,
+    // then re-add only the clean lots.
+    const scrubbed = scrubLotsInDescription(current);
+    const next = lots ? withLotsText(scrubbed, lots) : scrubbed;
     if (next === current) continue; // already holds the lots - nothing to do
     await db.query('UPDATE opportunities SET description = $2, updated_at = NOW() WHERE id = $1', [r.id, next]);
     updated++;
