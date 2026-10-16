@@ -19,7 +19,7 @@ Every enrichable field has a status in `field_meta`: `confirmed` (+source, date)
 
 ## Google cost guard (no cost without approval)
 Calls happen only if **all three** are set on the backend: `GOOGLE_PLACES_API_KEY`, `GOOGLE_PLACES_ENABLED=true`, `GOOGLE_PLACES_DAILY_CAP=<n>` (default 0).
-The daily cap is enforced atomically in the database. 401/403/429 (invalid key, API not enabled, billing, quota) stop the run immediately.
+The daily cap is enforced atomically in the database, for every Google call in the backend (including the SIRET lookup) and for each retry. 401/403/429 (invalid key, API not enabled, billing, quota) stop the run immediately. See `PART7_GOOGLE_API_INTEGRATION.md`.
 Rating/phone/website fields bill the Enterprise Text Search SKU: check the price and free allowance in the Google Cloud console and set a budget alert and API quota there too.
 Match rule: 0.6 x name similarity + 0.4 x location (distance <= 100 m = 1, >= 500 m = 0, or postal code in address); stored only if confidence >= 0.8.
 Google's terms limit long-term storage of Places content other than place_id: confirm the client's licence; values carry `google_fetched_at` and are meant to be refreshed.

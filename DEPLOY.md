@@ -70,11 +70,18 @@ Vercel.
 - **Stripe webhook 400s**: `STRIPE_WEBHOOK_SECRET` must match the endpoint
   you register in the Stripe dashboard, not the one from local `stripe listen`.
 
-## Facebook page + Google reviews (company info)
+## Facebook page + Google reviews (company info) and the prospect database
 
-Set `GOOGLE_PLACES_API_KEY` (Google Cloud > enable "Places API (New)" > API key) on the backend.
-Without it the Facebook / Google reviews fields simply stay empty (nothing is invented).
-- Google rating + review count come from Places, matched on the company's postal code.
+Google Places is billed, so **three** backend settings are required before any request is sent
+(full guide, Cloud checklist and error codes: `docs/PART7_GOOGLE_API_INTEGRATION.md`):
+
+- `GOOGLE_PLACES_API_KEY` - key for "Places API (New)" (enable the API, link billing, restrict the key to that API and the server IP)
+- `GOOGLE_PLACES_ENABLED=true` - explicit approval of the cost
+- `GOOGLE_PLACES_DAILY_CAP=<n>` - maximum requests per day for the whole backend (default 0 = none)
+
+Without them the Google fields stay empty (nothing is invented, nothing is billed). After setting them, open
+`/admin/entreprises` and click **Tester la connexion Google** once.
+- Google rating + review count come from Places, matched on the company's postal code / name.
 - The Facebook page is the facebook.com link published on the company's own website.
-- Results are stored in `company_lookup_cache` and refreshed every 30 days; companies already
+- SIRET-lookup results are stored in `company_lookup_cache` and refreshed every 30 days; companies already
   cached are filled in on their next lookup (no extra Pappers call).

@@ -387,7 +387,8 @@ async function withPresence(company: CompanyData): Promise<CompanyData> {
       facebook: p.facebook ?? company.facebook ?? null,
       googleRating: p.googleRating ?? company.googleRating ?? null,
       googleReviewCount: p.googleReviewCount ?? company.googleReviewCount ?? null,
-      presenceCheckedAt: new Date().toISOString(),
+      // Only stamp when Google really answered: a skipped/refused/failed lookup is retried next time.
+      presenceCheckedAt: p.googleChecked ? new Date().toISOString() : company.presenceCheckedAt ?? null,
     };
   } catch (err: any) {
     logger.error('Presence enrichment failed:', err.message);

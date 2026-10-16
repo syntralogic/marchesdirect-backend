@@ -82,6 +82,14 @@ export const PROSPECT_DDL: string[] = [
      calls      INTEGER NOT NULL DEFAULT 0,
      PRIMARY KEY (provider, day)
    )`,
+  `CREATE TABLE IF NOT EXISTS prospect_api_health (
+     provider           TEXT PRIMARY KEY,
+     last_ok_at         TIMESTAMPTZ,
+     last_error_at      TIMESTAMPTZ,
+     last_error_code    TEXT,
+     last_error_message TEXT,
+     last_error_hint    TEXT
+   )`,
   `CREATE TABLE IF NOT EXISTS prospect_import_runs (
      id          BIGSERIAL PRIMARY KEY,
      kind        TEXT NOT NULL,

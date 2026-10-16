@@ -3,7 +3,7 @@ import { logger } from '../utils/logger';
 import { PROSPECT_DDL } from './prospectSchema';
 import { fetchSirenePage, ProspectRecord, FieldMetaEntry, SireneError } from './sireneClient';
 import {
-  googleStatus, reserveGoogleCall, searchPlaces, pickBest, MIN_CONFIDENCE, GoogleAuthOrQuotaError,
+  googleStatus, searchPlaces, pickBest, MIN_CONFIDENCE, GoogleAuthOrQuotaError, GoogleCapReachedError, GoogleRequestError, redactSecrets,
 } from './googlePlacesService';
 import { fetchWebsiteFindings, normalizeFrPhone } from './websiteEnrichmentService';
 import { nafCodesForProfession, isKnownProfession, normalizeNaf } from '../utils/prospectNaf';
@@ -216,19 +216,25 @@ export async function runGoogleEnrichment(f: EnrichFilters): Promise<void> {
   const { where, params } = buildWhere({ ...f, status: 'active' });
   params.push(refresh);
   const due = `(google_fetched_at IS NULL OR google_fetched_at < NOW() - ($${params.length} || ' days')::interval)`;
-  const sql = `SELECT * FROM prospect_companies ${where ? where + ' AND ' : 'WHERE '}${due} ORDER BY google_fetched_at NULLS FIRST, id LIMIT ${limit}`;
+  // A record whose last Google attempt FAILED is not retried before GOOGLE_ERROR_RETRY_HOURS (default 24):
+  // otherwise the same failing rows sit at the head of the queue and re-spend the daily cap on every run.
+  params.push(Math.max(1, parseInt(process.env.GOOGLE_ERROR_RETRY_HOURS || '24', 10) || 24));
+  const notRecentlyFailed = `NOT COALESCE(field_meta->'google_profile'->>'status' = 'error' AND (field_meta->'google_profile'->>'at')::timestamptz > NOW() - ($${params.length} || ' hours')::interval, FALSE)`;
+  const sql = `SELECT * FROM prospect_companies ${where ? where + ' AND ' : 'WHERE '}${due} AND ${notRecentlyFailed} ORDER BY google_fetched_at NULLS FIRST, id LIMIT ${limit}`;
   const rows = (await db.query(sql, params)).rows;
 
   Object.assign(enrichState, { kind: 'google', running: true, message: 'démarrage', rowsRead: 0, added: 0, updated: 0, startedAt: nowIso() });
+  const MAX_CONSECUTIVE_ERRORS = 5;   // systematic failure (outage, bad request): stop instead of burning the cap
+  let consecutiveErrors = 0;
   try {
     for (const row of rows) {
-      if (!(await reserveGoogleCall(st.dailyCap))) { enrichState.message = `plafond quotidien atteint (${st.dailyCap})`; break; }
       enrichState.rowsRead++;
       try {
         const places = await searchPlaces({
           company_name: row.company_name, trading_name: row.trading_name, postal_code: row.postal_code,
           latitude: row.latitude, longitude: row.longitude, city: row.city,
         });
+        consecutiveErrors = 0;
         const best = pickBest({ company_name: row.company_name, trading_name: row.trading_name, postal_code: row.postal_code, latitude: row.latitude, longitude: row.longitude }, places);
         const at = nowIso();
         const noPositive: FieldMetaEntry = { status: 'unavailable', source: 'google_places', at, note: 'l\u2019API Places ne fournit ni la répartition des étoiles ni le détail de tous les avis: nécessite un fournisseur de données d\u2019avis sous licence' };
@@ -265,13 +271,16 @@ export async function runGoogleEnrichment(f: EnrichFilters): Promise<void> {
         await mergeMeta(row.id, meta);
         enrichState.updated++;
       } catch (err: any) {
+        if (err instanceof GoogleCapReachedError) { enrichState.rowsRead--; enrichState.message = err.message; break; }
         if (err instanceof GoogleAuthOrQuotaError) throw err;
-        await mergeMeta(row.id, { google_profile: { status: 'error', source: 'google_places', at: nowIso(), note: String(err?.message || err).slice(0, 200) } });
+        const code = err instanceof GoogleRequestError ? err.code : 'UNKNOWN';
+        await mergeMeta(row.id, { google_profile: { status: 'error', source: 'google_places', at: nowIso(), note: `${code}: ${redactSecrets(err?.message || err)}`.slice(0, 200) } });
+        if (++consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) { enrichState.message = `arrêté: ${MAX_CONSECUTIVE_ERRORS} erreurs Google consécutives (dernière: ${code})`; break; }
       }
     }
     if (enrichState.message === 'démarrage') enrichState.message = 'terminé';
   } catch (err: any) {
-    enrichState.message = `arrêté: ${err?.message}`;
+    enrichState.message = `arrêté: ${redactSecrets(err?.message)}${err instanceof GoogleAuthOrQuotaError && err.hint ? ` — ${err.hint}` : ''}`;
     logger.error('Google enrichment stopped', err);
   } finally {
     enrichState.running = false;

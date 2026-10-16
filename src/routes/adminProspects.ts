@@ -5,7 +5,8 @@ import {
   searchProspects, prospectStats, ProspectFilters, runImport, getImportState, runGoogleEnrichment,
   runWebsiteEnrichment, getEnrichState, EnrichFilters,
 } from '../services/prospectService';
-import { googleStatus } from '../services/googlePlacesService';
+import { googleStatus, probeGoogle } from '../services/googlePlacesService';
+import { providerReport } from '../services/prospectProviders';
 import { streamCsv, streamXlsx, countRows, XLSX_MAX_ROWS, EXPORT_COLUMNS, describeStatus } from '../services/prospectExport';
 import { PROFESSIONS } from '../utils/prospectNaf';
 import { DEPARTMENT_TO_REGION } from '../utils/departmentRegion';
@@ -113,6 +114,20 @@ const enrichFilters = (b: any): EnrichFilters => ({
 });
 
 router.get('/google/status', async (_req: AuthRequest, res: Response) => res.json(await googleStatus()));
+
+// Which requested field comes from which source, its cost, and whether it is wired in (Part 7).
+router.get('/providers', async (_req: AuthRequest, res: Response) => res.json({ providers: providerReport(), google: await googleStatus() }));
+
+// Explicit admin action: ONE real, billed Google request that proves key + API + billing + fields.
+// Refused unless the cost guard (key + approval + cap) is already satisfied.
+router.post('/google/test', async (_req: AuthRequest, res: Response) => {
+  try {
+    const st = await googleStatus();
+    if (st.state !== 'ready') return res.status(409).json({ ok: false, message: st.message, google: st });
+    const result = await probeGoogle();
+    res.status(result.ok ? 200 : 502).json({ ...result, google: await googleStatus() });
+  } catch (err) { logger.error('google test error', err); res.status(500).json({ ok: false, message: 'Test impossible' }); }
+});
 
 router.post('/enrich/google', async (req: AuthRequest, res: Response) => {
   const st = await googleStatus();

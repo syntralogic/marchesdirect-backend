@@ -1,6 +1,7 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { logger } from '../utils/logger';
+import { googlePlacesSearch, googleReadiness, GoogleCapReachedError, GoogleAuthOrQuotaError, redactSecrets } from './googlePlacesService';
 
 // Client item 4 (Facebook page + Google reviews in the company info).
 // Pappers/INSEE have neither, so they are looked up separately:
@@ -10,14 +11,19 @@ import { logger } from '../utils/logger';
 //  - Facebook page: the facebook.com link found on the company's own website
 //    (a link the company itself published), with Places' website as a second
 //    source. Nothing is guessed from the name.
-// Anything not found stays null - never fabricated. Needs
-// GOOGLE_PLACES_API_KEY; without it this is a no-op.
+// Anything not found stays null - never fabricated.
+// Part 7: the Google call goes through the shared guarded client, so it needs the same
+// three backend settings as the prospect enrichment (GOOGLE_PLACES_API_KEY,
+// GOOGLE_PLACES_ENABLED=true, GOOGLE_PLACES_DAILY_CAP>0) and counts against the same
+// daily cap. Without them this is a no-op and nothing is billed.
 
 export interface CompanyPresence {
   facebook: string | null; // full https URL of the page
   googleRating: string | null;
   googleReviewCount: number | null;
   website: string | null;
+  /** true only when Google answered (match or no match). false = not asked / refused / failed: do not stamp as checked. */
+  googleChecked: boolean;
 }
 
 interface PresenceInput {
@@ -28,13 +34,12 @@ interface PresenceInput {
   website: string | null;
 }
 
-const PLACES_URL = 'https://places.googleapis.com/v1/places:searchText';
 const FB_HOST = /^(?:[a-z0-9-]+\.)?(?:facebook|fb)\.com$/i;
 // Share/plugin/login URLs are not the company's own page.
 const FB_NOT_A_PAGE = /^\/(?:sharer|share|plugins|dialog|login|tr|policy|help|privacy|groups|events|hashtag|watch|marketplace|reel|photo|story\.php|permalink\.php)(?:[/.?]|$)/i;
 
 export function isPresenceConfigured(): boolean {
-  return Boolean(process.env.GOOGLE_PLACES_API_KEY);
+  return googleReadiness().ready;
 }
 
 export function normalizeFacebookUrl(raw: string | null | undefined): string | null {
@@ -88,24 +93,17 @@ async function findFacebookOnWebsite(websiteUrl: string): Promise<string | null>
   return null;
 }
 
-async function findGooglePlace(input: PresenceInput): Promise<{ rating: number | null; count: number | null; website: string | null } | null> {
-  const key = process.env.GOOGLE_PLACES_API_KEY;
-  if (!key || !input.name) return null;
+type PlaceLookup = { checked: false } | { checked: true; hit: { rating: number | null; count: number | null; website: string | null } | null };
+
+async function findGooglePlace(input: PresenceInput): Promise<PlaceLookup> {
+  if (!input.name) return { checked: false };
   const textQuery = [input.name, input.address, input.postal, input.city].filter(Boolean).join(' ');
   try {
-    const { data } = await axios.post(
-      PLACES_URL,
-      { textQuery, languageCode: 'fr', regionCode: 'FR', maxResultCount: 5 },
-      {
-        timeout: 6000,
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Goog-Api-Key': key,
-          'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.websiteUri',
-        },
-      }
-    );
-    const places: any[] = Array.isArray(data?.places) ? data.places : [];
+    const places: any[] = await googlePlacesSearch({
+      body: { textQuery, languageCode: 'fr', regionCode: 'FR', maxResultCount: 5 },
+      fieldMask: 'places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.websiteUri',
+      timeoutMs: 6000,
+    });
     const postal = (input.postal || '').trim();
     const nameTokens = input.name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/).filter(t => t.length > 2);
     const match = places.find(p => {
@@ -115,23 +113,31 @@ async function findGooglePlace(input: PresenceInput): Promise<{ rating: number |
       const shown = String(p.displayName?.text || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
       return nameTokens.length === 0 || nameTokens.some(t => shown.includes(t));
     });
-    if (!match) return null;
+    if (!match) return { checked: true, hit: null };
     return {
-      rating: typeof match.rating === 'number' ? match.rating : null,
-      count: typeof match.userRatingCount === 'number' ? match.userRatingCount : null,
-      website: normalizeWebsite(match.websiteUri),
+      checked: true,
+      hit: {
+        rating: typeof match.rating === 'number' ? match.rating : null,
+        count: typeof match.userRatingCount === 'number' ? match.userRatingCount : null,
+        website: normalizeWebsite(match.websiteUri),
+      },
     };
   } catch (err: any) {
-    logger.error('Presence: Google Places lookup failed:', err.response?.data?.error?.message || err.message);
-    return null;
+    // Not approved / cap reached / key problem / transient failure: nothing is invented and the
+    // company is NOT marked as checked, so it is retried on a later lookup.
+    if (err instanceof GoogleCapReachedError || err instanceof GoogleAuthOrQuotaError) logger.info(`Presence: Google skipped (${redactSecrets(err.message)})`);
+    else logger.error('Presence: Google Places lookup failed:', redactSecrets(err?.message));
+    return { checked: false };
   }
 }
 
 export async function lookupCompanyPresence(input: PresenceInput): Promise<CompanyPresence> {
-  const out: CompanyPresence = { facebook: null, googleRating: null, googleReviewCount: null, website: null };
+  const out: CompanyPresence = { facebook: null, googleRating: null, googleReviewCount: null, website: null, googleChecked: false };
   if (!isPresenceConfigured()) return out;
 
-  const place = await findGooglePlace(input);
+  const lookup = await findGooglePlace(input);
+  out.googleChecked = lookup.checked;
+  const place = lookup.checked ? lookup.hit : null;
   if (place) {
     if (place.rating != null && place.count) {
       out.googleRating = place.rating.toFixed(1);

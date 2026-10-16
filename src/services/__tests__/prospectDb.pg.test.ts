@@ -83,7 +83,7 @@ d('prospect database (real PostgreSQL)', () => {
 
   describe('Google Business Profile enrichment', () => {
     const OLD = { ...process.env };
-    afterEach(() => { process.env = { ...OLD }; jest.clearAllMocks(); });
+    afterEach(() => { process.env = { ...OLD }; jest.clearAllMocks(); g.resetGoogleCircuit(); });
 
     it('makes NO call without key + approval + cap (cost guard)', async () => {
       await svc.upsertProspects([rec('44444444400011')]);
