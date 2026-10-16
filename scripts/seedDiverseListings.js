@@ -11,12 +11,13 @@
  *   node scripts/seedDiverseListings.js --dry-run
  *   node scripts/seedDiverseListings.js                      # 18 000 per journey
  *   node scripts/seedDiverseListings.js --target=20000
- *   node scripts/seedDiverseListings.js --metiers=metiers.csv  # client's 600-métier list
+ *   node scripts/seedDiverseListings.js --metiers=metiers.csv  # custom list (default: data/metiers.csv, built from France Travail ROME)
  *   node scripts/seedDiverseListings.js --clean               # delete all demo- rows
  * CSV: one métier per line, "métier" or "métier;trade_slug" (slug optional, guessed otherwise).
  */
 require("dotenv").config();
 const fs = require("fs");
+const path = require("path");
 const { Pool } = require("pg");
 const { CITIES } = require("./seedEditorialListings");
 
@@ -129,19 +130,24 @@ function prestationsFor(name, slug) {
 // Accepts: plain list (métier[;slug]) or the France Travail ROME export (code_rome,metier,appellation).
 function loadMetiers() {
   const list = [];
-  if (args.metiers && args.metiers !== true) {
-    const lines = fs.readFileSync(args.metiers, "utf8").replace(/^\uFEFF/, "").split(/\r?\n/).filter(Boolean);
+  const defaultFile = path.resolve(__dirname, "..", "data", "metiers.csv");
+  const metiersFile = (args.metiers && args.metiers !== true) ? args.metiers : (process.env.METIERS_FILE || (fs.existsSync(defaultFile) ? defaultFile : null));
+  if (metiersFile) {
+    const lines = fs.readFileSync(metiersFile, "utf8").replace(/^\uFEFF/, "").split(/\r?\n/).filter(Boolean);
     const sep = lines[0].includes(";") ? ";" : lines[0].includes("\t") ? "\t" : ",";
     const head = parseCsvLine(lines[0], sep).map((h) => h.toLowerCase());
-    const iCode = head.indexOf("code_rome"), iApp = head.indexOf("appellation");
+    const iCode = head.indexOf("code_rome"), iApp = head.indexOf("appellation"), isRome = iCode >= 0 && iApp >= 0;
     const seen = new Set();
-    for (const line of lines.slice(iCode >= 0 ? 1 : 0)) {
+    for (const line of lines.slice(head.includes("metier") || isRome ? 1 : 0)) {
       const cols = parseCsvLine(line, sep);
       let name, slug = null;
-      if (iCode >= 0) { if (!ROME_KEEP.test(cols[iCode] || "")) continue; name = cols[iApp >= 0 ? iApp : 2]; }
+      if (isRome) { if (!ROME_KEEP.test(cols[iCode] || "")) continue; name = cols[iApp >= 0 ? iApp : 2]; }
       else { name = cols[0]; slug = cols[1] || null; if (/^m[ée]tier$/i.test(name)) continue; }
-      if (!name || /conducteur|chef |responsable|ing[ée]nieur|dessinat|technicien|[ée]conomiste|directeur|m[ée]treur|g[ée]om[èe]tre/i.test(name)) continue;
-      name = name.replace(/\s*\/\s*.*/, "").trim(); // "Plombier / Plombière" -> "Plombier"
+      if (!name) continue;
+      if (isRome) { // raw ROME export only: drop management/study roles, strip the feminine form ("Plombier / Plombière" -> "Plombier")
+        if (/responsable|directeur|ing[ée]nieur|dessinat|[ée]conomiste|m[ée]treur|g[ée]om[èe]tre|conducteur de travaux|chef de chantier|chef d'[ée]quipe/i.test(name)) continue;
+        name = name.replace(/\s*\/\s*[^\s,]+/g, "").replace(/\s+/g, " ").trim();
+      }
       const k = name.toLowerCase(); if (seen.has(k)) continue; seen.add(k);
       slug = slugFor(name, slug);
       list.push({ name, slug, prestations: prestationsFor(name, slug) });
