@@ -118,16 +118,33 @@ function hash(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^=
 function rng(seed) { let a = hash(seed); return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 const slugify = (s) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
+const ROME_KEEP = /^(F1[1-8]|I1203|A1203|K2303|I1307|I1308|H1[0-9]{3}$)/; // BTP + maintenance bâtiment + paysage + nettoyage
+function parseCsvLine(line, sep) { const out = []; let cur = "", q = false; for (const ch of line) { if (ch === '"') q = !q; else if (ch === sep && !q) { out.push(cur); cur = ""; } else cur += ch; } out.push(cur); return out.map((x) => x.trim()); }
+function slugFor(name, slug) { return slug || (SLUG_HINTS.find(([re]) => re.test(name)) || [0, "batiment-general"])[1]; }
+function prestationsFor(name, slug) {
+  for (const ms of Object.values(CATALOG)) if (ms[name]) return ms[name];
+  const pool = Object.values(CATALOG[slug] || {}).flat();
+  return [...pool, ...GENERIC.map((g) => `${g} (${name.toLowerCase()})`)];
+}
+// Accepts: plain list (métier[;slug]) or the France Travail ROME export (code_rome,metier,appellation).
 function loadMetiers() {
   const list = [];
   if (args.metiers && args.metiers !== true) {
-    for (const line of fs.readFileSync(args.metiers, "utf8").split(/\r?\n/)) {
-      const [name, slugRaw] = line.split(/[;\t]/).map((x) => x && x.trim());
-      if (!name || /^m[ée]tier$/i.test(name)) continue;
-      let slug = slugRaw; let prest = null;
-      for (const [s, ms] of Object.entries(CATALOG)) if (ms[name]) { slug = slug || s; prest = ms[name]; }
-      if (!slug) slug = (SLUG_HINTS.find(([re]) => re.test(name)) || [0, "batiment-general"])[1];
-      list.push({ name, slug, prestations: prest || GENERIC.map((g) => `${g} - ${name.toLowerCase()}`) });
+    const lines = fs.readFileSync(args.metiers, "utf8").replace(/^\uFEFF/, "").split(/\r?\n/).filter(Boolean);
+    const sep = lines[0].includes(";") ? ";" : lines[0].includes("\t") ? "\t" : ",";
+    const head = parseCsvLine(lines[0], sep).map((h) => h.toLowerCase());
+    const iCode = head.indexOf("code_rome"), iApp = head.indexOf("appellation");
+    const seen = new Set();
+    for (const line of lines.slice(iCode >= 0 ? 1 : 0)) {
+      const cols = parseCsvLine(line, sep);
+      let name, slug = null;
+      if (iCode >= 0) { if (!ROME_KEEP.test(cols[iCode] || "")) continue; name = cols[iApp >= 0 ? iApp : 2]; }
+      else { name = cols[0]; slug = cols[1] || null; if (/^m[ée]tier$/i.test(name)) continue; }
+      if (!name || /conducteur|chef |responsable|ing[ée]nieur|dessinat|technicien|[ée]conomiste|directeur|m[ée]treur|g[ée]om[èe]tre/i.test(name)) continue;
+      name = name.replace(/\s*\/\s*.*/, "").trim(); // "Plombier / Plombière" -> "Plombier"
+      const k = name.toLowerCase(); if (seen.has(k)) continue; seen.add(k);
+      slug = slugFor(name, slug);
+      list.push({ name, slug, prestations: prestationsFor(name, slug) });
     }
   } else {
     for (const [slug, ms] of Object.entries(CATALOG)) for (const [name, prestations] of Object.entries(ms)) list.push({ name, slug, prestations });
