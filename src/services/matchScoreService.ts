@@ -392,7 +392,7 @@ export const computeMatchScore = async (
     : score === null
       ? 'Pas encore assez d’informations pour calculer un pourcentage : confirmez les critères marqués « à confirmer ».'
       : toConfirm > 0
-        ? `${correspondenceNoteFor(score)} ${toConfirm} critère${toConfirm > 1 ? 's' : ''} à confirmer ${toConfirm > 1 ? 'ne sont' : 'n’est'} pas encore pris en compte.`
+        ? `${correspondenceNoteFor(score)} ${toConfirm} critère${toConfirm > 1 ? 's' : ''} à confirmer ${toConfirm > 1 ? 'comptent' : 'compte'} pour 0 point tant que ${toConfirm > 1 ? 'vous ne les avez' : 'vous ne l’avez'} pas confirmé${toConfirm > 1 ? 's' : ''} : l’indice peut augmenter après confirmation.`
         : correspondenceNoteFor(score);
   const matchLabel = score === null ? null : matchLabelFor(score);
 
