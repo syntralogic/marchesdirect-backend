@@ -17,6 +17,9 @@ const stripe = stripeKey ? new Stripe(stripeKey, { apiVersion: '2023-10-16' }) :
 // All admin routes require admin or super_admin role
 router.use(requireRole(['admin', 'super_admin']));
 
+// Part 6: French company / artisan prospecting database (list, filters, CSV/Excel export, enrichment)
+router.use('/prospects', require('./adminProspects').default);
+
 // ============================================================================
 // BRANDS (Milestone 10 - second brand duplication)
 // ============================================================================

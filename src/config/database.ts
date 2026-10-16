@@ -2,6 +2,7 @@ import { Pool, QueryResult, PoolClient } from 'pg';
 import dotenv from 'dotenv';
 import path from 'path';
 import { logger } from '../utils/logger';
+import { PROSPECT_DDL } from '../services/prospectSchema';
 
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
@@ -399,6 +400,9 @@ const buildUnresolvedRegionIndex = async (): Promise<void> => {
 };
 
 const applyIncrementalMigrations = async (): Promise<void> => {
+  // Part 6: prospect (French company / artisan) database - idempotent, own tables only.
+  for (const ddl of PROSPECT_DDL) await step(ddl);
+
   // Client audit (15 Sep counter-audit, R11): "renovation" (unaccented) found
   // the private listing "Renovation complete de 18 logements", but
   // "rénovation" (accented) returned zero on the exact same filters. Postgres's
