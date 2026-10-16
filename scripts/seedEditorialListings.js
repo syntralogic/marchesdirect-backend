@@ -800,7 +800,7 @@ async function run() {
   console.log("[seedEditorialListings] Curated national-spread batch, not a literal every-city catalog - see the header comment for how to extend it further.");
 }
 
-module.exports = { run };
+module.exports = { run, CITIES };
 
 // Only auto-run + exit the process when invoked directly (`node
 // scripts/seedEditorialListings.js`) - server.ts instead requires this
