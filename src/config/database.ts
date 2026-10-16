@@ -309,6 +309,62 @@ const buildUnlocatedCityIndex = async (): Promise<void> => {
 // the 29 Sep Render log as that job's own statement timing out ("canceling
 // statement due to statement timeout") every 3 minutes, each attempt holding
 // a pool connection for the full timeout window before giving it back.
+// Part 4 (16 Oct client report: searching by métier took 5-10s). The search
+// route filtered with unaccent(o.title) ILIKE / regexes over title+description /
+// unaccent(o.ai_matched_trades::text) ILIKE - none of which any existing index
+// could serve (the only trigram index was on the raw, accented title), so every
+// métier / region / city search sequentially scanned the table. These are
+// trigram GIN indexes on the exact immutable_unaccent(...) expressions the route
+// now uses (it switches from unaccent() to the byte-identical immutable
+// wrapper). Measured on a 150k-row copy: 4.9s -> 0.38s, same result set.
+// Built one at a time, CONCURRENTLY, on a dedicated connection with the
+// statement timeout lifted (the title+description one is large), so boot and
+// writes are never blocked; until each exists the route simply runs the same
+// predicate unindexed, exactly as before. An interrupted build leaves an
+// INVALID index that IF NOT EXISTS would skip forever, so those are dropped first.
+const SEARCH_TRIGRAM_INDEXES: Array<{ name: string; expr: string }> = [
+  { name: 'opportunities_title_unaccent_trgm', expr: 'immutable_unaccent(title)' },
+  { name: 'opportunities_matched_trades_trgm', expr: 'immutable_unaccent((ai_matched_trades)::text)' },
+  { name: 'opportunities_city_unaccent_trgm', expr: 'immutable_unaccent(location_city)' },
+  { name: 'opportunities_region_unaccent_trgm', expr: 'immutable_unaccent(location_region)' },
+  { name: 'opportunities_titledesc_unaccent_trgm', expr: "lower(immutable_unaccent(title || ' ' || COALESCE(description, '')))" },
+];
+let searchTrigramIndexesRunning = false;
+const buildSearchTrigramIndexes = async (): Promise<void> => {
+  if (searchTrigramIndexesRunning) return;
+  searchTrigramIndexesRunning = true;
+  let client: PoolClient | null = null;
+  try {
+    client = await pool.connect();
+    await client.query('SET statement_timeout = 0');
+    for (const { name, expr } of SEARCH_TRIGRAM_INDEXES) {
+      try {
+        const state = await client.query(
+          `SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = $1`,
+          [name]
+        );
+        if (state.rows[0]?.indisvalid) continue; // already built
+        if (state.rows.length > 0) await client.query(`DROP INDEX IF EXISTS ${name}`);
+        logger.info(`Building ${name} in background...`);
+        await client.query(
+          `CREATE INDEX CONCURRENTLY IF NOT EXISTS ${name} ON opportunities USING GIN (${expr} gin_trgm_ops)`
+        );
+        logger.info(`${name} ready`);
+      } catch (err) {
+        logger.error(`⚠️ ${name} build failed (will retry on next boot)`, err);
+      }
+    }
+  } catch (err) {
+    logger.error('⚠️ search trigram index build failed (will retry on next boot)', err);
+  } finally {
+    if (client) {
+      try { await client.query('RESET statement_timeout'); } catch { /* connection discarded below */ }
+      client.release();
+    }
+    searchTrigramIndexesRunning = false;
+  }
+};
+
 let unresolvedRegionIndexRunning = false;
 const buildUnresolvedRegionIndex = async (): Promise<void> => {
   if (unresolvedRegionIndexRunning) return;
@@ -459,6 +515,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // would have blocked startup + write traffic while running.
   void buildUnlocatedCityIndex();
   void buildUnresolvedRegionIndex();
+  void buildSearchTrigramIndexes();
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
 
   // BUG (found live on Render, 2026-09-03): documentExpiry.ts's daily sweep

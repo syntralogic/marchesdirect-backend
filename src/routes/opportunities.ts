@@ -471,6 +471,14 @@ async function searchOpportunities(req: Request, res: Response) {
     // Resolved once per request, right before it's needed - see the
     // "Failed to search opportunities" comment above the route.
     const searchVectorExpr = q ? ((await hasSearchVectorColumn()) ? 'o.search_vector' : INLINE_SEARCH_VECTOR_EXPR) : 'o.search_vector';
+    // 16 Oct client report (search by métier still 5-10s, Part 4): plain
+    // unaccent() is STABLE, so Postgres can never use an index on it and every
+    // métier/region/city search sequentially scanned the whole table. The
+    // immutable_unaccent() wrapper returns exactly the same text, but it
+    // matches the trigram expression indexes built in config/database.ts
+    // (buildSearchTrigramIndexes). It exists whenever search_vector does (the
+    // generated column depends on it), so the same check decides which to use.
+    const ua = (await hasSearchVectorColumn()) ? 'immutable_unaccent' : 'unaccent';
 
     // Single source of truth for "does this notice match this word" - used by the
     // free-text box AND by the métier (trade_id) filter below, so typing
@@ -495,7 +503,7 @@ async function searchOpportunities(req: Request, res: Response) {
         // unaccented typed pattern - ILIKE folds case, not accents.
         // unaccent() on the column side + pre-folded patterns on the
         // parameter side make the match accent-insensitive.
-        const tradeCond = `(unaccent(t.name) ILIKE ANY($${nameIdx}::text[]) OR unaccent(o.ai_matched_trades::text) ILIKE ANY($${matchedIdx}::text[]))`;
+        const tradeCond = `(unaccent(t.name) ILIKE ANY($${nameIdx}::text[]) OR ${ua}(o.ai_matched_trades::text) ILIKE ANY($${matchedIdx}::text[]))`;
 
         if (isTradeWord(w)) {
           const titleIdx = idx++;
@@ -508,9 +516,9 @@ async function searchOpportunities(req: Request, res: Response) {
           if (lotPattern) {
             const lotIdx = idx++;
             params.push(lotPattern);
-            lotCond = ` OR lower(unaccent(o.title || ' ' || COALESCE(o.description, ''))) ~ $${lotIdx}`;
+            lotCond = ` OR lower(${ua}(o.title || ' ' || COALESCE(o.description, ''))) ~ $${lotIdx}`;
           }
-          let cond = `(unaccent(o.title) ILIKE ANY($${titleIdx}::text[]) OR ${tradeCond}${lotCond})`;
+          let cond = `(${ua}(o.title) ILIKE ANY($${titleIdx}::text[]) OR ${tradeCond}${lotCond})`;
           // Client audit (27 Sep, point 3): "CVC"/"ventilation" matching a
           // biomedical-equipment market, "électricien" matching a
           // commodity energy-supply market - see domainMismatchExclusion
@@ -523,7 +531,7 @@ async function searchOpportunities(req: Request, res: Response) {
           if (mismatchPattern) {
             const mismatchIdx = idx++;
             params.push(mismatchPattern);
-            cond = `((${cond}) AND NOT (lower(unaccent(o.title || ' ' || COALESCE(o.description, ''))) ~ $${mismatchIdx}))`;
+            cond = `((${cond}) AND NOT (lower(${ua}(o.title || ' ' || COALESCE(o.description, ''))) ~ $${mismatchIdx}))`;
           }
           wordCondition = cond;
         } else {
@@ -540,7 +548,7 @@ async function searchOpportunities(req: Request, res: Response) {
           if (canMatchInsideTitle(w)) {
             const subIdx = idx++;
             params.push(patterns);
-            titleSub = ` OR unaccent(o.title) ILIKE ANY($${subIdx}::text[])`;
+            titleSub = ` OR ${ua}(o.title) ILIKE ANY($${subIdx}::text[])`;
           }
           wordCondition = `(${searchVectorExpr} @@ to_tsquery('french', unaccent($${wordTsIdx}))${titleSub})`;
         }
@@ -572,16 +580,16 @@ async function searchOpportunities(req: Request, res: Response) {
         const keywords = keywordsForSlugs(slugs);
 
         const baseCond = ids.length === 1
-          ? `(o.trade_id = $${idx} OR unaccent(o.ai_matched_trades::text) ILIKE unaccent('%' || (SELECT name FROM trades WHERE id = $${idx}) || '%'))`
-          : `(o.trade_id = ANY($${idx}::int[]) OR EXISTS (SELECT 1 FROM trades tr WHERE tr.id = ANY($${idx}::int[]) AND unaccent(o.ai_matched_trades::text) ILIKE unaccent('%' || tr.name || '%')))`;
+          ? `(o.trade_id = $${idx} OR ${ua}(o.ai_matched_trades::text) ILIKE ANY(ARRAY(SELECT unaccent('%' || name || '%') FROM trades WHERE id = $${idx})))`
+          : `(o.trade_id = ANY($${idx}::int[]) OR ${ua}(o.ai_matched_trades::text) ILIKE ANY(ARRAY(SELECT unaccent('%' || tr.name || '%') FROM trades tr WHERE tr.id = ANY($${idx}::int[]))))`;
         params.push(ids.length === 1 ? ids[0] : ids);
         idx++;
 
         let fullCond = baseCond;
         if (keywords.length > 0) {
           const kwIdx = idx++;
-          params.push(`\\y(${keywords.join('|')})\\y`);
-          let keywordCond = `unaccent(o.title || ' ' || COALESCE(o.description, '')) ~* $${kwIdx}`;
+          params.push(`\\y(${keywords.map((k) => k.toLowerCase()).join('|')})\\y`);
+          let keywordCond = `lower(${ua}(o.title || ' ' || COALESCE(o.description, ''))) ~ $${kwIdx}`;
           // AND-NOT any domain-mismatch exclusion any of these keywords
           // trigger (deduplicated - the same rule can fire for several
           // keywords of the same trade, e.g. "chauffage" and "ventilation"
@@ -834,7 +842,7 @@ async function searchOpportunities(req: Request, res: Response) {
         // (Dordogne + Bretagne) were AND-ed, so nothing could match both.
         // They are now collected here and OR-ed with the department
         // condition below ("résultats de Dordogne ou de Bretagne").
-        regionCond = `unaccent(o.location_region) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p))`;
+        regionCond = `${ua}(o.location_region) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p))`;
         params.push(regions.map(r => `%${r}%`));
       }
     }
@@ -881,7 +889,7 @@ async function searchOpportunities(req: Request, res: Response) {
         // for why): an un-geocoded row isn't "in" this city, so folding it
         // in only floods a specific-city search with unrelated nationwide
         // results the way the region/department filters did.
-        conditions.push(`unaccent(o.location_city) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p))`);
+        conditions.push(`${ua}(o.location_city) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p))`);
         params.push(cities.map(c => `%${c}%`));
       }
     }
