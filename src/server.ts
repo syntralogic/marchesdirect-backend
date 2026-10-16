@@ -15,7 +15,6 @@ import { drainActiveJobs } from './utils/jobTracker';
 import { authenticate, optionalAuth } from './middleware/auth';
 import { isVerificationRequired } from './services/phoneVerificationService';
 import { isSmsConfigured } from './services/smsService';
-import { warmOpportunityCounts } from './routes/opportunities';
 
 // Load environment variables
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });

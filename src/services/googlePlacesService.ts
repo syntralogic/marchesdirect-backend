@@ -49,7 +49,7 @@ export function redactSecrets(input: unknown): string {
   let t = String(input ?? '');
   const key = process.env.GOOGLE_PLACES_API_KEY;
   if (key && key.length >= 8) t = t.split(key).join('[clé masquée]');
-  return t.replace(/AIza[0-9A-Za-z_\-]{20,}/g, '[clé masquée]').replace(/key=[^&\s"']+/gi, 'key=[masquée]');
+  return t.replace(/AIza[0-9A-Za-z_-]{20,}/g, '[clé masquée]').replace(/key=[^&\s"']+/gi, 'key=[masquée]');
 }
 
 const HINTS: Record<GoogleErrorCode, string> = {

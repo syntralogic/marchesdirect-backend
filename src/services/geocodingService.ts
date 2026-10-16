@@ -145,7 +145,7 @@ export const geocodeCityDetailed = async (
     const matchedName: string | undefined = typeof feature?.properties?.city === 'string' ? feature.properties.city
       : typeof feature?.properties?.name === 'string' ? feature.properties.name : undefined;
     if (!cityNameMatches(cityTrimmed, matchedName)) {
-      logger.warn(`[geocoding] \"${q}\" matched a differently-named commune (\"${matchedName}\") - treating as unresolved`);
+      logger.warn(`[geocoding] "${q}" matched a differently-named commune ("${matchedName}") - treating as unresolved`);
       return { status: 'nomatch' };
     }
     return { status: 'ok', result: { lat, lng, department: departmentFromGeocodeProps(feature?.properties), score, ...(matchedName ? { matchedName } : {}) } };
