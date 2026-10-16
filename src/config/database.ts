@@ -433,8 +433,22 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // it in a SQL function that pins the dictionary by name, which Postgres
   // accepts as IMMUTABLE since the output is then deterministic for a
   // given input.
+  // On Supabase the extension lives in the "extensions" schema, which is NOT on the
+  // search_path of every session (index builds / inlining run in other sessions):
+  // an unqualified unaccent('unaccent', $1) then fails with
+  // "function unaccent(unknown, text) does not exist" (42883). So resolve the
+  // extension's real schema and qualify both the function and the dictionary.
+  let unaccentSchema = 'public';
+  try {
+    const ext = await pool.query(
+      `SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'unaccent'`
+    );
+    if (ext.rows[0]?.nspname && /^[a-z_][a-z0-9_]*$/i.test(ext.rows[0].nspname)) unaccentSchema = ext.rows[0].nspname;
+  } catch (err) {
+    logger.warn('Could not resolve unaccent extension schema, assuming public', err);
+  }
   await step(`CREATE OR REPLACE FUNCTION immutable_unaccent(text) RETURNS text AS $$
-    SELECT unaccent('unaccent', $1)
+    SELECT "${unaccentSchema}".unaccent('"${unaccentSchema}".unaccent'::regdictionary, $1)
   $$ LANGUAGE sql IMMUTABLE PARALLEL SAFE`);
 
   // Regenerate search_vector to match the exact accent-insensitive
