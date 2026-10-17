@@ -184,7 +184,7 @@ const WEIGHTS = { metier: 40, moyens: 15, experience: 15, zone: 10, disponibilit
 //  - "oui" on something unknown            -> declared_match (half the weight)
 //  - "oui" on something the data refutes   -> conflict to examine, the evidence stays
 //  - "oui" on something already verified   -> nothing to add
-//  - "non"                                 -> mismatch, unless it contradicts verified data (conflict)
+//  - "non"                                 -> mismatch (declared answer about this chantier always stands)
 const apply = (base: MatchCriterion, answer: RefineAnswer | undefined, texts: { oui: string; non: string }): MatchCriterion => {
   if (answer === 'oui') {
     if (base.status === 'mismatch') return { ...base, answered: true, conflict: true, detail: `${base.detail} Vous avez répondu « oui » : ce point est à examiner, il ne remplace pas ce que montrent les données.` };
@@ -192,7 +192,9 @@ const apply = (base: MatchCriterion, answer: RefineAnswer | undefined, texts: { 
     return { ...base, status: 'confirm', factor: 0.5, evidence: 'declared_match', answered: true, detail: texts.oui };
   }
   if (answer === 'non') {
-    if (base.status === 'match') return { ...base, answered: true, conflict: true, detail: `${base.detail} Vous avez répondu « non » : ce point est à examiner.` };
+    // Client audit (18 Oct): all four questions are about THIS chantier (experience, means, zone, calendar). General
+    // company data (chiffre d'affaires, a past reference, the postal address) must never override what the visitor
+    // says about their availability for it: a « non » always stands as the declared answer.
     return { ...base, status: 'mismatch', factor: 0, evidence: 'mismatch', answered: true, detail: texts.non };
   }
   return base;

@@ -18,7 +18,8 @@ const COMMON_TONE = `Ton enthousiaste, simple et commercial : phrases courtes, m
 Le texte doit donner envie d'avancer vers l'accompagnement et ne pas ressembler à un rapport administratif : l'artisan doit comprendre « J'ai des atouts, je peux envisager de répondre et quelqu'un peut m'aider à bien le faire ».
 Relie toujours l'encouragement à une aide concrète (une ou deux aides pertinentes, sans répéter tout le catalogue) : par exemple aider à choisir les réalisations à présenter, organiser les documents, préparer une réponse convaincante. Ne termine jamais par un simple « Contactez-nous ».
 Ne promets ni contrat, ni marge, ni réussite garantie ; n'annonce aucune probabilité de victoire.
-Varie les formulations d'une offre à l'autre sans jamais modifier les faits.`;
+Varie les formulations d'une offre à l'autre sans jamais modifier les faits.
+Le conseil interprète, il ne récite pas : montant, lieu, date limite, retenue de garantie et score sont déjà affichés juste au-dessus, ne les répète pas. Apporte ce que le visiteur n'a pas déjà lu : l'intérêt concret du marché, un angle pour préparer la candidature, la prochaine action. Respecte l'élision française (« en électricité », « de l'électricité »).`;
 
 export const OPPORTUNITY_PROMPT = `Tu rédiges le conseil d'accompagnement de Marchés Direct sur une fiche opportunité.
 
@@ -128,8 +129,7 @@ async function loadOpportunityFacts(opportunityId: string) {
     metier_et_prestations: o.trade_name || null,
     titre: o.title || null,
     lieu: o.location_city || null,
-    montant_estime_eur: o.estimated_value ? Math.round(Number(o.estimated_value)) : null,
-    calendrier_connu: !Number.isNaN(deadlineMs) && deadlineMs > Date.now() ? new Date(deadlineMs).toISOString().slice(0, 10) : null,
+    calendrier_connu: !Number.isNaN(deadlineMs) && deadlineMs > Date.now(),
     avantages_identifies: lots ? ['marché organisé en lots (lot séparé possible)'] : [],
     exigence_determinante: mandatory ? String(mandatory.label).slice(0, 140) : null,
   };
