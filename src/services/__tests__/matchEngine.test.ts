@@ -160,6 +160,17 @@ describe('evaluateMatch', () => {
     expect(yes.detail).toMatch(/examiner/);
   });
 
+  it('a « non » about means is never overridden by general company data (chiffre d\'affaires)', () => {
+    const c = company({ annualRevenue: 500000, revenueEstimated: false });
+    const m = market('Installation électrique', { estimatedValue: 42600 });
+    expect(crit(ev(c, m), 'moyens').status).toBe('match');
+    const no = crit(ev(c, m, { capacity: 'non' }), 'moyens');
+    expect(no.status).toBe('mismatch');
+    expect(no.factor).toBe(0);
+    expect(no.conflict).toBeFalsy();
+    expect(no.detail).not.toMatch(/correspond/i);
+  });
+
   it('a general contractor is a partial (declared-level) match for a building trade', () => {
     const r = ev(company({ tradeSlugs: ['batiment-general'] }), market('Peinture de parties communes'));
     expect(crit(r, 'metier').status).toBe('confirm');
