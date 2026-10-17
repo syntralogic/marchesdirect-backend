@@ -5,6 +5,7 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { computeMatchScore } from '../services/matchScoreService';
 import { RULES_VERSION } from '../services/matchEngine';
+import { buildFacts } from '../services/analysisFacts';
 
 // Server-side analysis snapshot (guide v24 s.4): ONE record binds company + establishment +
 // market + lot + versions + answers, so homepage, fiche, animation, concordance and dossier all
@@ -71,7 +72,14 @@ router.get('/:id', async (req: Request, res: Response) => {
     if (!r.rows.length || r.rows[0].session_id !== sessionId) return res.status(404).json({ error: 'Analyse introuvable.' });
     const s = r.rows[0];
     const match = await computeMatchScore(s.opportunity_id, null, { sessionId, answers: s.answers });
-    res.json({ ...publicShape(s), match });
+    const [lk, op] = await Promise.all([
+      db.query('SELECT company_data, created_at FROM siret_lookups WHERE session_id = $1', [sessionId]),
+      db.query(`SELECT o.title, o.buyer_name, o.official_url, o.publication_date, o.updated_at, o.location_city, o.location_department, o.deadline,
+                       o.estimated_value, o.currency, o.ai_extracted_facts, ds.name AS source_name
+                FROM opportunities o LEFT JOIN data_sources ds ON ds.id = o.source_id WHERE o.id = $1`, [s.opportunity_id]),
+    ]);
+    const facts = op.rows[0] ? buildFacts({ siret: s.siret, company: lk.rows[0]?.company_data, companyLookedUpAt: lk.rows[0]?.created_at, opp: op.rows[0], sourceName: op.rows[0].source_name, answers: s.answers }) : [];
+    res.json({ ...publicShape(s), match, facts });
   } catch (err: any) {
     logger.error('analysis snapshot read error:', err);
     res.status(500).json({ error: "Impossible de charger l'analyse." });
