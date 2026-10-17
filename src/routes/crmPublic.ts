@@ -1,3 +1,4 @@
+import { reserveSlot, releaseBooking, attachBooking, upcomingBookingFor, slotInfo } from '../services/appointmentService';
 import { Router, Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import { db } from '../config/database';
@@ -54,6 +55,7 @@ router.post(
     body('phone').optional({ checkFalsy: true }).isString().trim()
       .custom((v) => isValidLeadPhone(v)).withMessage('Le numéro de téléphone n\'est pas valide.'),
     body('sessionId').optional({ checkFalsy: true }).isString().trim().isLength({ max: 100 }),
+    body('slotAt').optional({ checkFalsy: true }).isISO8601().withMessage('Créneau invalide.'),
     body('idempotencyKey').optional({ checkFalsy: true }).isString().trim().isLength({ min: 8, max: 100 }).withMessage('Clé de requête invalide.'),
   ],
   async (req: Request, res: Response) => {
@@ -81,9 +83,9 @@ router.post(
       const idemRaw = req.body.idempotencyKey || req.get('Idempotency-Key') || '';
       const idempotencyKey = typeof idemRaw === 'string' && idemRaw.trim().length >= 8 ? idemRaw.trim().slice(0, 100) : null;
       if (idempotencyKey) {
-        const prior = await db.query('SELECT id FROM crm_leads WHERE brand_id = $1 AND idempotency_key = $2 LIMIT 1', [brandId, idempotencyKey]);
+        const prior = await db.query('SELECT id, appointment_slot_at FROM crm_leads WHERE brand_id = $1 AND idempotency_key = $2 LIMIT 1', [brandId, idempotencyKey]);
         if (prior.rows.length > 0) {
-          return res.status(200).json({ success: true, id: prior.rows[0].id, duplicate: true });
+          return res.status(200).json({ success: true, id: prior.rows[0].id, duplicate: true, ...(prior.rows[0].appointment_slot_at ? slotInfo(prior.rows[0].appointment_slot_at) : {}) });
         }
       }
 
@@ -121,15 +123,32 @@ router.post(
         }
       }
 
-      const result = await db.query(
+      // RDV (guide v24 s.12): a slot is confirmed only after an atomic reservation.
+      let bookingId: string | null = null;
+      let slotDate: Date | null = null;
+      if (req.body.slotAt) {
+        if (email) {
+          const mine = await upcomingBookingFor(email);
+          if (mine) return res.status(200).json({ success: true, id: mine.lead_id, alreadyBooked: true, ...slotInfo(mine.slot_at) });
+        }
+        const r = await reserveSlot(req.body.slotAt, null);
+        if (!r.ok) return res.status(r.status).json(r.body);
+        bookingId = r.bookingId; slotDate = r.slotDate;
+      }
+      const slotNote = slotDate ? `Rendez-vous confirmé : ${slotInfo(slotDate).slotLabel}` : null;
+      const finalMessage = slotNote ? [message, slotNote].filter(Boolean).join('\n') : message;
+      let result: any;
+      try {
+      result = await db.query(
         `INSERT INTO crm_leads
           (brand_id, first_name, last_name, email, phone, company_name, industry_trade,
-           location_city, location_region, lead_source, message, session_id, idempotency_key, crm_sync_status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'pending')
+           location_city, location_region, lead_source, message, session_id, idempotency_key, appointment_mode, appointment_slot_at, crm_sync_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'pending')
          RETURNING id, created_at`,
         [
           brandId, firstName, lastName, email, phone, companyName,
-          industryTrade, locationCity, locationRegion, leadSource || 'website_form', message, sessionId || null, idempotencyKey,
+          industryTrade, locationCity, locationRegion, leadSource || 'website_form', finalMessage, sessionId || null, idempotencyKey,
+          slotDate ? 'slot' : null, slotDate ? slotDate.toISOString() : null,
         ]
       ).catch(async (e: any) => {
         // Two concurrent requests with the same key: the unique index lets one win; the other gets that row.
@@ -139,13 +158,19 @@ router.post(
         }
         throw e;
       });
+      } catch (insertErr) {
+        if (bookingId) await releaseBooking(bookingId); // never keep a slot without a saved request
+        throw insertErr;
+      }
       if ((result as any).duplicate) {
+        if (bookingId) await releaseBooking(bookingId);
         return res.status(200).json({ success: true, id: result.rows[0].id, duplicate: true });
       }
+      if (bookingId) await attachBooking(bookingId, result.rows[0].id);
 
       // Intentionally return only id/created_at, not the full row - this is a
       // public endpoint, no need to echo back internal CRM sync fields.
-      res.status(201).json({ success: true, id: result.rows[0].id });
+      res.status(201).json({ success: true, id: result.rows[0].id, ...(slotDate ? slotInfo(slotDate) : {}) });
 
       // Fire-and-forget: the visitor's form submission must not wait on (or
       // fail because of) an external CRM API call. Sync status/errors land on
