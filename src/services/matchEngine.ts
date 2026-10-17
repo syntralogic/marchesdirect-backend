@@ -361,3 +361,6 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
 
   return { score, verdict, documentedCount, toConfirmCount, mandatoryUnmet, criteria, metierStatus: metier.status };
 }
+
+// Version of the deterministic scoring rules (guide v24 s.4/s.5): stored on every analysis snapshot.
+export const RULES_VERSION = 'concordance-v24.1';

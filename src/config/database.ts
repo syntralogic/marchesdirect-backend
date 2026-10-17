@@ -929,6 +929,24 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`);
   await step(`CREATE UNIQUE INDEX IF NOT EXISTS uq_appointment_bookings_slot ON appointment_bookings (slot_at) WHERE status = 'booked'`);
+  // Analysis snapshot (guide v24 s.4): one server record shared by home, fiche, animation, concordance and dossier.
+  await step(`CREATE TABLE IF NOT EXISTS analysis_snapshots (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    session_id VARCHAR(100) NOT NULL,
+    company_id UUID,
+    company_name TEXT,
+    siret VARCHAR(20),
+    establishment_siret VARCHAR(20),
+    opportunity_id UUID NOT NULL REFERENCES opportunities(id) ON DELETE CASCADE,
+    lot_id VARCHAR(100) NOT NULL DEFAULT '',
+    market_version VARCHAR(40),
+    answers JSONB NOT NULL DEFAULT '{}'::jsonb,
+    answers_version INTEGER NOT NULL DEFAULT 1,
+    rules_version VARCHAR(40),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await step(`CREATE UNIQUE INDEX IF NOT EXISTS uq_analysis_snapshots_scope ON analysis_snapshots (session_id, opportunity_id, lot_id)`);
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_level VARCHAR(20)`);
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_at TIMESTAMP`);
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_by UUID REFERENCES users(id)`);
