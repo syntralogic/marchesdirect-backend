@@ -2,8 +2,12 @@ import { Router, Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { isUuid } from '../utils/uuid';
+import { createBoundedCache } from '../utils/ttlCache';
+import { buildConsultationIndicator, ConsultationLang, ConsultationStats } from '../utils/consultationIndicator';
 
 const router = Router();
+const cachedStats = createBoundedCache(2000);
 
 // POST /api/visitor-events - fire-and-forget analytics ingestion (public,
 // no auth). The frontend calls this on meaningful actions (a real search,
@@ -56,15 +60,35 @@ router.post(
 router.get('/consultations/:opportunityId', async (req: Request, res: Response) => {
   try {
     const { opportunityId } = req.params;
-    const result = await db.query(
-      `SELECT COUNT(DISTINCT session_id)::int AS count
-       FROM visitor_events
-       WHERE event_type = 'view_opportunity'
-         AND event_data->>'opportunityId' = $1
-         AND created_at >= NOW() - INTERVAL '24 hours'`,
-      [opportunityId]
-    );
-    res.json({ count: result.rows[0]?.count || 0 });
+    const lang: ConsultationLang = req.query.lang === 'en' ? 'en' : 'fr';
+    const own = typeof req.query.sessionId === 'string' && req.query.sessionId.length >= 8 && req.query.sessionId.length <= 100 ? req.query.sessionId : null;
+    if (!isUuid(opportunityId)) return res.json({ count: 0, indicator: null });
+    // Real tracking only (view_opportunity events of THIS announcement). The caller's own session is excluded so a
+    // visitor never counts himself; sessions with a SIRET lookup are identified companies, the others plain visits.
+    const stats = await cachedStats(`${opportunityId}|${own || ''}`, 60_000, async () => {
+      const r = await db.query(
+        `SELECT
+           COUNT(DISTINCT e.session_id) FILTER (WHERE e.created_at >= NOW() - INTERVAL '24 hours')::int AS s24,
+           COUNT(DISTINCT e.session_id)::int AS s7,
+           COUNT(DISTINCT e.session_id) FILTER (WHERE e.created_at >= NOW() - INTERVAL '24 hours' AND l.session_id IS NOT NULL)::int AS i24,
+           COUNT(DISTINCT e.session_id) FILTER (WHERE l.session_id IS NOT NULL)::int AS i7,
+           EXTRACT(EPOCH FROM (NOW() - MAX(e.created_at)))::int AS last_age
+         FROM visitor_events e
+         LEFT JOIN siret_lookups l ON l.session_id = e.session_id
+         WHERE e.event_type = 'view_opportunity'
+           AND e.event_data->>'opportunityId' = $1
+           AND e.created_at >= NOW() - INTERVAL '7 days'
+           AND ($2::text IS NULL OR e.session_id <> $2)`,
+        [opportunityId, own]
+      );
+      const row = r.rows[0] || {};
+      return {
+        sessions24h: row.s24 || 0, sessions7d: row.s7 || 0, identified24h: row.i24 || 0, identified7d: row.i7 || 0,
+        lastViewAgeSeconds: row.last_age == null ? null : Number(row.last_age),
+      } as ConsultationStats;
+    });
+    // `count` (24 h distinct sessions) is kept for older frontends; `indicator` is null when nothing reliable exists.
+    res.json({ count: stats.sessions24h, indicator: buildConsultationIndicator(stats, opportunityId, lang) });
   } catch (err: any) {
     logger.error('Consultations count error:', err);
     res.status(500).json({ error: 'Failed to fetch consultations count' });
