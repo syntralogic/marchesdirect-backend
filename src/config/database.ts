@@ -1362,6 +1362,10 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     )
   `);
   await step(`CREATE INDEX IF NOT EXISTS dossier_requests_company ON dossier_requests(company_id)`);
+  // Dossier is tied to the analysis snapshot it was built from (guide v24 s.4).
+  await step(`ALTER TABLE dossier_requests ADD COLUMN IF NOT EXISTS analysis_id UUID REFERENCES analysis_snapshots(id) ON DELETE SET NULL`);
+  await step(`ALTER TABLE dossier_requests ADD COLUMN IF NOT EXISTS answers_version INTEGER`);
+  await step(`ALTER TABLE dossier_requests ADD COLUMN IF NOT EXISTS rules_version VARCHAR(40)`);
   await step(`CREATE INDEX IF NOT EXISTS dossier_requests_opportunity ON dossier_requests(opportunity_id)`);
   await step(`CREATE INDEX IF NOT EXISTS dossier_requests_status ON dossier_requests(status)`);
 

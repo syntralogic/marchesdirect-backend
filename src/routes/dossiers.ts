@@ -83,11 +83,18 @@ router.post('/:opportunityId/generate', async (req: AuthRequest, res: Response) 
         message: 'Ce marché est clôturé : la candidature n’est plus possible. Consultez des marchés similaires encore ouverts.',
       });
     }
-    const { response_text, partners, checklist } = req.body;
+    const { response_text, partners, checklist, analysis_id } = req.body;
+    // Same snapshot as the fiche/concordance: only accepted when it is for THIS market.
+    let snap: { id: string; answers_version: number; rules_version: string } | null = null;
+    if (typeof analysis_id === 'string' && /^[0-9a-f-]{36}$/i.test(analysis_id)) {
+      const sr = await db.query('SELECT id, answers_version, rules_version FROM analysis_snapshots WHERE id = $1 AND opportunity_id = $2', [analysis_id, req.params.opportunityId]);
+      snap = sr.rows[0] || null;
+    }
     const result = await db.query(
-      `INSERT INTO dossier_requests (company_id, opportunity_id, response_text, partners, checklist, status, requested_at)
-       VALUES ($1, $2, $3, $4, $5, 'requested', NOW())
+      `INSERT INTO dossier_requests (company_id, opportunity_id, response_text, partners, checklist, status, requested_at, analysis_id, answers_version, rules_version)
+       VALUES ($1, $2, $3, $4, $5, 'requested', NOW(), $6, $7, $8)
        ON CONFLICT (company_id, opportunity_id) DO UPDATE SET
+         analysis_id = COALESCE($6, dossier_requests.analysis_id), answers_version = COALESCE($7, dossier_requests.answers_version), rules_version = COALESCE($8, dossier_requests.rules_version),
          response_text = COALESCE($3, dossier_requests.response_text),
          partners = COALESCE($4, dossier_requests.partners),
          checklist = COALESCE($5, dossier_requests.checklist),
@@ -96,7 +103,8 @@ router.post('/:opportunityId/generate', async (req: AuthRequest, res: Response) 
          updated_at = NOW()
        RETURNING *`,
       [req.user!.companyId, req.params.opportunityId, response_text ?? null,
-       partners ? JSON.stringify(partners) : null, checklist ? JSON.stringify(checklist) : null]
+       partners ? JSON.stringify(partners) : null, checklist ? JSON.stringify(checklist) : null,
+       snap?.id ?? null, snap?.answers_version ?? null, snap?.rules_version ?? null]
     );
     await db.query(
       `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_values)
