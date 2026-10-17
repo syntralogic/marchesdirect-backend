@@ -1942,3 +1942,11 @@ export const generateSummariesForOpportunities = async (limit: number = 50) => {
     return 0;
   }
 };
+
+// Short free-text generation for the "Le regard de votre chargé d'affaires" frames.
+// Plain text out (no JSON): the caller validates length/content and falls back to
+// deterministic text on any error, so a failure here is never user-visible.
+export const generateAdvisorText = async (systemPrompt: string, userMessage: string): Promise<string> => {
+  const raw = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 300);
+  return raw.trim().replace(/^["«\s]+|["»\s]+$/g, '');
+};
