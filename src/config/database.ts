@@ -1149,6 +1149,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     )
   `);
   await step(`CREATE INDEX IF NOT EXISTS bid_appointments_bid ON bid_appointments(bid_id)`);
+  await step(`ALTER TABLE bid_appointments ADD COLUMN IF NOT EXISTS slot_at TIMESTAMPTZ`);
 
   // Client's Pappers-protection brief (WhatsApp, 5 Sep): cache each company
   // fiche by SIREN so the same company never triggers a second paid Pappers

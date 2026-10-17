@@ -1,3 +1,5 @@
+import { reserveSlot, releaseBooking, freeAlternatives } from '../services/appointmentService';
+import { formatSlotFr } from '../utils/appointmentSlots';
 import { Router, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
@@ -498,7 +500,11 @@ router.post('/bid/:bidId/generate-forms', requireActiveSubscription, async (req:
 // opportunity page - this one is scoped to a specific bid/candidature and
 // is what unlocks the "Rendez-vous confirmé" state gating the final
 // mémoire technique.
-const CALLBACK_SLOTS = ["Aujourd'hui · 17h30", 'Demain · 08h30', 'Demain · 12h00', 'Demain · 16h00'];
+// RDV slots are real, server-owned (Europe/Paris) and reserved atomically (guide v24 s.12).
+async function freeBidSlots(limit = 6) {
+  const days = await freeAlternatives();
+  return days.flatMap((d) => d.slots.map((sl) => ({ slotAt: sl.slotAt, label: formatSlotFr(sl.slotAt) }))).slice(0, limit);
+}
 
 router.get('/bid/:bidId/appointments', async (req: AuthRequest, res: Response) => {
   try {
@@ -508,7 +514,7 @@ router.get('/bid/:bidId/appointments', async (req: AuthRequest, res: Response) =
       `SELECT * FROM bid_appointments WHERE bid_id = $1 ORDER BY created_at DESC LIMIT 1`,
       [req.params.bidId]
     );
-    res.json({ appointment: result.rows[0] || null, availableSlots: CALLBACK_SLOTS });
+    res.json({ appointment: result.rows[0] || null, availableSlots: await freeBidSlots() });
   } catch (err: any) {
     logger.error('Bid appointment fetch error:', err);
     res.status(500).json({ error: 'Failed to load appointment' });
@@ -517,21 +523,34 @@ router.get('/bid/:bidId/appointments', async (req: AuthRequest, res: Response) =
 
 router.post('/bid/:bidId/appointments', async (req: AuthRequest, res: Response) => {
   try {
-    const { mode, slotLabel } = req.body;
+    const { mode, slotAt } = req.body;
     if (mode !== 'slot' && mode !== 'callback') {
       return res.status(400).json({ error: "mode doit etre 'slot' ou 'callback'" });
-    }
-    if (mode === 'slot' && !CALLBACK_SLOTS.includes(slotLabel)) {
-      return res.status(400).json({ error: 'Creneau invalide' });
     }
     const bidCheck = await db.query('SELECT id FROM bid_responses WHERE id = $1 AND company_id = $2', [req.params.bidId, req.user!.companyId]);
     if (bidCheck.rows.length === 0) return res.status(404).json({ error: 'Bid response not found' });
 
-    const result = await db.query(
-      `INSERT INTO bid_appointments (bid_id, company_id, mode, slot_label, status)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [req.params.bidId, req.user!.companyId, mode, mode === 'slot' ? slotLabel : null, mode === 'slot' ? 'confirmed' : 'requested']
-    );
+    let bookingId: string | null = null;
+    let slotDate: Date | null = null;
+    if (mode === 'slot') {
+      const existing = await db.query(
+        `SELECT * FROM bid_appointments WHERE bid_id = $1 AND mode = 'slot' AND status = 'confirmed' AND slot_at > NOW() ORDER BY created_at DESC LIMIT 1`, [req.params.bidId]);
+      if (existing.rows.length > 0) return res.json({ appointment: existing.rows[0], alreadyBooked: true });
+      const r = await reserveSlot(slotAt, null);
+      if (!r.ok) return res.status(r.status).json(r.body);
+      bookingId = r.bookingId; slotDate = r.slotDate;
+    }
+    let result;
+    try {
+      result = await db.query(
+        `INSERT INTO bid_appointments (bid_id, company_id, mode, slot_label, slot_at, status)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+        [req.params.bidId, req.user!.companyId, mode, slotDate ? formatSlotFr(slotDate) : null, slotDate ? slotDate.toISOString() : null, mode === 'slot' ? 'confirmed' : 'requested']
+      );
+    } catch (e) {
+      if (bookingId) await releaseBooking(bookingId);
+      throw e;
+    }
     res.json({ appointment: result.rows[0] });
   } catch (err: any) {
     logger.error('Bid appointment creation error:', err);
