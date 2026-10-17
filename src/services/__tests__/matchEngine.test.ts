@@ -265,4 +265,18 @@ describe('distance plausibility (1 Oct client report)', () => {
     const zone = ev.criteria.find((x: any) => x.key === 'zone');
     expect(zone?.detail).not.toMatch(/\d{4} km/);
   });
+
+  it('a market with nothing established still gets a provisional percentage (guide s.5), never a blank ring', () => {
+    // no métier link on the market, company with no zone/revenue/reference/qualification evidence
+    const c = company({ department: null, tradeSlugs: [], annualRevenue: null });
+    const r = ev(c, { ...market('Conception et animation du stand de l\'ODEADOM au SIA 2026'), tradeSlugs: [], department: null, deadline: null });
+    expect(r.score).toBe(0);
+    expect(r.documentedCount).toBe(0);
+    expect(r.toConfirmCount).toBeGreaterThan(0);
+    expect(r.verdict.label).toMatch(/Précisons votre activité/);
+  });
+
+  it('still no percentage without an identified company', () => {
+    expect(ev(null, market('Installation de climatisation')).score).toBeNull();
+  });
 });

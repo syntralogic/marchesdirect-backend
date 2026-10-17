@@ -336,12 +336,16 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
   // score = round(100 x sum(weight x coefficient) / sum(applicable weight)).
   // Unknowns earn nothing but are not refusals; a missing revenue figure carries no penalty of
   // its own; "not applicable" leaves the denominator. No percentage without an identified
-  // company, without an applicable weight, or when nothing at all is established yet.
+  // company or without an applicable weight (guide s.5: "Si aucun poids applicable, ne pas afficher de pourcentage").
+  // 17 Oct client report: a company with nothing documented yet (e.g. an unusual market such as a stand design,
+  // no métier link, no zone/revenue/reference known) used to get NO percentage at all - the ring said "À confirmer"
+  // and the page looked broken. The guide's formula still applies: unknowns earn 0 points, stay in the denominator
+  // and are never a refusal, so the index is shown (0 % when nothing is established) as PROVISIONAL, with the
+  // documented / to-confirm counts next to it. The verdict sentence is unchanged.
   const applicable = criteria.filter((c) => c.evidence !== 'not_applicable');
   const denominator = applicable.reduce((sum, c) => sum + c.weight, 0);
   const earned = applicable.reduce((sum, c) => sum + c.weight * c.factor, 0);
-  const anyEvidence = applicable.some((c) => c.evidence !== 'unknown');
-  const score: number | null = company && denominator > 0 && anyEvidence ? Math.round((100 * earned) / denominator) : null;
+  const score: number | null = company && denominator > 0 ? Math.round((100 * earned) / denominator) : null;
 
   const documentedCount = applicable.filter((c) => c.evidence === 'verified_match' || c.evidence === 'mismatch').length;
   const toConfirmCount = applicable.filter((c) => c.evidence === 'declared_match' || c.evidence === 'unknown').length;
