@@ -47,107 +47,164 @@ describe('trade normalisation', () => {
   });
 });
 
+// Guide v24 s.5 - deterministic concordance. Weights (to be validated by the client):
+// activité 40, moyens 15, références 15, zone 10, calendrier 10, qualifications 10.
+// verified_match = 1, declared_match ("Oui") = 0.5, mismatch = 0, unknown = 0, not_applicable = out of the denominator.
+const NOW = new Date('2026-10-17T10:00:00Z');
+const ev = (c: CompanyProfile | null, m: MarketInput, a = {}) => evaluateMatch(c, m, a, NOW);
+const crit = (r: ReturnType<typeof evaluateMatch>, key: string) => r.criteria.find((c) => c.key === key)!;
+
 describe('evaluateMatch', () => {
-  it('a heating/AC company matches a climatisation job on the métier', () => {
-    const r = evaluateMatch(company(), market('Installation de climatisation — école Michelet'));
+  it('uses the guide weights', () => {
+    const r = ev(company(), market('Installation de climatisation'));
+    expect(Object.fromEntries(r.criteria.map((c) => [c.key, c.weight]))).toEqual({
+      metier: 40, moyens: 15, experience: 15, zone: 10, disponibilite: 10, qualifications: 10,
+    });
+  });
+
+  it('a heating/AC company matches a climatisation job on the activité', () => {
+    const r = ev(company(), market('Installation de climatisation — école Michelet'));
     expect(r.metierStatus).toBe('match');
-    expect(r.criteria.find((c) => c.key === 'metier')!.detail).toMatch(/correspond à votre activité/);
-    expect(r.score).toBe(60); // métier 40 + same-department zone 20, the rest still to confirm
+    expect(crit(r, 'metier').detail).toMatch(/correspond à votre activité/);
+    // activité 40 + same-department zone 10 earned, out of 100 applicable; the rest is unknown (0 point, not a refusal)
+    expect(r.score).toBe(50);
+    expect(r.documentedCount).toBe(2);
+    expect(r.toConfirmCount).toBe(4);
   });
 
   it('matches a CVC maintenance job too', () => {
-    expect(evaluateMatch(company(), market('Maintenance chauffage/ventilation/climatisation — INRAE')).metierStatus).toBe('match');
+    expect(ev(company(), market('Maintenance chauffage/ventilation/climatisation — INRAE')).metierStatus).toBe('match');
   });
 
   it('a painting job is NOT a match for a heating/AC company, however complete the notice is', () => {
     const complete = market('Peinture de parties communes — La Rochelle', { estimatedValue: 80000, latitude: 46.16, longitude: -1.15, department: '17' });
-    const r = evaluateMatch(company({ latitude: 50.42, longitude: 2.95 }), complete);
+    const r = ev(company({ latitude: 50.42, longitude: 2.95 }), complete);
     expect(r.metierStatus).toBe('mismatch');
-    expect(r.score).not.toBeNull();
-    expect(r.score!).toBeLessThanOrEqual(25);
-    expect(r.criteria.find((c) => c.key === 'metier')!.detail).toMatch(/ne correspond pas/);
+    expect(r.score).toBe(0);
+    expect(crit(r, 'metier').detail).toMatch(/ne correspond pas/);
+    expect(r.verdict.code).toBe('REVIEW_REQUIRED');
   });
 
   it('the length or completeness of the notice never changes the result', () => {
-    const bare = evaluateMatch(company(), market('Installation de climatisation'));
-    const rich = evaluateMatch(company(), market('Installation de climatisation', { estimatedValue: 350000 }));
+    const bare = ev(company(), market('Installation de climatisation'));
+    const rich = ev(company(), market('Installation de climatisation', { estimatedValue: 350000 }));
     expect(rich.score).toBe(bare.score);
   });
 
-  it('keeps the score null when the zone cannot be compared', () => {
-    const r = evaluateMatch(company({ department: null }), market('Installation de climatisation', { department: '62' }));
-    expect(r.score).toBeNull();
-    expect(r.criteria.find((c) => c.key === 'zone')!.status).toBe('confirm');
+  it('an unknown zone is not a refusal: it earns nothing but the index is still computed', () => {
+    const r = ev(company({ department: null }), market('Installation de climatisation', { department: '62' }));
+    expect(crit(r, 'zone').status).toBe('confirm');
+    expect(r.score).toBe(40);
   });
 
-  it('a métier mismatch gives a low score right away, without waiting for the zone', () => {
-    const r = evaluateMatch(company({ department: null }), market('Peinture de parties communes'));
+  it('a missing revenue figure carries no penalty of its own', () => {
+    const noRevenue = ev(company({ annualRevenue: null }), market('Installation de climatisation', { estimatedValue: 350000 }));
+    const m = crit(noRevenue, 'moyens');
+    expect(m.evidence).toBe('unknown');
+    expect(m.status).toBe('confirm');
+    expect(noRevenue.score).toBe(50);
+  });
+
+  it('a métier mismatch gives a verdict of caution and no invented ceiling', () => {
+    const r = ev(company({ department: null }), market('Peinture de parties communes'));
     expect(r.metierStatus).toBe('mismatch');
-    expect(r.score).not.toBeNull();
-    expect(r.score!).toBeLessThanOrEqual(25);
+    expect(r.score).toBe(0);
+    expect(r.verdict.label).toBe('À étudier de près : des points demandent une vérification');
   });
 
-  it('keeps the score null when the company activity cannot be attached to a métier', () => {
-    const r = evaluateMatch(company({ tradeSlugs: [] }), market('Installation de climatisation'));
-    expect(r.score).toBeNull();
+  it('keeps the activity unclear when the company activity cannot be attached to a métier', () => {
+    const r = ev(company({ tradeSlugs: [] }), market('Installation de climatisation'));
     expect(r.metierStatus).toBe('confirm');
+    expect(r.verdict.code).toBe('ACTIVITY_UNCLEAR');
+    expect(r.verdict.label).toBe('Précisons votre activité pour examiner ce marché');
   });
 
-  it('the four answers change the criteria they concern, not a flat bonus', () => {
-    const base = evaluateMatch(company(), market('Installation de climatisation'));
-    const answered = evaluateMatch(company(), market('Installation de climatisation'), { experience: 'oui', capacity: 'oui', location: 'oui', calendar: 'oui' });
-    expect(base.score).toBe(60);
-    expect(answered.score).toBe(100);
-    for (const key of ['experience', 'moyens', 'zone', 'disponibilite']) {
-      const c = answered.criteria.find((x) => x.key === key)!;
-      expect(c.status).toBe('match');
+  it('"Oui" is a declaration worth half the weight, never a verification', () => {
+    const base = ev(company(), market('Installation de climatisation'));
+    const answered = ev(company(), market('Installation de climatisation'), { experience: 'oui', capacity: 'oui', location: 'oui', calendar: 'oui' });
+    expect(base.score).toBe(50);
+    expect(answered.score).toBe(70); // 40 + 10 + 7.5 + 7.5 + 5: all "Oui" never gives 100 without proof
+    for (const key of ['experience', 'moyens', 'disponibilite']) {
+      const c = crit(answered, key);
+      expect(c.evidence).toBe('declared_match');
+      expect(c.factor).toBe(0.5);
+      expect(c.status).toBe('confirm');
       expect(c.answered).toBe(true);
     }
-    // an answer only touches its own criterion
-    const one = evaluateMatch(company(), market('Installation de climatisation'), { experience: 'oui' });
-    expect(one.score).toBe(70);
-    expect(one.criteria.find((c) => c.key === 'moyens')!.status).toBe('confirm');
+    const one = ev(company(), market('Installation de climatisation'), { experience: 'oui' });
+    expect(one.score).toBe(58); // 57.5 rounded
+    expect(crit(one, 'moyens').status).toBe('confirm');
   });
 
   it('changing an answer recalculates', () => {
-    const yes = evaluateMatch(company(), market('Installation de climatisation'), { calendar: 'oui' });
-    const no = evaluateMatch(company(), market('Installation de climatisation'), { calendar: 'non' });
-    expect(yes.score).toBe(75);
-    expect(no.score).toBe(60);
-    expect(no.criteria.find((c) => c.key === 'disponibilite')!.status).toBe('mismatch');
+    const yes = ev(company(), market('Installation de climatisation'), { calendar: 'oui' });
+    const no = ev(company(), market('Installation de climatisation'), { calendar: 'non' });
+    expect(yes.score).toBe(55);
+    expect(no.score).toBe(50);
+    expect(crit(no, 'disponibilite').status).toBe('mismatch');
   });
 
-  it('lets the visitor override a distance the data judged too far, and says so', () => {
+  it('several "Non" give a cautious verdict', () => {
+    const r = ev(company(), market('Installation de climatisation'), { experience: 'non', capacity: 'non', calendar: 'non' });
+    expect(r.verdict.code).toBe('REVIEW_REQUIRED');
+    expect(r.verdict.tone).toBe('amber');
+  });
+
+  it('an answer never silently replaces contradicting proof: it becomes a conflict to examine', () => {
     const far = market('Installation de climatisation', { latitude: 43.3, longitude: 5.4, department: '13' });
     const c = company({ latitude: 50.42, longitude: 2.95, radiusKm: 100 });
-    expect(evaluateMatch(c, far).criteria.find((x) => x.key === 'zone')!.status).toBe('mismatch');
-    const yes = evaluateMatch(c, far, { location: 'oui' }).criteria.find((x) => x.key === 'zone')!;
-    expect(yes.status).toBe('match');
-    expect(yes.detail).toMatch(/confirmé/);
+    expect(crit(ev(c, far), 'zone').status).toBe('mismatch');
+    const yes = crit(ev(c, far, { location: 'oui' }), 'zone');
+    expect(yes.status).toBe('mismatch');
+    expect(yes.conflict).toBe(true);
+    expect(yes.detail).toMatch(/examiner/);
   });
 
-  it('a general contractor is a partial match for a building trade, to be confirmed', () => {
-    const r = evaluateMatch(company({ tradeSlugs: ['batiment-general'] }), market('Peinture de parties communes'));
-    expect(r.criteria.find((c) => c.key === 'metier')!.status).toBe('confirm');
-    expect(r.score).toBe(Math.round((0.6 * 40 + 20) / 100 * 100));
+  it('a general contractor is a partial (declared-level) match for a building trade', () => {
+    const r = ev(company({ tradeSlugs: ['batiment-general'] }), market('Peinture de parties communes'));
+    expect(crit(r, 'metier').status).toBe('confirm');
+    expect(r.score).toBe(30); // 0.5 x 40 + 10
   });
 
-  it('a deadline already passed is flagged, not treated as available', () => {
-    const r = evaluateMatch(company(), market('Installation de climatisation', { deadline: '2026-01-01' }), {}, new Date('2026-09-25'));
-    expect(r.criteria.find((c) => c.key === 'disponibilite')!.status).toBe('mismatch');
+  it('a deadline already passed closes the market', () => {
+    const r = ev(company(), market('Installation de climatisation', { deadline: '2026-01-01' }));
+    expect(crit(r, 'disponibilite').status).toBe('mismatch');
+    expect(r.verdict.code).toBe('MARKET_CLOSED');
+    expect(r.verdict.label).toBe('Ce marché est clôturé');
   });
 
-  it('never invents qualifications', () => {
-    const r = evaluateMatch(company(), market('Installation de climatisation'));
-    const q = r.criteria.find((c) => c.key === 'qualifications')!;
-    expect(q.weight).toBe(0);
-    expect(q.status).toBe('confirm');
+  it('a mandatory condition answered "Non" surfaces first, naming the condition', () => {
+    const m = market('Installation de climatisation', { mandatoryCriteria: ['experience'] });
+    const r = ev(company(), m, { experience: 'non' });
+    expect(r.verdict.code).toBe('MANDATORY_UNMET');
+    expect(r.verdict.label).toBe('Une condition doit être vérifiée avant de candidater');
+    expect(r.verdict.priorityIssue).toBe('Références');
+    expect(r.mandatoryUnmet).toEqual(['Références']);
+  });
+
+  it('an activity that matches, with no mismatch, gives the positive verdict (green only on proof)', () => {
+    const r = ev(company(), market('Installation de climatisation'));
+    expect(r.verdict.code).toBe('ACTIVITY_MATCH');
+    expect(r.verdict.label).toBe('Votre activité correspond : étudiez ce marché');
+    expect(r.verdict.tone).toBe('green');
+  });
+
+  it('qualifications: unknown when the data is missing, not applicable only when the notice says none is required', () => {
+    const unknown = crit(ev(company(), market('Installation de climatisation')), 'qualifications');
+    expect(unknown.weight).toBe(10);
+    expect(unknown.evidence).toBe('unknown');
+    const none = ev(company(), market('Installation de climatisation', { requiredQualifications: 'Aucune qualification exigée' }));
+    expect(crit(none, 'qualifications').evidence).toBe('not_applicable');
+    expect(none.score).toBe(56); // 50 / 90 applicable weight
   });
 
   it('gives no percentage without a company', () => {
-    expect(evaluateMatch(null, market('Installation de climatisation')).score).toBeNull();
+    const r = ev(null, market('Installation de climatisation'));
+    expect(r.score).toBeNull();
+    expect(r.verdict.code).toBe('ACTIVITY_UNCLEAR');
   });
 });
+
 
 describe('zone distance guard (30 Sep audit: Bordeaux-Bordeaux at 4 988 km)', () => {
   it('treats the (0,0) geocode sentinel and out-of-range pairs as unusable', () => {

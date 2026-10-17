@@ -20,6 +20,22 @@ import { extractTradeSlugs } from './tradeResolver';
 // ============================================================================
 
 export type CriterionStatus = 'match' | 'confirm' | 'mismatch';
+// Guide v24 s.5: what the data really establishes for one criterion.
+//   verified_match = 1, declared_match = 0.5 (an answer "Oui" is a declaration, not a check),
+//   mismatch = 0, unknown = 0, not_applicable = left out of the denominator.
+export type EvidenceState = 'verified_match' | 'declared_match' | 'mismatch' | 'unknown' | 'not_applicable';
+export const EVIDENCE_COEFFICIENT: Record<EvidenceState, number> = { verified_match: 1, declared_match: 0.5, mismatch: 0, unknown: 0, not_applicable: 0 };
+export type VerdictCode = 'MARKET_CLOSED' | 'MANDATORY_UNMET' | 'REVIEW_REQUIRED' | 'ACTIVITY_MATCH' | 'ACTIVITY_UNCLEAR';
+export interface MatchVerdict { code: VerdictCode; label: string; tone: 'neutral' | 'amber' | 'green'; priorityIssue: string | null; }
+// The five fixed verdicts of the guide (priority order = this order).
+export const VERDICT_LABELS: Record<VerdictCode, string> = {
+  MARKET_CLOSED: 'Ce marché est clôturé',
+  MANDATORY_UNMET: 'Une condition doit être vérifiée avant de candidater',
+  REVIEW_REQUIRED: 'À étudier de près : des points demandent une vérification',
+  ACTIVITY_MATCH: 'Votre activité correspond : étudiez ce marché',
+  ACTIVITY_UNCLEAR: 'Précisons votre activité pour examiner ce marché',
+};
+export const CONCORDANCE_DISCLAIMER = 'Il ne mesure pas vos chances de gagner le marché.';
 export type RefineAnswer = 'oui' | 'non' | 'a_confirmer';
 
 export interface RefineAnswers {
@@ -37,6 +53,9 @@ export interface MatchCriterion {
   weight: number;          // share of the index (0 = informational)
   factor: number;          // 0..1, how much of the weight is earned
   answered: boolean;       // true when the visitor's own answer decided it
+  evidence?: EvidenceState; // guide v24 s.5 state behind status/factor
+  mandatory?: boolean;      // a condition the market makes compulsory
+  conflict?: boolean;       // the visitor's answer contradicts what the data shows: to examine, never silently overwritten
 }
 
 export interface CompanyProfile {
@@ -66,10 +85,17 @@ export interface MarketInput {
   estimatedValue: number | null;
   deadline: Date | string | null;
   requiredQualifications: string | null;
+  // Criteria the market makes compulsory. Empty until Marchés Direct provides the
+  // per-market list (guide: "critères obligatoires par marché" is still to be supplied).
+  mandatoryCriteria?: MatchCriterion['key'][];
 }
 
 export interface MatchEvaluation {
   score: number | null;
+  verdict: MatchVerdict;
+  documentedCount: number;   // criteria settled by data (verified match or mismatch)
+  toConfirmCount: number;    // applicable criteria still declared-only or unknown
+  mandatoryUnmet: string[];
   criteria: MatchCriterion[];
   metierStatus: CriterionStatus;
 }
@@ -150,12 +176,33 @@ function distanceKm(lat1: number, lng1: number, lat2: number, lng2: number): num
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-const WEIGHTS = { metier: 40, zone: 20, experience: 10, moyens: 15, disponibilite: 15 } as const;
+// Guide v24 s.5 (weights are "à valider" by the client): activité 40, moyens 15, références 15,
+// zone 10, calendrier 10, qualifications 10.
+const WEIGHTS = { metier: 40, moyens: 15, experience: 15, zone: 10, disponibilite: 10, qualifications: 10 } as const;
 
+// A visitor's answer is a declaration, never a check (guide s.5):
+//  - "oui" on something unknown            -> declared_match (half the weight)
+//  - "oui" on something the data refutes   -> conflict to examine, the evidence stays
+//  - "oui" on something already verified   -> nothing to add
+//  - "non"                                 -> mismatch, unless it contradicts verified data (conflict)
 const apply = (base: MatchCriterion, answer: RefineAnswer | undefined, texts: { oui: string; non: string }): MatchCriterion => {
-  if (answer === 'oui') return { ...base, status: 'match', factor: 1, answered: true, detail: texts.oui };
-  if (answer === 'non') return { ...base, status: 'mismatch', factor: 0, answered: true, detail: texts.non };
+  if (answer === 'oui') {
+    if (base.status === 'mismatch') return { ...base, answered: true, conflict: true, detail: `${base.detail} Vous avez répondu « oui » : ce point est à examiner, il ne remplace pas ce que montrent les données.` };
+    if (base.status === 'match') return base;
+    return { ...base, status: 'confirm', factor: 0.5, evidence: 'declared_match', answered: true, detail: texts.oui };
+  }
+  if (answer === 'non') {
+    if (base.status === 'match') return { ...base, answered: true, conflict: true, detail: `${base.detail} Vous avez répondu « non » : ce point est à examiner.` };
+    return { ...base, status: 'mismatch', factor: 0, evidence: 'mismatch', answered: true, detail: texts.non };
+  }
   return base;
+};
+
+const evidenceOf = (c: MatchCriterion): EvidenceState => {
+  if (c.evidence) return c.evidence;
+  if (c.status === 'match') return 'verified_match';
+  if (c.status === 'mismatch') return 'mismatch';
+  return c.factor > 0 ? 'declared_match' : 'unknown';
 };
 
 export function evaluateMatch(company: CompanyProfile | null, market: MarketInput, answers: RefineAnswers = {}, now: Date = new Date()): MatchEvaluation {
@@ -163,20 +210,20 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
   let metier: MatchCriterion;
   const marketLabel = labelList(market.tradeSlugs);
   if (!company) {
-    metier = { key: 'metier', label: 'Métier', status: 'confirm', factor: 0, weight: WEIGHTS.metier, answered: false, detail: 'Identifiez votre entreprise pour comparer ses activités aux prestations demandées.' };
+    metier = { key: 'metier', label: 'Activité', status: 'confirm', factor: 0, weight: WEIGHTS.metier, answered: false, detail: 'Identifiez votre entreprise pour comparer ses activités aux prestations demandées.' };
   } else if (market.tradeSlugs.length === 0) {
-    metier = { key: 'metier', label: 'Métier', status: 'confirm', factor: 0, weight: WEIGHTS.metier, answered: false, detail: 'Les prestations demandées ne sont pas identifiables avec certitude dans l’annonce : à confirmer.' };
+    metier = { key: 'metier', label: 'Activité', status: 'confirm', factor: 0, weight: WEIGHTS.metier, answered: false, detail: 'Les prestations demandées ne sont pas identifiables avec certitude dans l’annonce : à confirmer.' };
   } else if (company.tradeSlugs.length === 0) {
-    metier = { key: 'metier', label: 'Métier', status: 'confirm', factor: 0, weight: WEIGHTS.metier, answered: false, detail: `Le marché demande : ${marketLabel}. Votre activité n’a pas pu être rattachée à un métier : précisez vos prestations.` };
+    metier = { key: 'metier', label: 'Activité', status: 'confirm', factor: 0, weight: WEIGHTS.metier, answered: false, detail: `Le marché demande : ${marketLabel}. Votre activité n’a pas pu être rattachée à un métier : précisez vos prestations.` };
   } else {
     const common = market.tradeSlugs.filter((s) => company.tradeSlugs.includes(s));
     const companyIsGeneral = company.tradeSlugs.some((s) => GENERAL_CONTRACTOR.has(s));
     if (common.length > 0) {
-      metier = { key: 'metier', label: 'Métier', status: 'match', factor: 1, weight: WEIGHTS.metier, answered: false, detail: `Le marché demande : ${marketLabel}. Cela correspond à votre activité (${labelList(common)}).` };
+      metier = { key: 'metier', label: 'Activité', status: 'match', factor: 1, weight: WEIGHTS.metier, answered: false, detail: `Le marché demande : ${marketLabel}. Cela correspond à votre activité (${labelList(common)}).` };
     } else if (companyIsGeneral && market.tradeSlugs.some((s) => BUILDING_TRADES.has(s))) {
-      metier = { key: 'metier', label: 'Métier', status: 'confirm', factor: 0.6, weight: WEIGHTS.metier, answered: false, detail: `Le marché demande : ${marketLabel}. En tant qu’entreprise de bâtiment général, vous pouvez y répondre ou sous-traiter : à confirmer.` };
+      metier = { key: 'metier', label: 'Activité', status: 'confirm', factor: 0.5, evidence: 'declared_match', weight: WEIGHTS.metier, answered: false, detail: `Le marché demande : ${marketLabel}. En tant qu’entreprise de bâtiment général, vous pouvez y répondre ou sous-traiter : à confirmer.` };
     } else {
-      metier = { key: 'metier', label: 'Métier', status: 'mismatch', factor: 0, weight: WEIGHTS.metier, answered: false, detail: `Le marché demande : ${marketLabel}. Votre activité déclarée (${labelList(company.tradeSlugs)}) ne correspond pas.` };
+      metier = { key: 'metier', label: 'Activité', status: 'mismatch', factor: 0, weight: WEIGHTS.metier, answered: false, detail: `Le marché demande : ${marketLabel}. Votre activité déclarée (${labelList(company.tradeSlugs)}) ne correspond pas.` };
     }
   }
 
@@ -210,17 +257,17 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
     }
   }
   zone = apply(zone, answers.location, {
-    oui: 'Vous avez confirmé pouvoir intervenir sur cette zone.',
+    oui: 'Vous indiquez pouvoir intervenir sur cette zone : déclaration à vérifier.',
     non: 'Vous avez indiqué ne pas pouvoir intervenir sur cette zone.',
   });
 
   // --- Expérience -------------------------------------------------------------
-  let experience: MatchCriterion = { key: 'experience', label: 'Expérience', status: 'confirm', factor: 0, weight: WEIGHTS.experience, answered: false, detail: 'Aucune référence comparable enregistrée : à confirmer.' };
+  let experience: MatchCriterion = { key: 'experience', label: 'Références', status: 'confirm', factor: 0, weight: WEIGHTS.experience, answered: false, detail: 'Aucune référence comparable enregistrée : à confirmer.' };
   if (company && (company.recentReferenceCount || 0) > 0) {
     experience = { ...experience, status: 'match', factor: 1, detail: 'Une référence de moins de 3 ans figure dans votre dossier.' };
   }
   experience = apply(experience, answers.experience, {
-    oui: 'Vous avez confirmé une expérience sur des marchés comparables.',
+    oui: 'Vous indiquez avoir des références comparables : déclaration à documenter.',
     non: 'Vous avez indiqué ne pas avoir d’expérience comparable.',
   });
 
@@ -242,50 +289,75 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
     }
   }
   moyens = apply(moyens, answers.capacity, {
-    oui: 'Vous avez confirmé disposer des moyens nécessaires.',
+    oui: 'Vous indiquez disposer des moyens nécessaires : déclaration à vérifier.',
     non: 'Vous avez indiqué ne pas disposer des moyens nécessaires.',
   });
 
   // --- Disponibilité ------------------------------------------------------------
-  let dispo: MatchCriterion = { key: 'disponibilite', label: 'Disponibilité', status: 'confirm', factor: 0, weight: WEIGHTS.disponibilite, answered: false, detail: 'Votre disponibilité sur le calendrier du marché est à confirmer.' };
+  let dispo: MatchCriterion = { key: 'disponibilite', label: 'Calendrier', status: 'confirm', factor: 0, weight: WEIGHTS.disponibilite, answered: false, detail: 'Votre disponibilité sur le calendrier du marché est à confirmer.' };
   if (market.deadline) {
     const days = Math.ceil((new Date(market.deadline).getTime() - now.getTime()) / 86400000);
     if (days <= 0) dispo = { ...dispo, status: 'mismatch', factor: 0, detail: 'La date limite de remise est dépassée.' };
     else if (days <= 3) dispo = { ...dispo, detail: `Échéance dans ${days} jour${days > 1 ? 's' : ''} : confirmez que vous pouvez répondre dans ce délai.` };
   }
   dispo = apply(dispo, answers.calendar, {
-    oui: 'Vous avez confirmé être disponible sur ce calendrier.',
+    oui: 'Vous indiquez être disponible sur ce calendrier : déclaration à confirmer.',
     non: 'Vous avez indiqué ne pas être disponible sur ce calendrier.',
   });
 
-  // --- Qualifications (informational: never invented, never scored) -------------
+  // --- Qualifications ---------------------------------------------------------
+  // Scored (weight 10). Not applicable only when the notice itself says none is required;
+  // missing data is "unknown", never a silent exclusion (guide s.5).
   const q = (market.requiredQualifications || '').trim();
-  const noQualNeeded = !q || /^(aucune?|non (exig|requis|pr[ée]cis)|not available|n\/?a)/i.test(q);
-  const qualifications: MatchCriterion = noQualNeeded
-    ? { key: 'qualifications', label: 'Qualifications', status: 'confirm', factor: 0, weight: 0, answered: false, detail: 'Aucune qualification précisée dans les données disponibles : à vérifier dans le règlement de consultation.' }
-    : { key: 'qualifications', label: 'Qualifications', status: 'confirm', factor: 0, weight: 0, answered: false, detail: `Qualifications indiquées dans l’avis : ${q}. Vérifiez que vous les détenez.` };
-  if (!noQualNeeded && company?.certificationText) {
-    const wanted = q.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 4);
-    if (wanted.some((w) => company.certificationText.toLowerCase().includes(w))) {
-      qualifications.status = 'match';
-      qualifications.detail = `Qualifications indiquées dans l’avis : ${q}. Une certification correspondante figure à votre dossier.`;
+  const explicitNone = /^(aucune?\b|non (exig|requis))/i.test(q);
+  const unspecified = !q || /^(non pr[ée]cis|not available|n\/?a\b)/i.test(q);
+  let qualifications: MatchCriterion;
+  if (explicitNone) {
+    qualifications = { key: 'qualifications', label: 'Qualifications', status: 'confirm', factor: 0, weight: WEIGHTS.qualifications, answered: false, evidence: 'not_applicable', detail: 'L’avis n’exige aucune qualification : critère non applicable.' };
+  } else if (unspecified) {
+    qualifications = { key: 'qualifications', label: 'Qualifications', status: 'confirm', factor: 0, weight: WEIGHTS.qualifications, answered: false, evidence: 'unknown', detail: 'Aucune qualification précisée dans les données disponibles : à vérifier dans le règlement de consultation.' };
+  } else {
+    qualifications = { key: 'qualifications', label: 'Qualifications', status: 'confirm', factor: 0, weight: WEIGHTS.qualifications, answered: false, evidence: 'unknown', detail: `Qualifications indiquées dans l’avis : ${q}. Vérifiez que vous les détenez.` };
+    if (company?.certificationText) {
+      const wanted = q.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 4);
+      if (wanted.some((w) => company.certificationText.toLowerCase().includes(w))) {
+        qualifications = { ...qualifications, status: 'match', factor: 1, evidence: 'verified_match', detail: `Qualifications indiquées dans l’avis : ${q}. Une certification correspondante figure à votre dossier.` };
+      }
     }
   }
 
-  const criteria = [metier, zone, experience, moyens, dispo, qualifications];
+  const mandatoryKeys = new Set(market.mandatoryCriteria || []);
+  const criteria = [metier, zone, experience, moyens, dispo, qualifications].map((c) => {
+    const evidence = evidenceOf(c);
+    return { ...c, evidence, factor: evidence === 'not_applicable' ? 0 : EVIDENCE_COEFFICIENT[evidence], mandatory: mandatoryKeys.has(c.key), conflict: !!c.conflict };
+  });
 
-  // --- Score ---------------------------------------------------------------------
-  // Only when the two structural criteria could really be compared.
-  const metierKnown = metier.status !== 'confirm' || metier.factor > 0;
-  const zoneKnown = zone.status !== 'confirm';
-  let score: number | null = null;
-  // A confirmed métier mismatch already settles the verdict (capped below),
-  // so it does not have to wait for the zone to be known.
-  if (company && metierKnown && (zoneKnown || metier.status === 'mismatch')) {
-    const total = criteria.reduce((s, c) => s + c.weight, 0);
-    const earned = criteria.reduce((s, c) => s + c.weight * c.factor, 0);
-    score = Math.round((earned / total) * 100);
-    if (metier.status === 'mismatch') score = Math.min(score, 25);
-  }
-  return { score, criteria, metierStatus: metier.status };
+  // --- Score (guide s.5) -----------------------------------------------------------
+  // score = round(100 x sum(weight x coefficient) / sum(applicable weight)).
+  // Unknowns earn nothing but are not refusals; a missing revenue figure carries no penalty of
+  // its own; "not applicable" leaves the denominator. No percentage without an identified
+  // company, without an applicable weight, or when nothing at all is established yet.
+  const applicable = criteria.filter((c) => c.evidence !== 'not_applicable');
+  const denominator = applicable.reduce((sum, c) => sum + c.weight, 0);
+  const earned = applicable.reduce((sum, c) => sum + c.weight * c.factor, 0);
+  const anyEvidence = applicable.some((c) => c.evidence !== 'unknown');
+  const score: number | null = company && denominator > 0 && anyEvidence ? Math.round((100 * earned) / denominator) : null;
+
+  const documentedCount = applicable.filter((c) => c.evidence === 'verified_match' || c.evidence === 'mismatch').length;
+  const toConfirmCount = applicable.filter((c) => c.evidence === 'declared_match' || c.evidence === 'unknown').length;
+
+  // --- Verdict: five fixed outcomes, in priority order ------------------------------
+  const deadlineMs = market.deadline ? new Date(market.deadline).getTime() : NaN;
+  const closed = Number.isFinite(deadlineMs) && deadlineMs <= now.getTime();
+  const mandatoryUnmet = criteria.filter((c) => c.mandatory && c.evidence === 'mismatch').map((c) => c.label);
+  const hasMismatch = criteria.some((c) => c.evidence === 'mismatch' || c.conflict);
+  const activityOk = !!company && (metier.evidence === 'verified_match' || metier.evidence === 'declared_match' || metier.status === 'match' || metier.factor > 0);
+  let verdict: MatchVerdict;
+  if (closed) verdict = { code: 'MARKET_CLOSED', label: VERDICT_LABELS.MARKET_CLOSED, tone: 'neutral', priorityIssue: 'date limite dépassée' };
+  else if (mandatoryUnmet.length > 0) verdict = { code: 'MANDATORY_UNMET', label: VERDICT_LABELS.MANDATORY_UNMET, tone: 'amber', priorityIssue: mandatoryUnmet[0] };
+  else if (hasMismatch) verdict = { code: 'REVIEW_REQUIRED', label: VERDICT_LABELS.REVIEW_REQUIRED, tone: 'amber', priorityIssue: (criteria.find((c) => c.evidence === 'mismatch' || c.conflict)?.label) || null };
+  else if (activityOk) verdict = { code: 'ACTIVITY_MATCH', label: VERDICT_LABELS.ACTIVITY_MATCH, tone: metier.status === 'match' ? 'green' : 'neutral', priorityIssue: null };
+  else verdict = { code: 'ACTIVITY_UNCLEAR', label: VERDICT_LABELS.ACTIVITY_UNCLEAR, tone: 'neutral', priorityIssue: null };
+
+  return { score, verdict, documentedCount, toConfirmCount, mandatoryUnmet, criteria, metierStatus: metier.status };
 }

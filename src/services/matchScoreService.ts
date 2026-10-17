@@ -5,7 +5,7 @@ import { extractTradeSlugs } from './tradeResolver';
 import { lotsFromDescription } from '../utils/boampLots';
 import { geocodeCity } from './geocodingService';
 import { extractQualificationsFromText } from '../utils/qualificationText';
-import { evaluateMatch, tradeSlugsForCompany, MatchCriterion, RefineAnswers, CompanyProfile } from './matchEngine';
+import { evaluateMatch, tradeSlugsForCompany, MatchCriterion, MatchVerdict, RefineAnswers, CompanyProfile, CONCORDANCE_DISCLAIMER } from './matchEngine';
 import { inferNaturePrestation, isNaturePrestation, NaturePrestation } from '../utils/naturePrestation';
 
 // ============================================================================
@@ -56,6 +56,10 @@ export interface MatchScoreResult {
   // derived from score, not a separate computation, so it can never
   // disagree with the percentage shown next to it.
   matchLabel: string | null;
+  // Guide v24 s.5: one of five fixed verdicts + counts shown next to the index.
+  verdict?: MatchVerdict | null;
+  criteriaDocumented?: number;
+  criteriaToConfirm?: number;
   positiveFactors: ScoreFactor[];
   // Per-criterion comparison (métier, zone, expérience, moyens, disponibilité,
   // qualifications), each with a status and a justifying sentence.
@@ -386,15 +390,15 @@ export const computeMatchScore = async (
   if (money?.status === 'mismatch' && !money.answered && !warning) warning = 'Le montant de cette opportunité dépasse largement votre chiffre d’affaires habituel.';
 
   const scoreTitle = 'Indice de correspondance';
-  const toConfirm = evaluation.criteria.filter((c) => c.weight > 0 && c.status === 'confirm' && c.factor === 0).length;
+  const { verdict, documentedCount, toConfirmCount } = evaluation;
+  const plural = (n: number, one: string, many: string) => `${n} ${n > 1 ? many : one}`;
   const scoreNote = !company
     ? 'Identifiez votre entreprise pour comparer ses activités, sa zone et ses moyens à ce marché.'
     : score === null
-      ? 'Pas encore assez d’informations pour calculer un pourcentage : confirmez les critères marqués « à confirmer ».'
-      : toConfirm > 0
-        ? `${correspondenceNoteFor(score)} ${toConfirm} critère${toConfirm > 1 ? 's' : ''} à confirmer ${toConfirm > 1 ? 'comptent' : 'compte'} pour 0 point tant que ${toConfirm > 1 ? 'vous ne les avez' : 'vous ne l’avez'} pas confirmé${toConfirm > 1 ? 's' : ''} : l’indice peut augmenter après confirmation.`
-        : correspondenceNoteFor(score);
-  const matchLabel = score === null ? null : matchLabelFor(score);
+      ? 'Pas encore assez d’éléments pour calculer un indice : confirmez les critères marqués « à confirmer ».'
+      : `Indice provisoire : ${plural(documentedCount, 'critère documenté', 'critères documentés')}, ${plural(toConfirmCount, 'critère à confirmer', 'critères à confirmer')}. Un critère sans preuve ne rapporte pas de point sans être un refus ; une réponse « oui » compte pour moitié.`;
+  // The verdict is one of the five fixed sentences; it is never derived from the percentage band.
+  const matchLabel = verdict.label;
 
   // Eligibility checklist - if we know the company, actually check its
   // documents/certifications on file; otherwise every line is just shown as
@@ -443,7 +447,8 @@ export const computeMatchScore = async (
     : 'Laissez vos coordonnées pour recevoir une analyse personnalisée à partir de votre profil d’entreprise.';
 
   return {
-    score, scoreTitle, scoreNote, scoreDisclaimer: SCORE_DISCLAIMER, matchLabel,
+    score, scoreTitle, scoreNote, scoreDisclaimer: CONCORDANCE_DISCLAIMER, matchLabel,
+    verdict, criteriaDocumented: documentedCount, criteriaToConfirm: toConfirmCount,
     positiveFactors: [], matchCriteria: evaluation.criteria, warning,
     criteria, criteriaSource: criteria.length > 0 ? 'notice' : 'unknown', eligibility, whyRespond,
   };
