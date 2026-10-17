@@ -26,6 +26,13 @@ function normalizeLeadPhone(phone: string | undefined | null): string | undefine
 
 const router = Router();
 
+// What the visitor is told when a request is saved: the server's own save time
+// (never the browser clock) and the timezone it should be read in.
+function recordedInfo(createdAt: unknown): { recordedAt?: string; timezone: string } {
+  const d = createdAt ? new Date(createdAt as any) : null;
+  return { ...(d && !Number.isNaN(d.getTime()) ? { recordedAt: d.toISOString() } : {}), timezone: 'Europe/Paris' };
+}
+
 // Mounted at /api/crm/leads in server.ts, BEFORE the authenticated /api/crm
 // router, so this specific path is reachable without a session - matches how
 // a real pricing/contact page lead form works (submitted by a visitor who
@@ -83,9 +90,9 @@ router.post(
       const idemRaw = req.body.idempotencyKey || req.get('Idempotency-Key') || '';
       const idempotencyKey = typeof idemRaw === 'string' && idemRaw.trim().length >= 8 ? idemRaw.trim().slice(0, 100) : null;
       if (idempotencyKey) {
-        const prior = await db.query('SELECT id, appointment_slot_at FROM crm_leads WHERE brand_id = $1 AND idempotency_key = $2 LIMIT 1', [brandId, idempotencyKey]);
+        const prior = await db.query('SELECT id, created_at, appointment_slot_at FROM crm_leads WHERE brand_id = $1 AND idempotency_key = $2 LIMIT 1', [brandId, idempotencyKey]);
         if (prior.rows.length > 0) {
-          return res.status(200).json({ success: true, id: prior.rows[0].id, duplicate: true, ...(prior.rows[0].appointment_slot_at ? slotInfo(prior.rows[0].appointment_slot_at) : {}) });
+          return res.status(200).json({ success: true, id: prior.rows[0].id, duplicate: true, ...recordedInfo(prior.rows[0].created_at), ...(prior.rows[0].appointment_slot_at ? slotInfo(prior.rows[0].appointment_slot_at) : {}) });
         }
       }
 
@@ -119,7 +126,7 @@ router.post(
         );
         if (dup.rows.length > 0) {
           logger.info(`Duplicate lead submission suppressed (session ${sessionId}, existing id ${dup.rows[0].id})`);
-          return res.status(200).json({ success: true, id: dup.rows[0].id, duplicate: true });
+          return res.status(200).json({ success: true, id: dup.rows[0].id, duplicate: true, ...recordedInfo(dup.rows[0].created_at) });
         }
       }
 
@@ -164,13 +171,13 @@ router.post(
       }
       if ((result as any).duplicate) {
         if (bookingId) await releaseBooking(bookingId);
-        return res.status(200).json({ success: true, id: result.rows[0].id, duplicate: true });
+        return res.status(200).json({ success: true, id: result.rows[0].id, duplicate: true, ...recordedInfo(result.rows[0].created_at) });
       }
       if (bookingId) await attachBooking(bookingId, result.rows[0].id);
 
       // Intentionally return only id/created_at, not the full row - this is a
       // public endpoint, no need to echo back internal CRM sync fields.
-      res.status(201).json({ success: true, id: result.rows[0].id, ...(slotDate ? slotInfo(slotDate) : {}) });
+      res.status(201).json({ success: true, id: result.rows[0].id, ...recordedInfo(result.rows[0].created_at), ...(slotDate ? slotInfo(slotDate) : {}) });
 
       // Fire-and-forget: the visitor's form submission must not wait on (or
       // fail because of) an external CRM API call. Sync status/errors land on
