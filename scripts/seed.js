@@ -157,7 +157,8 @@ const demoOpportunities = [
       buyer_name: { value: "Ville de Bordeaux \u2014 Direction des b\u00e2timents", available: true },
       contract_object: { value: "Travaux d'installation \u00e9lectrique \u2014 r\u00e9novation \u00e9nerg\u00e9tique d'un groupe scolaire", available: true },
       procedure_type: { value: "Proc\u00e9dure adapt\u00e9e (MAPA)", available: true },
-      submission_deadline: { value: "28 ao\u00fbt 2026", available: true },
+      // No hard-coded submission date here (client audit 18 Oct: header said 20 Oct, details said 28 Aug): the seeded
+      // deadline column is NOW() + 21 days and is the single source of truth, so the fiche falls back to it.
       estimated_value: { value: "124 800 \u20ac HT", available: true },
       contact_email: { value: "marches.travaux@bordeaux.fr", available: true },
       required_qualifications: { value: "Qualification RGE ou \u00e9quivalente pour travaux d'efficacit\u00e9 \u00e9nerg\u00e9tique", available: true },
