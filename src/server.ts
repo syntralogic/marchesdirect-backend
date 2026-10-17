@@ -308,6 +308,7 @@ app.use('/api/tenders', authenticate, require('./routes/tenders').default);
 app.use('/api/alerts', authenticate, require('./routes/alerts').default);
 app.use('/api/favorites', optionalAuth, require('./routes/favorites').default);
 app.use('/api/chatbot', optionalAuth, require('./routes/chatbot').default);
+app.use('/api/advisor', optionalAuth, require('./routes/advisor').default);
 app.use('/api/documents', authenticate, require('./routes/documents').default);
 app.use('/api/crm', authenticate, require('./routes/crm').default);
 
