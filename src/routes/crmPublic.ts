@@ -54,6 +54,7 @@ router.post(
     body('phone').optional({ checkFalsy: true }).isString().trim()
       .custom((v) => isValidLeadPhone(v)).withMessage('Le numéro de téléphone n\'est pas valide.'),
     body('sessionId').optional({ checkFalsy: true }).isString().trim().isLength({ max: 100 }),
+    body('idempotencyKey').optional({ checkFalsy: true }).isString().trim().isLength({ min: 8, max: 100 }).withMessage('Clé de requête invalide.'),
   ],
   async (req: Request, res: Response) => {
     const errors = validationResult(req);
@@ -75,6 +76,16 @@ router.post(
         industryTrade, locationCity, locationRegion, leadSource, message, sessionId,
       } = req.body;
       const phone = normalizeLeadPhone(req.body.phone);
+      // Idempotency (guide v24 s.12): the same key = the same request. A retry after a
+      // timeout / double-click returns the request that was already recorded.
+      const idemRaw = req.body.idempotencyKey || req.get('Idempotency-Key') || '';
+      const idempotencyKey = typeof idemRaw === 'string' && idemRaw.trim().length >= 8 ? idemRaw.trim().slice(0, 100) : null;
+      if (idempotencyKey) {
+        const prior = await db.query('SELECT id FROM crm_leads WHERE brand_id = $1 AND idempotency_key = $2 LIMIT 1', [brandId, idempotencyKey]);
+        if (prior.rows.length > 0) {
+          return res.status(200).json({ success: true, id: prior.rows[0].id, duplicate: true });
+        }
+      }
 
       // DEV-08: "prévenir les demandes en double lors d'un double-clic ou
       // d'une relance réseau". A double-click (button re-enabled between
@@ -113,14 +124,24 @@ router.post(
       const result = await db.query(
         `INSERT INTO crm_leads
           (brand_id, first_name, last_name, email, phone, company_name, industry_trade,
-           location_city, location_region, lead_source, message, session_id, crm_sync_status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending')
+           location_city, location_region, lead_source, message, session_id, idempotency_key, crm_sync_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'pending')
          RETURNING id, created_at`,
         [
           brandId, firstName, lastName, email, phone, companyName,
-          industryTrade, locationCity, locationRegion, leadSource || 'website_form', message, sessionId || null,
+          industryTrade, locationCity, locationRegion, leadSource || 'website_form', message, sessionId || null, idempotencyKey,
         ]
-      );
+      ).catch(async (e: any) => {
+        // Two concurrent requests with the same key: the unique index lets one win; the other gets that row.
+        if (e?.code === '23505' && idempotencyKey) {
+          const won = await db.query('SELECT id, created_at FROM crm_leads WHERE brand_id = $1 AND idempotency_key = $2 LIMIT 1', [brandId, idempotencyKey]);
+          if (won.rows.length > 0) return { rows: won.rows, duplicate: true } as any;
+        }
+        throw e;
+      });
+      if ((result as any).duplicate) {
+        return res.status(200).json({ success: true, id: result.rows[0].id, duplicate: true });
+      }
 
       // Intentionally return only id/created_at, not the full row - this is a
       // public endpoint, no need to echo back internal CRM sync fields.

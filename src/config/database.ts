@@ -916,6 +916,9 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // self-published subcontracting needs ("Je cherche un sous-traitant").
   // See schema.sql's "12b" comment block for the full access-level model.
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS opportunity_id UUID REFERENCES opportunities(id) ON DELETE SET NULL`);
+  // Forms (guide v24 s.12): client-generated idempotency key so a double-click / network retry never creates a second request.
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(100)`);
+  await step(`CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_leads_idempotency ON crm_leads (brand_id, idempotency_key) WHERE idempotency_key IS NOT NULL`);
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_level VARCHAR(20)`);
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_at TIMESTAMP`);
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_by UUID REFERENCES users(id)`);
