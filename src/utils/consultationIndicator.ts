@@ -14,7 +14,8 @@ export interface ConsultationStats {
 
 export type ConsultationKind = 'week' | 'today' | 'last';
 export type ConsultationLang = 'fr' | 'en';
-export interface ConsultationIndicator { label: string; kind: ConsultationKind; unit: 'companies' | 'visits'; }
+// `value` = the tracked figure written in the label (null for the last-view wording): lets the UI scale the small dot.
+export interface ConsultationIndicator { label: string; kind: ConsultationKind; unit: 'companies' | 'visits'; value: number | null; }
 
 // Reliability thresholds: a counted figure needs at least two distinct visitors (one is a person, not an activity),
 // and "dernière consultation" must be recent enough to mean something.
@@ -48,6 +49,7 @@ export function buildConsultationIndicator(stats: ConsultationStats, opportunity
     const n = stats.sessions7d;
     candidates.push({
       kind: 'week',
+      value: n,
       unit: companies ? 'companies' : 'visits',
       label: fr
         ? (companies ? `${n} entreprises ont consulté cette annonce ces 7 derniers jours.` : `${n} consultations de cette annonce ces 7 derniers jours.`)
@@ -59,6 +61,7 @@ export function buildConsultationIndicator(stats: ConsultationStats, opportunity
     const n = stats.sessions24h;
     candidates.push({
       kind: 'today',
+      value: n,
       unit: companies ? 'companies' : 'visits',
       label: fr
         ? (companies ? `${n} entreprises ont consulté cette annonce aujourd’hui.` : `${n} consultations de cette annonce aujourd’hui.`)
@@ -68,6 +71,7 @@ export function buildConsultationIndicator(stats: ConsultationStats, opportunity
   if (stats.lastViewAgeSeconds != null && stats.lastViewAgeSeconds >= 0 && stats.lastViewAgeSeconds <= MAX_LAST_AGE_SECONDS) {
     candidates.push({
       kind: 'last',
+      value: null,
       unit: 'visits',
       label: fr
         ? `Dernière consultation il y a ${fmtAgeFr(stats.lastViewAgeSeconds)}.`
