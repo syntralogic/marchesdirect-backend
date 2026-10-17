@@ -919,6 +919,16 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // Forms (guide v24 s.12): client-generated idempotency key so a double-click / network retry never creates a second request.
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(100)`);
   await step(`CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_leads_idempotency ON crm_leads (brand_id, idempotency_key) WHERE idempotency_key IS NOT NULL`);
+  // Atomic RDV booking (guide v24 s.12): one active booking per slot, enforced by the DB.
+  await step(`CREATE TABLE IF NOT EXISTS appointment_bookings (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    slot_at TIMESTAMPTZ NOT NULL,
+    lead_id UUID REFERENCES crm_leads(id) ON DELETE CASCADE,
+    opportunity_id UUID REFERENCES opportunities(id) ON DELETE SET NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'booked',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await step(`CREATE UNIQUE INDEX IF NOT EXISTS uq_appointment_bookings_slot ON appointment_bookings (slot_at) WHERE status = 'booked'`);
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_level VARCHAR(20)`);
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_at TIMESTAMP`);
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS access_granted_by UUID REFERENCES users(id)`);

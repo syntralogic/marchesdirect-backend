@@ -1,3 +1,4 @@
+import { generateSlots, freeSlotDays, isOfferedSlot, formatSlotFr, APPOINTMENT_TZ } from '../utils/appointmentSlots';
 import { cached, createBoundedCache } from '../utils/ttlCache';
 import { createHash } from 'crypto';
 import { Router, Request, Response } from 'express';
@@ -1620,6 +1621,19 @@ async function computeDocumentsAnalyzedCount(opportunityId: string, dceDocuments
 }
 
 // GET /api/opportunities/:id - detail page
+// GET /api/opportunities/appointment-slots - free RDV slots (server-owned, Europe/Paris).
+router.get('/appointment-slots', async (_req: Request, res: Response) => {
+  try {
+    const days = generateSlots(new Date(), 5);
+    const booked = await db.query(`SELECT slot_at FROM appointment_bookings WHERE status = 'booked' AND slot_at > NOW()`);
+    const taken = new Set<number>(booked.rows.map((r: any) => new Date(r.slot_at).getTime()));
+    res.json({ timezone: APPOINTMENT_TZ, days: freeSlotDays(days, taken) });
+  } catch (err: any) {
+    logger.error('appointment-slots error:', err);
+    res.status(500).json({ error: 'Impossible de charger les créneaux.' });
+  }
+});
+
 router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
   try {
     const result = await db.query(
@@ -1852,8 +1866,41 @@ router.post(
         [req.params.id, email]
       );
 
-      const message = mode === 'slot' ? `Créneau choisi : ${slotLabel}` : 'Rappel demandé, sans créneau précis';
+      // RDV (guide v24 s.12): confirmed only after an ATOMIC reservation of the slot.
+      let bookingId: string | null = null;
+      let slotDate: Date | null = null;
+      if (mode === 'slot') {
+        if (!slotAt || !isOfferedSlot(slotAt)) {
+          return res.status(400).json({ error: "Ce créneau n'est pas proposé. Choisissez un autre créneau." });
+        }
+        slotDate = new Date(slotAt);
+        // A visitor who already holds an upcoming RDV on this market is not offered a second booking.
+        const mine = await db.query(
+          `SELECT b.slot_at, l.id AS lead_id FROM appointment_bookings b JOIN crm_leads l ON l.id = b.lead_id
+           WHERE l.opportunity_id = $1 AND LOWER(l.email) = LOWER($2) AND b.status = 'booked' AND b.slot_at > NOW() LIMIT 1`,
+          [req.params.id, email]
+        );
+        if (mine.rows.length > 0) {
+          return res.status(200).json({ identityUnlocked: true, alreadyBooked: true, leadId: mine.rows[0].lead_id,
+            slotAt: new Date(mine.rows[0].slot_at).toISOString(), slotLabel: formatSlotFr(mine.rows[0].slot_at), timezone: APPOINTMENT_TZ });
+        }
+        try {
+          const b = await db.query(`INSERT INTO appointment_bookings (slot_at, opportunity_id) VALUES ($1, $2) RETURNING id`, [slotDate.toISOString(), req.params.id]);
+          bookingId = b.rows[0].id;
+        } catch (e: any) {
+          if (e?.code === '23505') {
+            const booked = await db.query(`SELECT slot_at FROM appointment_bookings WHERE status = 'booked' AND slot_at > NOW()`);
+            const taken = new Set<number>(booked.rows.map((r: any) => new Date(r.slot_at).getTime()));
+            return res.status(409).json({ error: "Ce créneau vient d'être pris. Vos informations sont conservées : choisissez un autre créneau.",
+              code: 'slot_taken', timezone: APPOINTMENT_TZ, alternatives: freeSlotDays(generateSlots(new Date(), 5), taken) });
+          }
+          throw e;
+        }
+      }
+
+      const message = mode === 'slot' && slotDate ? `Créneau confirmé : ${formatSlotFr(slotDate)}` : 'Rappel demandé, sans créneau précis';
       let leadId: string;
+      try {
       if (existing.rows.length > 0) {
         leadId = existing.rows[0].id;
         await db.query(
@@ -1862,7 +1909,7 @@ router.post(
              session_id = COALESCE(session_id, $5), appointment_mode = $6, appointment_slot_at = $7,
              message = $8, updated_at = NOW()
            WHERE id = $9`,
-          [firstName, lastName, phone, companyName, sessionId || null, mode, mode === 'slot' ? slotAt || null : null, message, leadId]
+          [firstName, lastName, phone, companyName, sessionId || null, mode, mode === 'slot' && slotDate ? slotDate.toISOString() : null, message, leadId]
         );
       } else {
         const insertResult = await db.query(
@@ -1871,13 +1918,19 @@ router.post(
              opportunity_id, session_id, appointment_mode, appointment_slot_at, crm_sync_status)
            VALUES ($1, $2, $3, $4, $5, $6, 'opportunity_detail_page', $7, $8, $9, $10, $11, 'pending')
            RETURNING id`,
-          [brandId, firstName, lastName, email, phone, companyName, message, req.params.id, sessionId || null, mode, mode === 'slot' ? slotAt || null : null]
+          [brandId, firstName, lastName, email, phone, companyName, message, req.params.id, sessionId || null, mode, mode === 'slot' && slotDate ? slotDate.toISOString() : null]
         );
         leadId = insertResult.rows[0].id;
         syncLeadToCrm(leadId).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
       }
 
-      res.status(201).json({ identityUnlocked: mode === 'slot', leadId });
+      if (bookingId) await db.query(`UPDATE appointment_bookings SET lead_id = $1 WHERE id = $2`, [leadId, bookingId]);
+      res.status(201).json({ identityUnlocked: mode === 'slot', leadId, ...(slotDate ? { slotAt: slotDate.toISOString(), slotLabel: formatSlotFr(slotDate), timezone: APPOINTMENT_TZ } : {}) });
+      } catch (inner) {
+        // the lead could not be saved: release the slot so it is never "confirmed" without a request behind it
+        if (bookingId) await db.query(`DELETE FROM appointment_bookings WHERE id = $1`, [bookingId]).catch(() => {});
+        throw inner;
+      }
     } catch (err: any) {
       logger.error('Opportunity access request error:', err);
       res.status(500).json({ error: 'Failed to submit — please try again' });
