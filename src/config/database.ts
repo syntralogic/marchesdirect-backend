@@ -451,6 +451,10 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     SELECT "${unaccentSchema}".unaccent('"${unaccentSchema}".unaccent'::regdictionary, $1)
   $$ LANGUAGE sql IMMUTABLE PARALLEL SAFE`);
 
+  // 18 Oct client brief: the lot the artisan is looking at travels with the request (dossier e-mail, CRM note), so
+  // whoever calls back already knows which lot is concerned. Optional, free text, shown only when known.
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS lot_label TEXT`);
+
   // Regenerate search_vector to match the exact accent-insensitive
   // expression the search route needs (was to_tsvector('french',
   // title || description) with no unaccent at all). A GENERATED column

@@ -42,6 +42,7 @@ type LeadRow = {
   appointment_slot_at?: Date | string | null;
   opportunity_id?: string | null;
   opportunity_title?: string | null;
+  lot_label?: string | null;
   crm_contact_id?: string | null;
 };
 
@@ -105,6 +106,7 @@ async function syncToPipedrive(lead: LeadRow): Promise<{ contactId: string }> {
     // name with no reason to call. The visitor's message, the requested
     // rendez-vous and the opportunity concerned are now part of the lead.
     lead.opportunity_title ? `Opportunité: ${lead.opportunity_title}` : null,
+    lead.lot_label ? `Lot: ${lead.lot_label}` : null,
     lead.appointment_mode === 'slot' && lead.appointment_slot_at
       ? `Rendez-vous demandé: ${new Date(lead.appointment_slot_at).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })}`
       : lead.appointment_mode === 'callback' ? 'Demande: être rappelé' : null,

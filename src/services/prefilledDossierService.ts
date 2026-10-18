@@ -22,6 +22,8 @@ export interface PrefilledDossierInput {
   companyName: string;
   siret?: string | null;
   opportunityTitle: string;
+  /** The lot the visitor is looking at, when known (shown in the e-mail and on the document). */
+  lotLabel?: string | null;
   buyerName?: string | null;
   reference?: string | null;
   locationCity?: string | null;
@@ -76,6 +78,7 @@ export function generatePrefilledDossierPdf(input: PrefilledDossierInput): Promi
     doc.fillColor('#000000').fontSize(12).font('Helvetica-Bold').text('2. Marché concerné');
     doc.moveDown(0.3);
     doc.fontSize(13).text(input.opportunityTitle);
+    if (input.lotLabel) doc.fontSize(11).text(`Lot : ${input.lotLabel}`);
     doc.moveDown(0.3);
     const facts: string[] = [];
     const missing: string[] = [];
@@ -131,7 +134,7 @@ export async function sendPrefilledDossierEmail(
     const pdf = await generatePrefilledDossierPdf(input);
     const html = `
       <p>Bonjour,</p>
-      <p>Voici votre dossier pré-rempli (aperçu préparatoire, pas un dossier prêt au dépôt) pour <strong>${escapeHtml(input.opportunityTitle)}</strong>, préparé à partir des informations de votre entreprise et de cette opportunité.</p>
+      <p>Voici votre dossier pré-rempli (aperçu préparatoire, pas un dossier prêt au dépôt) pour <strong>${escapeHtml(input.opportunityTitle)}</strong>${input.lotLabel ? ` (lot : <strong>${escapeHtml(input.lotLabel)}</strong>)` : ''}, préparé à partir des informations de votre entreprise et de cette opportunité.</p>
       ${input.isClosed ? '<p><strong>Ce marché est clôturé : la candidature n\'est plus possible.</strong></p>' : ''}
       <p>Vous pouvez retrouver ce document et la suite de votre accompagnement à tout moment depuis la page "Votre dossier" de cette opportunité.</p>
       <p>— L'équipe Marchés Direct</p>
@@ -143,7 +146,7 @@ export async function sendPrefilledDossierEmail(
     // the site claiming "Dossier envoyé" for a message nobody received.
     return await sendEmail({
       to,
-      subject: `Votre dossier pré-rempli - ${input.opportunityTitle}`,
+      subject: `Votre dossier pré-rempli - ${input.opportunityTitle}${input.lotLabel ? ` (lot : ${input.lotLabel})` : ''}`,
       html,
       attachments: [{ filename: 'dossier-pre-rempli.pdf', content: pdf }],
     });
