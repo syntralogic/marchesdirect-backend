@@ -2039,6 +2039,7 @@ router.get('/:id/match-score', optionalAuth, async (req: AuthRequest, res: Respo
     const result = await computeMatchScore(req.params.id, companyId, {
       sessionId: req.query.sessionId as string,
       answers: parseRefineAnswers(req.query.answers),
+      lot: typeof req.query.lot === 'string' ? req.query.lot : null,
     });
     res.json(result);
   } catch (err: any) {

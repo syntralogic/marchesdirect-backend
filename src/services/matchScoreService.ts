@@ -327,7 +327,7 @@ export function marketTradeSlugs(opp: any, facts: any): string[] {
 export const computeMatchScore = async (
   opportunityId: string,
   companyId?: string | null,
-  options: { sessionId?: string | null; answers?: RefineAnswers } = {}
+  options: { sessionId?: string | null; answers?: RefineAnswers; lot?: string | null } = {}
 ): Promise<MatchScoreResult> => {
   const oppResult = await db.query(
     `SELECT o.*, ot.code as journey, t.name as trade_name, t.slug as trade_slug
@@ -362,11 +362,18 @@ export const computeMatchScore = async (
     ? Math.ceil((new Date(opp.deadline).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
     : null;
 
+  const lotTitle = String(options.lot || '').trim().slice(0, 200) || null;
   const company = await loadCompanyProfile(companyId, options.sessionId);
   const evaluation = evaluateMatch(
     company,
     {
-      tradeSlugs: marketTradeSlugs(opp, facts),
+      // Client brief (lots): when the visitor works on ONE lot of an allotted market, the comparison is made with
+      // that lot's own trade, not with every trade of the whole market. Falls back to the market when the lot
+      // title names no recognisable trade.
+      tradeSlugs: (() => {
+        const lotSlugs = lotTitle ? extractTradeSlugs(lotTitle) : [];
+        return lotSlugs.length > 0 ? lotSlugs : marketTradeSlugs(opp, facts);
+      })(),
       latitude: toNumber(opp.location_latitude), longitude: toNumber(opp.location_longitude),
       department: opp.location_department || null,
       estimatedValue: toNumber(opp.estimated_value),

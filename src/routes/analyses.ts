@@ -71,7 +71,7 @@ router.get('/:id', async (req: Request, res: Response) => {
     const r = await db.query('SELECT * FROM analysis_snapshots WHERE id = $1', [req.params.id]).catch(() => ({ rows: [] as any[] }));
     if (!r.rows.length || r.rows[0].session_id !== sessionId) return res.status(404).json({ error: 'Analyse introuvable.' });
     const s = r.rows[0];
-    const match = await computeMatchScore(s.opportunity_id, null, { sessionId, answers: s.answers });
+    const match = await computeMatchScore(s.opportunity_id, null, { sessionId, answers: s.answers, lot: s.lot_id || null });
     const [lk, op] = await Promise.all([
       db.query('SELECT company_data, created_at FROM siret_lookups WHERE session_id = $1', [sessionId]),
       db.query(`SELECT o.title, o.buyer_name, o.official_url, o.publication_date, o.updated_at, o.location_city, o.location_department, o.deadline,
