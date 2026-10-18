@@ -639,6 +639,8 @@ router.post(
     }
 
     const { sessionId, phone, email, opportunityId } = req.body;
+    // Optional: the lot the visitor is looking at (free text, trimmed, bounded).
+    const lotLabel = typeof req.body?.lot === 'string' ? req.body.lot.replace(/\s+/g, ' ').trim().slice(0, 200) || null : null;
     // This whole handler used to run with no top-level try/catch. Express
     // 4 (this app's version) does NOT route an unhandled rejection from an
     // async handler to errorHandler.ts on its own - an unexpected DB hiccup
@@ -656,7 +658,7 @@ router.post(
     // timeout. The dossier-email and CRM-linking blocks further down
     // already had their own non-fatal try/catch and are unaffected.
     try {
-      return await handleLeadCapture(req as AuthRequest, res, { sessionId, phone, email, opportunityId });
+      return await handleLeadCapture(req as AuthRequest, res, { sessionId, phone, email, opportunityId, lotLabel });
     } catch (err) {
       logger.error('POST /siret/lead failed:', err);
       return res.status(500).json({ error: "L'enregistrement de vos coordonnées a échoué. Réessayez dans un instant." });
@@ -667,7 +669,7 @@ router.post(
 async function handleLeadCapture(
   req: AuthRequest,
   res: Response,
-  { sessionId, phone, email, opportunityId }: { sessionId: string; phone: string; email: string; opportunityId?: string }
+  { sessionId, phone, email, opportunityId, lotLabel }: { sessionId: string; phone: string; email: string; opportunityId?: string; lotLabel?: string | null }
 ) {
 
     const existing = await db.query('SELECT id, siret, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
@@ -716,6 +718,7 @@ async function handleLeadCapture(
             companyName,
             siret: companySiret,
             opportunityTitle: o.title,
+            lotLabel: lotLabel || null,
             buyerName: o.buyer_name,
             reference: o.source_reference,
             locationCity: o.location_city,
@@ -752,10 +755,10 @@ async function handleLeadCapture(
           if (dup.rows.length === 0 && brandId) {
             const insertResult = await db.query(
               `INSERT INTO crm_leads
-                (brand_id, email, phone, company_name, lead_source, opportunity_id, session_id, crm_sync_status)
-               VALUES ($1, $2, $3, $4, 'analysis_gate', $5, $6, 'pending')
+                (brand_id, email, phone, company_name, lead_source, opportunity_id, session_id, crm_sync_status, lot_label)
+               VALUES ($1, $2, $3, $4, 'analysis_gate', $5, $6, 'pending', $7)
                RETURNING id`,
-              [brandId, email, phone, companyName, opportunityId, sessionId]
+              [brandId, email, phone, companyName, opportunityId, sessionId, lotLabel || null]
             );
             syncLeadToCrm(insertResult.rows[0].id).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
           }
