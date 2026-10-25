@@ -1,11 +1,12 @@
 name: Sync from upstream
 
 # Runs ONLY in the client repo. Pulls main from the public upstream repo
-# using this repo's own GITHUB_TOKEN, so it does not depend on any personal
-# account or access token.
+# using this repo's own GITHUB_TOKEN (no personal token needed).
+# Non-destructive: fast-forwards when possible, otherwise MERGES (no force push,
+# no history rewrite). On conflicting hunks the upstream version wins.
 on:
   schedule:
-    - cron: '37 */2 * * *'
+    - cron: '7 */2 * * *'
   workflow_dispatch:
 
 permissions:
@@ -24,8 +25,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fast-forward main from upstream
+      - name: Merge upstream main (no history rewrite)
         run: |
+          git config user.name "sync-bot"
+          git config user.email "sync-bot@users.noreply.github.com"
           git fetch https://github.com/syntralogic/marchesdirect-backend.git main
-          git merge --ff-only FETCH_HEAD
+          if git merge --ff-only FETCH_HEAD; then
+            echo "fast-forwarded"
+          else
+            git merge --no-edit --allow-unrelated-histories -X theirs FETCH_HEAD
+          fi
           git push origin HEAD:main
