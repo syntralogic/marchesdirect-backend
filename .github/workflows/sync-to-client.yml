@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: sync-to-client
+  cancel-in-progress: false
+
 jobs:
   sync:
     # only run in our own repo, never in the client's copy
@@ -16,10 +20,21 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Push to client repo
-        continue-on-error: true  # fallback: client repo pulls on its own schedule
+      - name: Push to client repo (merge if histories differ, never force)
         env:
           CLIENT_PAT: ${{ secrets.CLIENT_PAT }}
         run: |
+          git config user.name "sync-bot"
+          git config user.email "sync-bot@users.noreply.github.com"
           git remote add client https://x-access-token:${CLIENT_PAT}@github.com/hedi4060/Marche-direct-back.git
-          git push client HEAD:main
+          if ! git fetch client main; then
+            echo "::warning::Could not reach client repo (CLIENT_PAT missing/expired). Client repo will pull on its own schedule."
+            exit 0
+          fi
+          if git merge-base --is-ancestor client/main HEAD; then
+            git push client HEAD:main || echo "::warning::push to client failed; fallback pull will handle it"
+          else
+            git checkout -q -b mirror HEAD
+            git merge --no-edit --allow-unrelated-histories -X ours client/main
+            git push client mirror:main || echo "::warning::merge push failed; fallback pull will handle it"
+          fi
