@@ -13,6 +13,7 @@
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
     "db:migrate": "node scripts/migrate.js",
+    "hubspot:setup": "ts-node --files scripts/hubspotSetup.ts",
     "db:seed": "node scripts/seed.js",
     "backfill:opportunity-facts": "ts-node --files scripts/backfillOpportunityFacts.ts",
     "backfill:exact-duplicates": "ts-node --files scripts/backfillExactDuplicates.ts",

@@ -1339,6 +1339,31 @@ router.put('/opportunity-leads/:id/grant-access', async (req: AuthRequest, res: 
   }
 });
 
+// GET /api/admin/hubspot/status - is the HubSpot token set, and does HubSpot accept it?
+router.get('/hubspot/status', async (_req: AuthRequest, res: Response) => {
+  const { pingHubspot, isHubspotConfigured } = require('../services/hubspotService');
+  const ping = await pingHubspot();
+  res.json({ configured: isHubspotConfigured(), ...ping });
+});
+
+// POST /api/admin/hubspot/test { email } - creates/updates a TEST contact + company + note in
+// HubSpot so the connection can be verified end to end (look for it in HubSpot > Contacts).
+router.post('/hubspot/test', async (req: AuthRequest, res: Response) => {
+  try {
+    const { isHubspotConfigured, upsertContact, upsertCompany, associateContactWithCompany, createNote } = require('../services/hubspotService');
+    if (!isHubspotConfigured()) return res.status(400).json({ error: 'HUBSPOT_ACCESS_TOKEN is not set' });
+    const email = typeof req.body?.email === 'string' && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(req.body.email) ? req.body.email : 'test.marchesdirect@example.com';
+    const contactId = await upsertContact({ email, firstName: 'Test', lastName: 'Marchés Direct', companyName: 'Test Marchés Direct', leadSource: 'integration_test' });
+    const companyId = await upsertCompany({ name: 'Test Marchés Direct' });
+    if (companyId) await associateContactWithCompany(contactId, companyId);
+    const noteId = await createNote({ contactId, companyId, html: '<p><strong>Test d\'intégration Marchés Direct</strong> — si vous voyez cette note, la connexion fonctionne.</p>' });
+    res.json({ ok: true, contactId, companyId, noteId });
+  } catch (err: any) {
+    logger.error('HubSpot test error:', err);
+    res.status(502).json({ ok: false, error: err?.message || 'HubSpot test failed' });
+  }
+});
+
 // GET /api/admin/leads/:id/journey - visitor_events for this lead's session,
 // so a chargé d'affaires calling the lead back can see what they searched
 // for and looked at instead of re-asking from scratch (client requirement).

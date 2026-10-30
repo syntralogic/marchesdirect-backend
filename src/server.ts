@@ -586,6 +586,7 @@ const startServer = async () => {
         ['opportunityAlerts', 'startOpportunityAlerts', 'alerts'],
         ['documentExpiry', 'startExpiryCheck', 'document expiry'],
         ['crmRetry', 'startCrmRetrySchedule', 'CRM retry'],
+        ['hubspotJourney', 'startHubspotJourneySchedule', 'HubSpot journey sync'],
         ['backupManagement', 'startBackupSchedule', 'backups'],
         ['factsBackfillJob', 'startFactsBackfillJob', 'facts backfill'],
         ['aiProcessing', 'startAIProcessing', 'AI processing'],

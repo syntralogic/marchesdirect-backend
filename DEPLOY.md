@@ -85,3 +85,7 @@ Without them the Google fields stay empty (nothing is invented, nothing is bille
 - The Facebook page is the facebook.com link published on the company's own website.
 - SIRET-lookup results are stored in `company_lookup_cache` and refreshed every 30 days; companies already
   cached are filled in on their next lookup (no extra Pappers call).
+
+
+## HubSpot (optional)
+Set `HUBSPOT_ACCESS_TOKEN` on the backend host to enable the HubSpot sync. See docs/HUBSPOT.md.

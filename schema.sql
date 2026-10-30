@@ -934,6 +934,18 @@ CREATE TABLE visitor_events (
 CREATE INDEX visitor_events_session ON visitor_events(session_id);
 CREATE INDEX visitor_events_created ON visitor_events(created_at);
 
+-- HubSpot integration: identified browser session -> HubSpot contact/company, plus how far the
+-- visitor journey was pushed. See services/hubspotService.ts.
+CREATE TABLE IF NOT EXISTS hubspot_sessions (
+  session_id VARCHAR(100) PRIMARY KEY,
+  contact_id VARCHAR(50) NOT NULL,
+  company_id VARCHAR(50),
+  email VARCHAR(255),
+  last_event_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS hubspot_sessions_synced ON hubspot_sessions (synced_at);
+
 -- SIRET-based company recognition (prototype V17) - session-scoped, global
 -- per browser regardless of which opportunity triggered it. See
 -- applyIncrementalMigrations() in config/database.ts for the full

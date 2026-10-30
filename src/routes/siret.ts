@@ -5,6 +5,7 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { lookupCompanyPresence, isPresenceConfigured } from '../services/companyPresenceService';
 import { syncLeadToCrm } from '../services/crmSyncService';
+import { syncIdentifiedSession, isHubspotConfigured } from '../services/hubspotService';
 import { isOpportunityClosed } from '../utils/opportunityStatus';
 import { sendPrefilledDossierEmail, generatePrefilledDossierPdf } from '../services/prefilledDossierService';
 import { AuthRequest } from '../middleware/auth';
@@ -768,6 +769,13 @@ async function handleLeadCapture(
         // a CRM sync hiccup shouldn't block the visitor from proceeding.
         logger.error('Lead-capture CRM linking error (non-fatal):', err);
       }
+    }
+
+    // HubSpot: attach SIRET + phone + e-mail + the journey so far to the contact and its company,
+    // even when no opportunity is attached (no crm_leads row in that case). Fire-and-forget; the
+    // periodic job (jobs/hubspotJourney.ts) retries anything that fails here.
+    if (isHubspotConfigured()) {
+      syncIdentifiedSession(sessionId).catch((err) => logger.error('HubSpot identity sync failed (job will retry):', err));
     }
 
     res.json({ leadCaptured: true, dossierEmailed });

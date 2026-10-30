@@ -923,6 +923,17 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // Forms (guide v24 s.12): client-generated idempotency key so a double-click / network retry never creates a second request.
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(100)`);
   await step(`CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_leads_idempotency ON crm_leads (brand_id, idempotency_key) WHERE idempotency_key IS NOT NULL`);
+  // HubSpot integration: maps an identified browser session to its HubSpot contact/company and
+  // remembers how far the visitor journey was pushed (see services/hubspotService.ts).
+  await step(`CREATE TABLE IF NOT EXISTS hubspot_sessions (
+    session_id VARCHAR(100) PRIMARY KEY,
+    contact_id VARCHAR(50) NOT NULL,
+    company_id VARCHAR(50),
+    email VARCHAR(255),
+    last_event_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await step(`CREATE INDEX IF NOT EXISTS hubspot_sessions_synced ON hubspot_sessions (synced_at)`);
   // Atomic RDV booking (guide v24 s.12): one active booking per slot, enforced by the DB.
   await step(`CREATE TABLE IF NOT EXISTS appointment_bookings (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

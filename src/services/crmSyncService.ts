@@ -1,6 +1,10 @@
 import axios from 'axios';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import {
+  isHubspotConfigured, upsertContact, upsertCompany, associateContactWithCompany,
+  createNote, linkSessionAndPushJourney,
+} from './hubspotService';
 
 // ============================================================================
 // CRM SYNC (Milestone 8 / Technical Requirements section 9: "Lead capture
@@ -44,6 +48,7 @@ type LeadRow = {
   opportunity_title?: string | null;
   lot_label?: string | null;
   crm_contact_id?: string | null;
+  session_id?: string | null;
 };
 
 async function syncToPipedrive(lead: LeadRow): Promise<{ contactId: string }> {
@@ -154,9 +159,97 @@ function isCrmConfigured(): boolean {
   return configured;
 }
 
+
+// ----------------------------------------------------------------------------
+// HubSpot adapter (client switched to HubSpot, 29 Oct). Same contract as
+// syncToPipedrive: returns the remote contact id, throws on failure (the
+// caller records 'failed' and jobs/crmRetry.ts retries).
+//
+// What lands in HubSpot for one lead:
+//   contact  - e-mail / phone / name / company / city / source (upsert by e-mail,
+//              else by phone, so a repeat visitor never creates a duplicate)
+//   company  - by SIRET when the visitor's session went through the SIRET gate,
+//              else by exact name; the contact is associated with it
+//   note     - the request itself (message, rendez-vous, opportunity, lot),
+//              visible on the contact AND the company timeline
+//   journey  - searches / announcements viewed so far (visitor_events), linked
+//              through the session id and kept up to date by jobs/hubspotJourney.ts
+// ----------------------------------------------------------------------------
+const esc = (s: unknown): string =>
+  String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+async function syncToHubspot(lead: LeadRow): Promise<{ contactId: string }> {
+  // The SIRET the visitor typed in this same session, if any, identifies the company best.
+  let siret: string | null = null;
+  let siretCompanyName: string | null = null;
+  if (lead.session_id) {
+    const s = await db.query('SELECT siret, company_data FROM siret_lookups WHERE session_id = $1', [lead.session_id]);
+    siret = s.rows[0]?.siret || null;
+    siretCompanyName = s.rows[0]?.company_data?.name || null;
+  }
+  const companyName = lead.company_name || siretCompanyName;
+
+  const contactId = await upsertContact({
+    email: lead.email,
+    phone: lead.phone,
+    firstName: lead.first_name,
+    lastName: lead.last_name,
+    companyName,
+    city: lead.location_city,
+    siret,
+    sessionId: lead.session_id,
+    leadSource: lead.lead_source,
+    extra: { md_last_request: lead.opportunity_title || lead.lead_source || undefined },
+  });
+  // Persist right away (same reason as Pipedrive): if a later call fails, the retry reuses this contact.
+  await db.query('UPDATE crm_leads SET crm_contact_id = $1 WHERE id = $2', [contactId, lead.id]);
+
+  const companyId = await upsertCompany({ siret, name: companyName, city: lead.location_city });
+  if (companyId) await associateContactWithCompany(contactId, companyId);
+
+  const rows: string[] = [
+    lead.lead_source ? `Source : ${esc(lead.lead_source)}` : '',
+    lead.industry_trade ? `Métier : ${esc(lead.industry_trade)}` : '',
+    lead.location_city ? `Ville : ${esc(lead.location_city)}` : '',
+    lead.location_region ? `Région : ${esc(lead.location_region)}` : '',
+    lead.opportunity_title ? `Annonce concernée : ${esc(lead.opportunity_title)}` : '',
+    lead.lot_label ? `Lot : ${esc(lead.lot_label)}` : '',
+    lead.appointment_mode === 'slot' && lead.appointment_slot_at
+      ? `Rendez-vous demandé : ${esc(new Date(lead.appointment_slot_at).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' }))}`
+      : lead.appointment_mode === 'callback' ? 'Demande : être rappelé' : '',
+    lead.message ? `Message : ${esc(lead.message)}` : '',
+  ].filter(Boolean);
+  await createNote({
+    contactId, companyId,
+    html: `<p><strong>Nouvelle demande Marchés Direct</strong></p>` + (rows.length ? `<ul>${rows.map((r) => `<li>${r}</li>`).join('')}</ul>` : ''),
+  });
+
+  // The journey is a bonus on top of the request: a failure here must not
+  // re-run the whole lead sync (it would duplicate the note above). The
+  // periodic job picks the session up instead.
+  if (lead.session_id) {
+    try {
+      await linkSessionAndPushJourney(lead.session_id, contactId, companyId, lead.email);
+    } catch (err) {
+      logger.warn(`[CRM] HubSpot journey push deferred for lead ${lead.id} (the periodic job will retry):`, err);
+    }
+  }
+  return { contactId };
+}
+
+// Which CRM is active. CRM_SYSTEM wins when set; otherwise a HubSpot token
+// means HubSpot, and the historical default stays Pipedrive.
+export const resolveCrmSystem = (): string => {
+  const explicit = (process.env.CRM_SYSTEM || '').trim().toLowerCase();
+  if (explicit) return explicit;
+  return isHubspotConfigured() ? 'hubspot' : 'pipedrive';
+};
+const isSystemConfigured = (system: string): boolean =>
+  system === 'hubspot' ? isHubspotConfigured() : system === 'pipedrive' ? isCrmConfigured() : true;
+
 export const syncLeadToCrm = async (leadId: string): Promise<void> => {
-  const system = (process.env.CRM_SYSTEM || 'pipedrive').toLowerCase();
-  if (system === 'pipedrive' && !isCrmConfigured()) return;
+  const system = resolveCrmSystem();
+  if ((system === 'pipedrive' || system === 'hubspot') && !isSystemConfigured(system)) return;
 
   try {
     const result = await db.query(
@@ -170,12 +263,12 @@ export const syncLeadToCrm = async (leadId: string): Promise<void> => {
     }
     const lead: LeadRow = result.rows[0];
 
-    if (system !== 'pipedrive') {
-      logger.warn(`[CRM] CRM_SYSTEM=${system} has no adapter implemented yet (only 'pipedrive' is wired) - leaving lead ${leadId} as pending`);
+    if (system !== 'pipedrive' && system !== 'hubspot') {
+      logger.warn(`[CRM] CRM_SYSTEM=${system} has no adapter implemented yet (only 'pipedrive' and 'hubspot' are wired) - leaving lead ${leadId} as pending`);
       return;
     }
 
-    const { contactId } = await syncToPipedrive(lead);
+    const { contactId } = system === 'hubspot' ? await syncToHubspot(lead) : await syncToPipedrive(lead);
 
     await db.query(
       `UPDATE crm_leads SET crm_system = $1, crm_contact_id = $2, crm_sync_status = 'synced', crm_last_sync = NOW()
@@ -209,8 +302,8 @@ export const syncLeadToCrm = async (leadId: string): Promise<void> => {
 // CRM_API_KEY wasn't configured yet, or a transient API outage. Safe to call
 // repeatedly; each attempt just re-tries the same not-yet-synced rows.
 export const retryPendingCrmSyncs = async (limit: number = 50): Promise<number> => {
-  const system = (process.env.CRM_SYSTEM || 'pipedrive').toLowerCase();
-  if (system === 'pipedrive' && !isCrmConfigured()) return 0;
+  const system = resolveCrmSystem();
+  if ((system === 'pipedrive' || system === 'hubspot') && !isSystemConfigured(system)) return 0;
 
   const result = await db.query(
     `SELECT id FROM crm_leads WHERE crm_sync_status IN ('pending', 'failed') ORDER BY crm_last_sync ASC NULLS FIRST, created_at ASC LIMIT $1`,
