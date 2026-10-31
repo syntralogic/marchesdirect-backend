@@ -67,6 +67,9 @@ router.post(
       .custom((v) => isValidLeadPhone(v)).withMessage('Le numéro de téléphone n\'est pas valide.'),
     body('sessionId').optional({ checkFalsy: true }).isString().trim().isLength({ max: 100 }),
     body('slotAt').optional({ checkFalsy: true }).isISO8601().withMessage('Créneau invalide.'),
+    // The market (and optional lot) the request was made from, so the HubSpot deal carries md_market_* / md_lot_reference.
+    body('opportunityId').optional({ checkFalsy: true }).isUUID().withMessage('Marché invalide.'),
+    body('lotLabel').optional({ checkFalsy: true }).isString().trim().isLength({ max: 200 }),
     body('idempotencyKey').optional({ checkFalsy: true }).isString().trim().isLength({ min: 8, max: 100 }).withMessage('Clé de requête invalide.'),
   ],
   async (req: Request, res: Response) => {
@@ -89,6 +92,13 @@ router.post(
         industryTrade, locationCity, locationRegion, leadSource, message, sessionId,
       } = req.body;
       const phone = normalizeLeadPhone(req.body.phone);
+      // Only a market that really exists is linked (an unknown id must not fail the request: it is simply not linked).
+      let opportunityId: string | null = null;
+      if (req.body.opportunityId) {
+        const o = await db.query('SELECT id FROM opportunities WHERE id = $1 AND deleted_at IS NULL', [req.body.opportunityId]);
+        opportunityId = o.rows[0]?.id || null;
+      }
+      const lotLabel = opportunityId && typeof req.body.lotLabel === 'string' ? req.body.lotLabel.replace(/\s+/g, ' ').trim().slice(0, 200) || null : null;
       // Idempotency (guide v24 s.12): the same key = the same request. A retry after a
       // timeout / double-click returns the request that was already recorded.
       const idemRaw = req.body.idempotencyKey || req.get('Idempotency-Key') || '';
@@ -159,13 +169,14 @@ router.post(
       result = await db.query(
         `INSERT INTO crm_leads
           (brand_id, first_name, last_name, email, phone, company_name, industry_trade,
-           location_city, location_region, lead_source, message, session_id, idempotency_key, appointment_mode, appointment_slot_at, crm_sync_status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'pending')
+           location_city, location_region, lead_source, message, session_id, idempotency_key, appointment_mode, appointment_slot_at, opportunity_id, lot_label, crm_sync_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 'pending')
          RETURNING id, created_at`,
         [
           brandId, firstName, lastName, email, phone, companyName,
           industryTrade, locationCity, locationRegion, leadSource || 'website_form', finalMessage, sessionId || null, insertKey,
           slotDate ? 'slot' : null, slotDate ? slotDate.toISOString() : null,
+          opportunityId, lotLabel,
         ]
       ).catch(async (e: any) => {
         // Two concurrent requests with the same key: the unique index lets one win; the other gets that row.
