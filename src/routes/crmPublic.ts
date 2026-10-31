@@ -5,6 +5,8 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { sendAppointmentConfirmation } from '../services/appointmentConfirmationService';
+import { scheduleFollowUps, stopFollowUpsForEmail } from '../services/followUpService';
+import { applyContactChoice, parseContactMode } from '../services/contactPreferenceService';
 import { toE164French } from '../services/smsService';
 import { notifyTeamOfNewLead } from '../services/leadNotificationService';
 import { isValidLeadPhone } from '../utils/leadValidation';
@@ -189,6 +191,10 @@ router.post(
         logger.error('Unexpected error firing CRM sync:', err);
       });
       if (bookingId) sendAppointmentConfirmation(result.rows[0].id).catch((err) => logger.error('Appointment confirmation error:', err));
+      // Reminders: an appointment ends them, a plain dossier/callback request starts them (still inert until enabled).
+      if (bookingId) { if (email) stopFollowUpsForEmail(email, 'appointment_booked').catch(() => {}); }
+      else scheduleFollowUps(result.rows[0].id).catch(() => {});
+      { const cm = parseContactMode((req.body as any).contactMode); if (cm && email) applyContactChoice(email, cm).catch((err) => logger.error('contact choice error:', err)); }
 
       // Tell the team right away (email) - also fire-and-forget, never
       // affects the visitor's response.

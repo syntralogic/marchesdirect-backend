@@ -293,6 +293,7 @@ app.use('/api/subcontract-needs', require('./routes/subcontractNeeds').default);
 // pages (pricing page, contact form) before someone has an account.
 // Admin viewing/managing of captured leads stays behind authenticate below.
 app.use('/api/crm/leads', require('./routes/crmPublic').default);
+app.use('/api', require('./routes/contactPublic').default);
 app.use('/api/visitor-events', require('./routes/visitorEvents').default);
 app.use('/api/siret', optionalAuth, require('./routes/siret').default);
 
@@ -586,6 +587,7 @@ const startServer = async () => {
         ['opportunityAlerts', 'startOpportunityAlerts', 'alerts'],
         ['documentExpiry', 'startExpiryCheck', 'document expiry'],
         ['crmRetry', 'startCrmRetrySchedule', 'CRM retry'],
+        ['followUps', 'startFollowUpsSchedule', 'follow-ups and alerts'],
         ['backupManagement', 'startBackupSchedule', 'backups'],
         ['factsBackfillJob', 'startFactsBackfillJob', 'facts backfill'],
         ['aiProcessing', 'startAIProcessing', 'AI processing'],

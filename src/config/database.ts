@@ -1036,6 +1036,54 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   await step(`CREATE INDEX IF NOT EXISTS message_deliveries_dedupe ON message_deliveries(dedupe_key) WHERE dedupe_key IS NOT NULL`);
   // Real result of an appointment, recorded by staff: scheduled | attended | no_show | reschedule | cancelled.
   await step(`ALTER TABLE appointment_bookings ADD COLUMN IF NOT EXISTS outcome VARCHAR(20)`);
+  // Part D: real calendar, contact preferences, reminder sequence.
+  await step(`CREATE TABLE IF NOT EXISTS availability_blocks (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    starts_at TIMESTAMPTZ NOT NULL,
+    ends_at TIMESTAMPTZ NOT NULL CHECK (ends_at > starts_at),
+    reason VARCHAR(200),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS contact_mode VARCHAR(20)`);
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS reply_received_at TIMESTAMPTZ`);
+  await step(`CREATE TABLE IF NOT EXISTS contact_suppressions (
+    email_lower VARCHAR(255) PRIMARY KEY,
+    reason VARCHAR(40) NOT NULL,            -- request_only | unsubscribed
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await step(`CREATE TABLE IF NOT EXISTS follow_ups (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    lead_id UUID NOT NULL REFERENCES crm_leads(id) ON DELETE CASCADE,
+    step INTEGER NOT NULL,
+    due_at TIMESTAMPTZ NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',   -- pending | sent | stopped | failed | disabled
+    stop_reason VARCHAR(40),                         -- appointment_booked | reply_received | opted_out | no_email
+    processed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (lead_id, step)
+  )`);
+  await step(`CREATE INDEX IF NOT EXISTS follow_ups_due ON follow_ups(due_at) WHERE status = 'pending'`);
+  await step(`CREATE TABLE IF NOT EXISTS alert_subscriptions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    email VARCHAR(255) NOT NULL,
+    email_lower VARCHAR(255) NOT NULL,
+    trade_id INTEGER REFERENCES trades(id) ON DELETE CASCADE,
+    area VARCHAR(100),                       -- department code, region or city, as the visitor chose it
+    session_id VARCHAR(100),
+    consent_text TEXT NOT NULL,              -- the wording shown when they asked for alerts
+    consent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    confirmed_at TIMESTAMPTZ,                -- double opt-in: set only when they click the link in the e-mail
+    unsubscribed_at TIMESTAMPTZ,
+    last_alert_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await step(`CREATE UNIQUE INDEX IF NOT EXISTS alert_subscriptions_unique ON alert_subscriptions(email_lower, COALESCE(trade_id, 0), COALESCE(LOWER(area), ''))`);
+  await step(`CREATE TABLE IF NOT EXISTS alert_sent_items (
+    subscription_id UUID NOT NULL REFERENCES alert_subscriptions(id) ON DELETE CASCADE,
+    opportunity_id UUID NOT NULL,
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (subscription_id, opportunity_id)
+  )`);
   await step(`ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS event_id VARCHAR(100)`);
   await step(`ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS occurred_at TIMESTAMP`);
   await step(`ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS siret VARCHAR(14)`);
