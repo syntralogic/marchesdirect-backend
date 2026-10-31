@@ -933,6 +933,14 @@ CREATE TABLE visitor_events (
 );
 CREATE INDEX visitor_events_session ON visitor_events(session_id);
 CREATE INDEX visitor_events_created ON visitor_events(created_at);
+-- HubSpot integration (journal): idempotent events + identifiers (see applyIncrementalMigrations()).
+ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS event_id VARCHAR(100);
+ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS occurred_at TIMESTAMP;
+ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS siret VARCHAR(14);
+ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS opportunity_id VARCHAR(100);
+ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS lot_ref VARCHAR(100);
+ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS analysis_id VARCHAR(100);
+CREATE UNIQUE INDEX IF NOT EXISTS visitor_events_session_event_id ON visitor_events(session_id, event_id) WHERE event_id IS NOT NULL;
 
 -- SIRET-based company recognition (prototype V17) - session-scoped, global
 -- per browser regardless of which opportunity triggered it. See
