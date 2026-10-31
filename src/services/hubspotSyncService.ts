@@ -1,4 +1,5 @@
 import { journeyLinkProperties } from './journeyLinkService';
+import { activeCrmSystem } from './crmSystem';
 import axios, { AxiosRequestConfig } from 'axios';
 import { db } from '../config/database';
 import { syncDealForLead, DealLead } from './hubspotDealService';
@@ -264,7 +265,7 @@ const MD_PIPELINE_ID = '4280487115';
 // Answers "why does nothing reach HubSpot?" without exposing the token: which env vars are set, whether the token
 // belongs to the expected portal, whether the pipeline is reachable, and how many leads are stuck per sync status.
 export async function hubspotDiagnostic() {
-  const crmSystem = (process.env.CRM_SYSTEM || 'pipedrive').toLowerCase();
+  const crmSystem = activeCrmSystem();
   const out: any = {
     crmSystem,
     crmSystemIsHubspot: crmSystem === 'hubspot',

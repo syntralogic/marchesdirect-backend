@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { activeCrmSystem } from './crmSystem';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { isHubspotConfigured, syncLeadToHubspot, describeHubspotError } from './hubspotSyncService';
@@ -166,7 +167,7 @@ function isCrmConfigured(system: string = 'pipedrive'): boolean {
 }
 
 export const syncLeadToCrm = async (leadId: string): Promise<void> => {
-  const system = (process.env.CRM_SYSTEM || 'pipedrive').toLowerCase();
+  const system = activeCrmSystem();
   if ((system === 'pipedrive' || system === 'hubspot') && !isCrmConfigured(system)) return;
 
   try {
@@ -221,7 +222,7 @@ export const syncLeadToCrm = async (leadId: string): Promise<void> => {
 // CRM_API_KEY wasn't configured yet, or a transient API outage. Safe to call
 // repeatedly; each attempt just re-tries the same not-yet-synced rows.
 export const retryPendingCrmSyncs = async (limit: number = 50): Promise<number> => {
-  const system = (process.env.CRM_SYSTEM || 'pipedrive').toLowerCase();
+  const system = activeCrmSystem();
   if ((system === 'pipedrive' || system === 'hubspot') && !isCrmConfigured(system)) return 0;
 
   const result = await db.query(
