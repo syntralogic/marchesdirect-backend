@@ -91,7 +91,7 @@ router.get('/consultations/:opportunityId', async (req: Request, res: Response) 
            EXTRACT(EPOCH FROM (NOW() - MAX(e.created_at)))::int AS last_age
          FROM visitor_events e
          LEFT JOIN siret_lookups l ON l.session_id = e.session_id
-         WHERE e.event_type = 'view_opportunity'
+         WHERE e.event_type IN ('view_opportunity', 'offer_view')
            AND e.event_data->>'opportunityId' = $1
            AND e.created_at >= NOW() - INTERVAL '7 days'
            AND ($2::text IS NULL OR e.session_id <> $2)`,
