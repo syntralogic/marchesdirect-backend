@@ -135,3 +135,8 @@ All of these are inert for outgoing mail until the matching switch is `true`; no
 - **Alerts by trade and zone.** `POST /api/alert-subscriptions { email, tradeId?, area?, consent: true }` (double opt-in, unsubscribe link in every mail).
   The answer says what really happened to the confirmation e-mail (`sent | failed | not_configured | disabled`). `ALERT_EMAILS_ENABLED=true` turns it on.
 - **Still open:** SMS (provider and sender not chosen), a frontend form to ask for alerts, and the real end-to-end test with a live mailbox/calendar.
+
+### HubSpot -> journey page link (part E)
+- `FRONTEND_URL` must be the public site URL; `HUBSPOT_JOURNEY_LINK_ENABLED=true` turns the link on.
+- Run once: `HUBSPOT_ACCESS_TOKEN=... npx ts-node scripts/ensureHubspotJourneyProperty.ts` (creates `md_journey_url` on contacts and deals; needs scopes `crm.schemas.contacts.write` and `crm.schemas.deals.write`). Do it BEFORE enabling the flag.
+- The link opens `/admin/leads/:id/journey`: an admin/super_admin login is required, and the data comes from `GET /api/admin/leads/:id/journey` (requireRole). The next sync of each contact/deal writes the link.

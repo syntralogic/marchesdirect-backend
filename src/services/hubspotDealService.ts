@@ -1,3 +1,4 @@
+import { journeyLinkProperties } from './journeyLinkService';
 import axios, { AxiosRequestConfig } from 'axios';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
@@ -179,6 +180,7 @@ export function buildDealProperties(args: {
     ? (booking.outcome as AppointmentOutcome) : confirmed ? 'scheduled' : null;
   const title = market?.title ? String(market.title).slice(0, 120) : null;
   return compact({
+    ...journeyLinkProperties(lead.id),
     // pipeline/stage/name are written by the caller on creation only (see syncDealForLead)
     ...(forCreate ? { dealname: `${args.contactLabel} - ${title || 'Demande commerciale'}`.slice(0, 250) } : {}),
     md_request_id: lead.id,
