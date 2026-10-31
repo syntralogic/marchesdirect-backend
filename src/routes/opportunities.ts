@@ -1781,8 +1781,7 @@ router.get('/:id/access', optionalAuth, async (req: AuthRequest, res: Response) 
 // continuer ?" (prototype V17, section 3.5): exactly two choices, both of
 // which create/update the CRM lead, but only 'slot' unlocks the buyer's
 // identity - 'callback' (no particular time) never does, however many
-// times it's used. No-op on a public-market opportunity, which has nothing
-// to unlock.
+// times it's used. On a public-market opportunity there is nothing to unlock, but the request is still recorded.
 router.post(
   '/:id/request-access',
   [
@@ -1818,9 +1817,9 @@ router.post(
         return res.status(404).json({ error: 'Opportunity not found' });
       }
       const opp = oppResult.rows[0];
-      if (opp.journey === 'public_procurement') {
-        return res.json({ identityUnlocked: true });
-      }
+      // A public market has no buyer identity to unlock (it is already public), but a callback or an appointment
+      // taken from it is a real request and is recorded like any other.
+      const isPublicMarket = opp.journey === 'public_procurement';
 
       const { firstName, lastName, email, phone, companyName, sessionId, mode, slotLabel, slotAt } = req.body;
 
@@ -1858,7 +1857,7 @@ router.post(
         );
         if (recentDup.rows.length > 0) {
           logger.info(`Duplicate request-access submission suppressed (opportunity ${req.params.id}, session ${sessionId}, existing id ${recentDup.rows[0].id})`);
-          return res.json({ identityUnlocked: mode === 'slot', duplicate: true });
+          return res.json({ identityUnlocked: isPublicMarket || mode === 'slot', duplicate: true });
         }
       }
 
@@ -1932,7 +1931,7 @@ router.post(
       // request. Also covers an existing lead whose request evolved (callback -> appointment): same deal, new stage.
       syncLeadToCrm(leadId).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
       if (bookingId) sendAppointmentConfirmation(leadId).catch((err) => logger.error('Appointment confirmation error:', err));
-      res.status(201).json({ identityUnlocked: mode === 'slot', leadId, ...(slotDate ? { slotAt: slotDate.toISOString(), slotLabel: formatSlotFr(slotDate), timezone: APPOINTMENT_TZ } : {}) });
+      res.status(201).json({ identityUnlocked: isPublicMarket || mode === 'slot', leadId, ...(slotDate ? { slotAt: slotDate.toISOString(), slotLabel: formatSlotFr(slotDate), timezone: APPOINTMENT_TZ } : {}) });
       } catch (inner) {
         // the lead could not be saved: release the slot so it is never "confirmed" without a request behind it
         if (bookingId) await db.query(`DELETE FROM appointment_bookings WHERE id = $1`, [bookingId]).catch(() => {});

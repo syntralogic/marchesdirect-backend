@@ -31,13 +31,17 @@ Re-run: `TEST_DATABASE_URL=postgres://user:pw@localhost:5432/throwaway npx jest 
    "last 20 seconds" check before either row existed). The forms do send a key, but the server path is now atomic too:
    a derived key (same visitor, same content, same 20 s window) goes through the existing unique index. File: `crmPublic.ts`.
 
-## Observations, not changed
+## Observations
 
-- The callback and appointment forms (`/api/crm/leads`, `callback_modal` / `appointment_modal`) do not send the market or
-  the lot, so those deals have no `md_market_*` / `md_lot_reference`. Dossier requests and `request-access` do carry them.
-- `request-access` does nothing for a public market (returns early), so a callback/appointment taken from that route on a
-  public market creates no lead.
+- Fixed (31 Oct 2026): the callback and appointment forms now send the market (`opportunityId`) and, when known, the lot
+  (`lotLabel`) to `/api/crm/leads`; the lead stores `opportunity_id` / `lot_label`, so those deals get `md_market_*` and
+  `md_lot_reference`. Only an existing market is linked; an unknown id never fails the request. Forms opened outside a
+  market page (home, tarifs, header) still send none, as there is no market to attach. No page offers a lot choice yet.
+- Fixed (31 Oct 2026): `request-access` on a public market no longer returns early; the callback or appointment is recorded
+  like any other (`identityUnlocked` stays true there, as there is nothing to unlock).
 - The dossier gate in `siret.ts` sits behind a phone OTP; the test inserts the lead with the same SQL instead.
+- Not re-run after these two changes: the PostgreSQL acceptance test (no database in the build environment); typecheck and
+  the HubSpot unit tests pass.
 
 ## What only the real account can confirm
 
