@@ -255,3 +255,56 @@ export function describeHubspotError(err: any): string {
   return [status ? `HTTP ${status}` : 'no response', cat, msg].filter(Boolean).join(' - ').replace(/Bearer\s+\S+/gi, 'Bearer ***');
 }
 
+
+// ---------------------------------------------------------------- Diagnostic
+
+export const EXPECTED_HUBSPOT_PORTAL_ID = (process.env.HUBSPOT_PORTAL_ID || '149642063').trim();
+const MD_PIPELINE_ID = '4280487115';
+
+// Answers "why does nothing reach HubSpot?" without exposing the token: which env vars are set, whether the token
+// belongs to the expected portal, whether the pipeline is reachable, and how many leads are stuck per sync status.
+export async function hubspotDiagnostic() {
+  const crmSystem = (process.env.CRM_SYSTEM || 'pipedrive').toLowerCase();
+  const out: any = {
+    crmSystem,
+    crmSystemIsHubspot: crmSystem === 'hubspot',
+    tokenPresent: isHubspotConfigured(),
+    expectedPortalId: EXPECTED_HUBSPOT_PORTAL_ID,
+    api: { reachable: false, portalId: null as string | null, portalMatches: false, error: null as string | null },
+    pipeline: { found: false, error: null as string | null },
+    leadsBySyncStatus: {} as Record<string, number>,
+    lastErrors: [] as Array<{ id: string; error: string | null; at: Date | null }>,
+    verdict: [] as string[],
+  };
+  if (!out.crmSystemIsHubspot) out.verdict.push(`CRM_SYSTEM is "${crmSystem}", not "hubspot": syncLeadToCrm never calls HubSpot.`);
+  if (!out.tokenPresent) out.verdict.push('HUBSPOT_ACCESS_TOKEN is missing on this server: sync is skipped and leads stay pending.');
+  if (out.tokenPresent) {
+    try {
+      const info: any = await hs({ method: 'GET', url: '/account-info/v3/details' });
+      out.api.reachable = true;
+      out.api.portalId = String(info.portalId);
+      out.api.portalMatches = out.api.portalId === EXPECTED_HUBSPOT_PORTAL_ID;
+      if (!out.api.portalMatches) out.verdict.push(`Token belongs to portal ${out.api.portalId}, expected ${EXPECTED_HUBSPOT_PORTAL_ID}.`);
+    } catch (e: any) {
+      out.api.error = `${e?.response?.status || ''} ${e?.response?.data?.message || e?.message || 'error'}`.trim();
+      out.verdict.push(`HubSpot API call failed: ${out.api.error} (401 = bad token, 403 = missing scope).`);
+    }
+    try {
+      await hs({ method: 'GET', url: `/crm/v3/pipelines/deals/${MD_PIPELINE_ID}` });
+      out.pipeline.found = true;
+    } catch (e: any) {
+      out.pipeline.error = `${e?.response?.status || ''} ${e?.response?.data?.message || e?.message || 'error'}`.trim();
+      out.verdict.push(`Pipeline ${MD_PIPELINE_ID} not readable: ${out.pipeline.error}`);
+    }
+  }
+  try {
+    const r = await db.query(`SELECT COALESCE(crm_sync_status,'null') AS s, COUNT(*)::int AS n FROM crm_leads GROUP BY 1`);
+    for (const row of r.rows) out.leadsBySyncStatus[row.s] = row.n;
+    const e = await db.query(`SELECT id, crm_last_error, crm_last_sync FROM crm_leads WHERE crm_last_error IS NOT NULL ORDER BY crm_last_sync DESC NULLS LAST LIMIT 5`);
+    out.lastErrors = e.rows.map((x: any) => ({ id: x.id, error: x.crm_last_error, at: x.crm_last_sync }));
+  } catch (e: any) {
+    out.verdict.push(`Could not read crm_leads: ${e?.message}`);
+  }
+  if (!out.verdict.length) out.verdict.push('Configuration looks correct.');
+  return out;
+}
