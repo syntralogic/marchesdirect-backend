@@ -2,8 +2,9 @@ import { journeyLinkProperties } from './journeyLinkService';
 import { activeCrmSystem } from './crmSystem';
 import axios, { AxiosRequestConfig } from 'axios';
 import { db } from '../config/database';
-import { syncDealForLead, DealLead } from './hubspotDealService';
+import { syncDealForLead, DealLead, requestTypeForLead } from './hubspotDealService';
 import { isVerificationRequired } from './phoneVerificationService';
+import { buildCompanyCockpit } from './companyCockpitService';
 
 // ============================================================================
 // HUBSPOT SYNC - companies and contacts (client brief 31 Oct, part B)
@@ -149,9 +150,42 @@ export async function syncCompanyJourneyForSession(sessionId: string): Promise<v
   const sessions = await db.query('SELECT DISTINCT session_id FROM siret_lookups WHERE siret = $1', [siret]);
   const ids = sessions.rows.map((r: any) => r.session_id);
   const j = await journeyForSessions(ids);
-  await upsertCompany(siret, clean(lookup.rows[0]?.company_data?.name), {
+  const companyId = await upsertCompany(siret, clean(lookup.rows[0]?.company_data?.name), {
     visitors: ids.length, offerViews: j.offerViews, analyses: j.analyses, lastActivity: j.lastActivity,
   });
+  await syncCompanyCockpit(companyId, ids);
+}
+
+async function syncCompanyCockpit(companyId: string, sessionIds: string[]): Promise<void> {
+  const events = await db.query('SELECT DISTINCT event_type FROM visitor_events WHERE session_id = ANY($1)', [sessionIds]);
+  const coordinates = await db.query('SELECT 1 FROM siret_lookups WHERE session_id = ANY($1) AND lead_captured_at IS NOT NULL LIMIT 1', [sessionIds]);
+  const requests = await db.query(
+    `SELECT l.*, d.hubspot_deal_id FROM crm_leads l LEFT JOIN crm_deals d ON d.lead_id = l.id
+     WHERE l.session_id = ANY($1) AND (l.lead_source IN ('analysis_gate','callback_modal','appointment_modal') OR l.appointment_mode IN ('callback','slot'))
+     ORDER BY l.created_at DESC, l.id DESC LIMIT 1`, [sessionIds]);
+  const request = requests.rows[0];
+  let dealStage: string | null = null;
+  if (request?.hubspot_deal_id) {
+    const deal = await hs({ method: 'GET', url: `/crm/v3/objects/deals/${request.hubspot_deal_id}`, params: { properties: 'dealstage' } });
+    dealStage = deal.properties?.dealstage || null;
+  }
+  const bookings = request
+    ? await db.query('SELECT status, outcome, slot_at FROM appointment_bookings WHERE lead_id = $1 ORDER BY created_at DESC LIMIT 1', [request.id])
+    : { rows: [] };
+  const properties = buildCompanyCockpit({ events: events.rows.map((r: any) => r.event_type), hasCoordinates: !!coordinates.rows.length || !!(request?.email || request?.phone),
+    requestType: request ? requestTypeForLead(request) : null, dealStage, booking: bookings.rows[0] || null });
+  await hs({ method: 'PATCH', url: `/crm/v3/objects/companies/${companyId}`, data: { properties } });
+}
+
+// One bounded, non-blocking initialization on boot for existing companies.
+// New activity always refreshes its own company independently of this batch.
+export async function refreshExistingCompanyCockpits(): Promise<number> {
+  if (activeCrmSystem() !== 'hubspot' || !isHubspotConfigured()) return 0;
+  const selected = await db.query(
+    `SELECT DISTINCT ON (siret) session_id FROM siret_lookups
+     WHERE siret ~ '^[0-9]{14}$' ORDER BY siret, created_at DESC LIMIT 50`);
+  for (const row of selected.rows) await syncCompanyJourneyForSession(row.session_id);
+  return selected.rows.length;
 }
 
 // ---------------------------------------------------------------- HubSpot HTTP
@@ -260,6 +294,7 @@ export async function syncLeadToHubspot(lead: SyncLead): Promise<{ contactId: st
   );
   await associateContactWithCompany(contactId, companyId);
   await syncDealForLead(lead, contactId, companyId);
+  await syncCompanyCockpit(companyId, companySessions);
   return { contactId, companyId };
 }
 

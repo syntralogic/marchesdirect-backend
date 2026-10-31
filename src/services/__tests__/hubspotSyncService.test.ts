@@ -18,6 +18,8 @@ const lead = { id: 'l1', first_name: 'Ali', last_name: 'K', email: ' Ali@Example
 
 beforeEach(() => {
   jest.clearAllMocks();
+  q.mockResolvedValue({ rows: [] });
+  req.mockResolvedValue({ data: {} });
   process.env.HUBSPOT_ACCESS_TOKEN = 'secret-token';
 });
 
@@ -85,7 +87,7 @@ describe('syncLeadToHubspot', () => {
        .mockResolvedValueOnce({ data: {} });
     expect(await syncLeadToHubspot(lead)).toEqual({ contactId: 'c9', companyId: 'co9' });
     const methods = req.mock.calls.map(c => c[0].method);
-    expect(methods).toEqual(['POST', 'PATCH', 'POST', 'PATCH', 'PUT']);
+    expect(methods).toEqual(['POST', 'PATCH', 'POST', 'PATCH', 'PUT', 'PATCH']);
     expect(req.mock.calls[3][0].data.properties).not.toHaveProperty('name');
   });
 

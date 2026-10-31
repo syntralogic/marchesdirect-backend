@@ -13,7 +13,7 @@ export const ALLOWED_PROPERTIES = new Set([
   'md_request_id', 'md_request_type', 'md_request_date', 'md_market_type', 'md_market_reference', 'md_lot_reference', 'md_market_url',
   'md_compatibility_score', 'md_score_version', 'md_score_date',
   'md_answer_moyens', 'md_answer_references', 'md_answer_disponibilite', 'md_answer_zone',
-  'md_dossier_status', 'md_appointment_outcome',
+  'md_dossier_status', 'md_appointment_outcome', 'md_progress_stage', 'md_followup_priority', 'md_next_action',
 ]);
 const STAGE_CALLBACK = '6323584230';
 const STAGE_HELD = '6323584233';
