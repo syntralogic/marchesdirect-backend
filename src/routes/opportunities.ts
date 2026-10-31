@@ -16,6 +16,7 @@ import { ingestOpportunityDocuments } from '../services/documentIngestionService
 import { computeMatchScore } from '../services/matchScoreService';
 import { resolveTradeFromText, keywordsForSlugs } from '../services/tradeResolver';
 import { syncLeadToCrm } from '../services/crmSyncService';
+import { sendAppointmentConfirmation } from '../services/appointmentConfirmationService';
 import { geocodeCity } from '../services/geocodingService';
 import { optionalAuth, authenticate, requireRole, AuthRequest } from '../middleware/auth';
 
@@ -1927,6 +1928,7 @@ router.post(
       // Fired only once the booking is attached to the lead, so the CRM sees a CONFIRMED appointment, not a bare
       // request. Also covers an existing lead whose request evolved (callback -> appointment): same deal, new stage.
       syncLeadToCrm(leadId).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
+      if (bookingId) sendAppointmentConfirmation(leadId).catch((err) => logger.error('Appointment confirmation error:', err));
       res.status(201).json({ identityUnlocked: mode === 'slot', leadId, ...(slotDate ? { slotAt: slotDate.toISOString(), slotLabel: formatSlotFr(slotDate), timezone: APPOINTMENT_TZ } : {}) });
       } catch (inner) {
         // the lead could not be saved: release the slot so it is never "confirmed" without a request behind it

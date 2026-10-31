@@ -106,3 +106,12 @@ dossier/callback -> "À rappeler" (fires the HubSpot priority task), confirmed b
 staff record the real result: `POST /api/admin/leads/:id/appointment-outcome` with `{ "outcome": "attended" }`
 (`scheduled | attended | no_show | reschedule | cancelled`; attended/no_show only once the slot is in the past).
 Stages only move forward and never override a stage the team set. `crm_deals` maps each request to its HubSpot deal.
+
+### Messages and delivery status
+
+Saving a request, syncing it to the CRM and delivering a message have separate statuses: `crm_leads` (saved + `crm_sync_status` / `crm_last_error`)
+and `message_deliveries` (`sent` = accepted by the provider, `failed`, `not_configured`, `disabled`, with the error).
+`GET /api/admin/leads/:id/deliveries` shows both for a request. The dossier e-mail status feeds HubSpot's `md_dossier_status`
+(sent -> available, failed / not sent -> error). The appointment confirmation e-mail is OFF until `APPOINTMENT_CONFIRMATION_EMAILS=true`
+(after the template, `RESEND_API_KEY` and the sender domain are validated); while off, a `disabled` row is recorded and nothing is sent.
+SMS (other than the phone-verification code), calendar sync and the reminder sequence are not part of this step.

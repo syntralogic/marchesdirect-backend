@@ -73,6 +73,13 @@ describe('deal properties', () => {
     expect(p).not.toHaveProperty('md_score_version');
     expect(p).not.toHaveProperty('md_appointment_outcome');
   });
+  it('takes the dossier status from the real delivery of the e-mail', () => {
+    const base = { lead, type: 'dossier' as const, market, answers: null, score: null, booking: null, contactLabel: 'ACME' };
+    expect(buildDealProperties({ ...base, forCreate: true, dossierStatus: 'available' }).md_dossier_status).toBe('available');
+    expect(buildDealProperties({ ...base, forCreate: false, dossierStatus: 'error' }).md_dossier_status).toBe('error');
+    expect(buildDealProperties({ ...base, forCreate: true }).md_dossier_status).toBe('requested');
+    expect(buildDealProperties({ ...base, forCreate: false })).not.toHaveProperty('md_dossier_status');
+  });
   it('carries score + version + date when really computed, and scheduled for a booked slot', () => {
     const p = buildDealProperties({ lead, type: 'appointment', market, answers: null, score: 72, booking: { status: 'booked', outcome: null }, forCreate: false, contactLabel: 'ACME', now: new Date('2026-10-31T10:00:00Z') });
     expect(p).toMatchObject({ md_compatibility_score: 72, md_score_date: '2026-10-31', md_appointment_outcome: 'scheduled' });
@@ -86,7 +93,8 @@ describe('syncDealForLead', () => {
   const factsRows = () => q
     .mockResolvedValueOnce({ rows: [{ title: 'T', source_reference: 'R', official_url: null, journey: 'tender' }] }) // opportunity
     .mockResolvedValueOnce({ rows: [{ answers: { capacity: 'oui' }, lot_id: '' }] })                                  // snapshot
-    .mockResolvedValueOnce({ rows: [] });                                                                              // booking
+    .mockResolvedValueOnce({ rows: [] })                                                                               // booking
+    .mockResolvedValueOnce({ rows: [] });                                                                              // dossier delivery
 
   it('does nothing for a contact-form lead', async () => {
     expect(await syncDealForLead({ id: 'x', lead_source: 'contact_form' }, 'c1', 'co1')).toBeNull();
@@ -106,7 +114,7 @@ describe('syncDealForLead', () => {
     expect(create.data.properties).toMatchObject({ pipeline: PIPELINE_ID, dealstage: STAGES.callback, md_request_id: 'L1', md_market_type: 'private', md_compatibility_score: 64 });
     expect(req.mock.calls.slice(2).map(c => c[0].url)).toEqual([
       '/crm/v4/objects/deals/D1/associations/default/contacts/c1', '/crm/v4/objects/deals/D1/associations/default/companies/co1']);
-    expect(q.mock.calls[4][0]).toContain('INSERT INTO crm_deals');
+    expect(q.mock.calls.some(c => String(c[0]).includes('INSERT INTO crm_deals'))).toBe(true);
   });
 
   it('a second sync of the same request updates the deal instead of creating another', async () => {

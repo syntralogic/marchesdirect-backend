@@ -3,6 +3,7 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { computeMatchScore } from './matchScoreService';
 import { RULES_VERSION } from './matchEngine';
+import { dossierStatusFor } from './deliveryLogService';
 
 // ============================================================================
 // HUBSPOT DEALS (client brief 31 Oct, part C)
@@ -162,12 +163,14 @@ async function gatherDealFacts(lead: DealLead) {
     [lead.id]
   );
   const booking = b.rows[0] || null;
-  return { market, answers, score, booking };
+  const dossierStatus = await dossierStatusFor(lead.session_id, lead.opportunity_id);
+  return { market, answers, score, booking, dossierStatus };
 }
 
 export function buildDealProperties(args: {
   lead: DealLead; type: RequestType; market: any; answers: Record<string, unknown> | null; score: number | null;
   booking: { status: string; outcome: string | null } | null; forCreate: boolean; contactLabel: string; now?: Date;
+  dossierStatus?: 'requested' | 'available' | 'error' | null;
 }): Record<string, unknown> {
   const { lead, type, market, answers, score, booking, forCreate } = args;
   const now = args.now || new Date();
@@ -189,7 +192,9 @@ export function buildDealProperties(args: {
     md_score_version: score !== null ? RULES_VERSION : null,
     md_score_date: score !== null ? now.toISOString().slice(0, 10) : null,
     ...(answers ? answerProperties(answers) : {}),
-    ...(forCreate && type === 'dossier' ? { md_dossier_status: 'requested' } : {}),
+    // From the real delivery record of the dossier e-mail (sent -> available, failed/not sent -> error);
+    // without any record, a brand-new dossier request is simply 'requested'.
+    ...(args.dossierStatus ? { md_dossier_status: args.dossierStatus } : forCreate && type === 'dossier' ? { md_dossier_status: 'requested' } : {}),
     md_appointment_outcome: outcome,
   });
 }
@@ -215,7 +220,7 @@ export async function syncDealForLead(lead: DealLead, contactId: string, company
       dealId = found.results?.[0]?.id ? String(found.results[0].id) : null;
     }
 
-    const common = { lead, market: facts.market, answers: facts.answers, score: facts.score, booking: facts.booking, contactLabel };
+    const common = { lead, market: facts.market, answers: facts.answers, score: facts.score, booking: facts.booking, contactLabel, dossierStatus: facts.dossierStatus };
 
     if (!dealId) {
       const created = await hs<{ id: string }>({

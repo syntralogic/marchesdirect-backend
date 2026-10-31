@@ -4,6 +4,7 @@ import { body, validationResult } from 'express-validator';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { syncLeadToCrm } from '../services/crmSyncService';
+import { sendAppointmentConfirmation } from '../services/appointmentConfirmationService';
 import { toE164French } from '../services/smsService';
 import { notifyTeamOfNewLead } from '../services/leadNotificationService';
 import { isValidLeadPhone } from '../utils/leadValidation';
@@ -187,6 +188,7 @@ router.post(
       syncLeadToCrm(result.rows[0].id).catch((err) => {
         logger.error('Unexpected error firing CRM sync:', err);
       });
+      if (bookingId) sendAppointmentConfirmation(result.rows[0].id).catch((err) => logger.error('Appointment confirmation error:', err));
 
       // Tell the team right away (email) - also fire-and-forget, never
       // affects the visitor's response.
