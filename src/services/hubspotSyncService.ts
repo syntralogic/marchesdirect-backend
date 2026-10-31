@@ -162,7 +162,7 @@ async function syncCompanyCockpit(companyId: string, sessionIds: string[]): Prom
   const requests = await db.query(
     `SELECT l.*, d.hubspot_deal_id FROM crm_leads l LEFT JOIN crm_deals d ON d.lead_id = l.id
      WHERE l.session_id = ANY($1) AND (l.lead_source IN ('analysis_gate','callback_modal','appointment_modal') OR l.appointment_mode IN ('callback','slot'))
-     ORDER BY l.created_at DESC, l.id DESC LIMIT 1`, [sessionIds]);
+     ORDER BY GREATEST(l.updated_at, l.created_at) DESC, l.id DESC LIMIT 1`, [sessionIds]);
   const request = requests.rows[0];
   let dealStage: string | null = null;
   if (request?.hubspot_deal_id) {

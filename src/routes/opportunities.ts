@@ -1927,6 +1927,9 @@ router.post(
       }
 
       if (bookingId) await db.query(`UPDATE appointment_bookings SET lead_id = $1 WHERE id = $2`, [leadId, bookingId]);
+      if (sessionId) await recordJourneyEvent({ sessionId, opportunityId: req.params.id,
+        eventType: bookingId ? 'appointment_booked' : 'callback_requested',
+        eventId: `access:${leadId}:${bookingId || Date.now()}` });
       if (bookingId) stopFollowUpsForEmail(email, 'appointment_booked').catch(() => {}); else scheduleFollowUps(leadId).catch(() => {});
       // Fired only once the booking is attached to the lead, so the CRM sees a CONFIRMED appointment, not a bare
       // request. Also covers an existing lead whose request evolved (callback -> appointment): same deal, new stage.
