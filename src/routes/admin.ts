@@ -8,6 +8,8 @@ import { verifyDeduplicationQuality, getDeduplicationReport, deduplicateOpportun
 import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities, generateAnalysisSectionsForOpportunities, generateOpportunityAnalysisSections } from '../services/aiService';
 import { collectBoampData, collectPlaceData, collectTedData, collectDecpData, collectBatiwebData, collectApprochData } from '../services/dataCollectionService';
 import { runBackup, testRestore } from '../jobs/backupManagement';
+import { syncLeadToCrm } from '../services/crmSyncService';
+import { APPOINTMENT_OUTCOMES } from '../services/hubspotDealService';
 
 const router = Router();
 
@@ -1336,6 +1338,32 @@ router.put('/opportunity-leads/:id/grant-access', async (req: AuthRequest, res: 
   } catch (err: any) {
     logger.error('Admin grant access error:', err);
     res.status(500).json({ error: 'Failed to grant access' });
+  }
+});
+
+// POST /api/admin/leads/:id/appointment-outcome { outcome } - staff record what REALLY happened to the appointment.
+// "attended" / "no_show" are only accepted once the slot is in the past, because the CRM stage "RDV réalisé"
+// must mean a meeting that was actually held. The deal in HubSpot follows on the next sync (fired right away).
+router.post('/leads/:id/appointment-outcome', async (req: AuthRequest, res: Response) => {
+  try {
+    const outcome = String(req.body?.outcome || '');
+    if (!(APPOINTMENT_OUTCOMES as readonly string[]).includes(outcome)) {
+      return res.status(400).json({ error: `outcome must be one of: ${APPOINTMENT_OUTCOMES.join(', ')}` });
+    }
+    const b = await db.query(
+      `SELECT id, slot_at FROM appointment_bookings WHERE lead_id = $1 AND status = 'booked' ORDER BY created_at DESC LIMIT 1`,
+      [req.params.id]
+    );
+    if (b.rows.length === 0) return res.status(404).json({ error: 'No confirmed appointment for this lead' });
+    if ((outcome === 'attended' || outcome === 'no_show') && new Date(b.rows[0].slot_at).getTime() > Date.now()) {
+      return res.status(409).json({ error: 'This appointment has not taken place yet' });
+    }
+    await db.query('UPDATE appointment_bookings SET outcome = $1 WHERE id = $2', [outcome, b.rows[0].id]);
+    syncLeadToCrm(req.params.id).catch((err) => logger.error('Appointment outcome CRM sync error:', err));
+    res.json({ success: true, outcome });
+  } catch (err: any) {
+    logger.error('Admin appointment outcome error:', err);
+    res.status(500).json({ error: 'Failed to record appointment outcome' });
   }
 });
 

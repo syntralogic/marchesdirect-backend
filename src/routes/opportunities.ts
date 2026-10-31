@@ -1921,10 +1921,12 @@ router.post(
           [brandId, firstName, lastName, email, phone, companyName, message, req.params.id, sessionId || null, mode, mode === 'slot' && slotDate ? slotDate.toISOString() : null]
         );
         leadId = insertResult.rows[0].id;
-        syncLeadToCrm(leadId).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
       }
 
       if (bookingId) await db.query(`UPDATE appointment_bookings SET lead_id = $1 WHERE id = $2`, [leadId, bookingId]);
+      // Fired only once the booking is attached to the lead, so the CRM sees a CONFIRMED appointment, not a bare
+      // request. Also covers an existing lead whose request evolved (callback -> appointment): same deal, new stage.
+      syncLeadToCrm(leadId).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
       res.status(201).json({ identityUnlocked: mode === 'slot', leadId, ...(slotDate ? { slotAt: slotDate.toISOString(), slotLabel: formatSlotFr(slotDate), timezone: APPOINTMENT_TZ } : {}) });
       } catch (inner) {
         // the lead could not be saved: release the slot so it is never "confirmed" without a request behind it

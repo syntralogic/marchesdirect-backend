@@ -1,5 +1,6 @@
 import axios, { AxiosRequestConfig } from 'axios';
 import { db } from '../config/database';
+import { syncDealForLead, DealLead } from './hubspotDealService';
 
 // ============================================================================
 // HUBSPOT SYNC - companies and contacts (client brief 31 Oct, part B)
@@ -38,7 +39,7 @@ export type JourneySummary = {
   analyses: number;
 };
 
-export type SyncLead = {
+export type SyncLead = DealLead & {
   id: string;
   first_name: string | null;
   last_name: string | null;
@@ -221,7 +222,10 @@ export async function syncLeadToHubspot(lead: SyncLead): Promise<{ contactId: st
       )
     : { rows: [] as any[] };
   const siret: string | null = lookup.rows[0]?.siret && /^\d{14}$/.test(lookup.rows[0].siret) ? lookup.rows[0].siret : null;
-  if (!siret) return { contactId, companyId: null };
+  if (!siret) {
+    await syncDealForLead(lead, contactId, null);
+    return { contactId, companyId: null };
+  }
 
   // Company summary = ALL visitors (sessions) that selected this SIRET, not only this contact.
   const all = await db.query(`SELECT session_id FROM siret_lookups WHERE siret = $1`, [siret]);
@@ -233,6 +237,7 @@ export async function syncLeadToHubspot(lead: SyncLead): Promise<{ contactId: st
     { visitors: companySessions.length, offerViews: cj.offerViews, analyses: cj.analyses, lastActivity: cj.lastActivity }
   );
   await associateContactWithCompany(contactId, companyId);
+  await syncDealForLead(lead, contactId, companyId);
   return { contactId, companyId };
 }
 

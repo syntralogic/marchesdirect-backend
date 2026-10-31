@@ -98,3 +98,11 @@ Every lead (callback, appointment, dossier, contact form) is synced to a HubSpot
 selected a company, to a HubSpot company (found by `md_siret`), then the two are associated. The `md_*` properties are summaries
 recomputed from `visitor_events`; the journal in the database stays the full history. Failures keep the lead as `failed` with the
 reason in `crm_leads.crm_last_error`, and the 30-minute retry sweep tries again. Deals/tasks are not part of this step.
+
+### HubSpot deals
+
+A deal is created only for a real commercial request (dossier, callback, appointment), in pipeline `4280487115`:
+dossier/callback -> "À rappeler" (fires the HubSpot priority task), confirmed booking -> "RDV confirmé". "RDV réalisé" is set only after
+staff record the real result: `POST /api/admin/leads/:id/appointment-outcome` with `{ "outcome": "attended" }`
+(`scheduled | attended | no_show | reschedule | cancelled`; attended/no_show only once the slot is in the past).
+Stages only move forward and never override a stage the team set. `crm_deals` maps each request to its HubSpot deal.
