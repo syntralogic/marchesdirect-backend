@@ -1,4 +1,5 @@
 import { reserveSlot, releaseBooking, attachBooking, upcomingBookingFor, slotInfo } from '../services/appointmentService';
+import { createHash } from 'crypto';
 import { Router, Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import { db } from '../config/database';
@@ -92,6 +93,12 @@ router.post(
       // timeout / double-click returns the request that was already recorded.
       const idemRaw = req.body.idempotencyKey || req.get('Idempotency-Key') || '';
       const idempotencyKey = typeof idemRaw === 'string' && idemRaw.trim().length >= 8 ? idemRaw.trim().slice(0, 100) : null;
+      // Two identical clicks that arrive at the same instant both pass the "last 20 seconds" check below before either
+      // row exists. Without a client key, a derived key (same visitor, same content, same 20 s window) lets the
+      // unique index decide atomically which one is recorded.
+      const insertKey = idempotencyKey || (sessionId
+        ? 'auto:' + createHash('sha1').update([brandId, sessionId, leadSource || 'website_form', email || '', phone || '', message || '', req.body.slotAt || '', Math.floor(Date.now() / 20000)].join('|')).digest('hex')
+        : null);
       if (idempotencyKey) {
         const prior = await db.query('SELECT id, created_at, appointment_slot_at FROM crm_leads WHERE brand_id = $1 AND idempotency_key = $2 LIMIT 1', [brandId, idempotencyKey]);
         if (prior.rows.length > 0) {
@@ -157,13 +164,13 @@ router.post(
          RETURNING id, created_at`,
         [
           brandId, firstName, lastName, email, phone, companyName,
-          industryTrade, locationCity, locationRegion, leadSource || 'website_form', finalMessage, sessionId || null, idempotencyKey,
+          industryTrade, locationCity, locationRegion, leadSource || 'website_form', finalMessage, sessionId || null, insertKey,
           slotDate ? 'slot' : null, slotDate ? slotDate.toISOString() : null,
         ]
       ).catch(async (e: any) => {
         // Two concurrent requests with the same key: the unique index lets one win; the other gets that row.
-        if (e?.code === '23505' && idempotencyKey) {
-          const won = await db.query('SELECT id, created_at FROM crm_leads WHERE brand_id = $1 AND idempotency_key = $2 LIMIT 1', [brandId, idempotencyKey]);
+        if (e?.code === '23505' && insertKey) {
+          const won = await db.query('SELECT id, created_at FROM crm_leads WHERE brand_id = $1 AND idempotency_key = $2 LIMIT 1', [brandId, insertKey]);
           if (won.rows.length > 0) return { rows: won.rows, duplicate: true } as any;
         }
         throw e;
