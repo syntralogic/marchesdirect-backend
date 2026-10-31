@@ -140,3 +140,13 @@ All of these are inert for outgoing mail until the matching switch is `true`; no
 - `FRONTEND_URL` must be the public site URL; `HUBSPOT_JOURNEY_LINK_ENABLED=true` turns the link on.
 - Run once: `HUBSPOT_ACCESS_TOKEN=... npx ts-node scripts/ensureHubspotJourneyProperty.ts` (creates `md_journey_url` on contacts and deals; needs scopes `crm.schemas.contacts.write` and `crm.schemas.deals.write`). Do it BEFORE enabling the flag.
 - The link opens `/admin/leads/:id/journey`: an admin/super_admin login is required, and the data comes from `GET /api/admin/leads/:id/journey` (requireRole). The next sync of each contact/deal writes the link.
+
+## HubSpot (portal 149642063) — minimum setup
+
+On the server (Render → Environment) add only:
+
+- `HUBSPOT_ACCESS_TOKEN` — token of a HubSpot Private App (scopes: contacts, companies, deals read/write; `crm.schemas.contacts.write`, `crm.schemas.deals.write`; `crm.objects.owners.read`)
+- `HUBSPOT_PORTAL_ID=149642063`
+
+`CRM_SYSTEM` no longer needs to be set: with a token present and no explicit `CRM_SYSTEM`, HubSpot is used.
+Then open `GET /api/admin/hubspot/status` (admin login) — its `verdict` says exactly what is still wrong.
