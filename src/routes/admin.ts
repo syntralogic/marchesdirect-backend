@@ -1367,6 +1367,26 @@ router.post('/leads/:id/appointment-outcome', async (req: AuthRequest, res: Resp
   }
 });
 
+// GET /api/admin/leads/:id/deliveries - every outgoing message of this request with its REAL status
+// (sent = accepted by the provider, failed, not_configured, disabled) and the error, so a failure is visible.
+router.get('/leads/:id/deliveries', async (req: AuthRequest, res: Response) => {
+  try {
+    const lead = await db.query('SELECT session_id, opportunity_id, crm_sync_status, crm_last_error FROM crm_leads WHERE id = $1', [req.params.id]);
+    if (lead.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
+    const l = lead.rows[0];
+    const r = await db.query(
+      `SELECT kind, channel, recipient, status, error, created_at FROM message_deliveries
+       WHERE lead_id = $1 OR (session_id IS NOT NULL AND session_id = $2 AND opportunity_id IS NOT DISTINCT FROM $3)
+       ORDER BY created_at DESC LIMIT 50`,
+      [req.params.id, l.session_id, l.opportunity_id]
+    );
+    res.json({ crm: { status: l.crm_sync_status, error: l.crm_last_error }, deliveries: r.rows });
+  } catch (err: any) {
+    logger.error('Admin lead deliveries error:', err);
+    res.status(500).json({ error: 'Failed to fetch deliveries' });
+  }
+});
+
 // GET /api/admin/leads/:id/journey - visitor_events for this lead's session,
 // so a chargé d'affaires calling the lead back can see what they searched
 // for and looked at instead of re-asking from scratch (client requirement).

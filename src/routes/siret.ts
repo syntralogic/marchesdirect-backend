@@ -726,7 +726,7 @@ async function handleLeadCapture(
             estimatedValue: o.estimated_value ? Number(o.estimated_value) : null,
             currency: o.currency,
             isClosed: isOpportunityClosed({ status: o.status, deadline: o.deadline }),
-          });
+          }, { sessionId, opportunityId });
         }
       } catch (err) {
         // Non-fatal, same reasoning as the CRM linking block below.
@@ -877,8 +877,12 @@ router.post(
       if ('error' in result) {
         return res.status(409).json({ error: result.error, message: "Confirmez d'abord vos coordonnées pour recevoir ce document." });
       }
-      const sent = await sendPrefilledDossierEmail(result.email, result.input);
+      const sent = await sendPrefilledDossierEmail(result.email, result.input, { sessionId, opportunityId });
       res.json({ sent });
+      // The delivery result changes the dossier status shown in the CRM deal: refresh that request's record.
+      db.query(`SELECT id FROM crm_leads WHERE opportunity_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`, [opportunityId, result.email])
+        .then((r) => { if (r.rows[0]) return syncLeadToCrm(r.rows[0].id); })
+        .catch((err) => logger.error('Dossier resend CRM refresh error (non-fatal):', err));
     } catch (err) {
       logger.error('Prefilled dossier resend error:', err);
       res.status(500).json({ error: "Échec de l'envoi. Réessayez dans un instant." });

@@ -1,5 +1,6 @@
 import PDFDocument from 'pdfkit';
 import { logger } from '../utils/logger';
+import { deliverEmail, recordDelivery, DeliveryContext } from './deliveryLogService';
 
 // ============================================================================
 // FREE "DOSSIER PRÉ-REMPLI" PDF
@@ -127,11 +128,18 @@ export function generatePrefilledDossierPdf(input: PrefilledDossierInput): Promi
 // already used for CRM linking in POST /siret/lead.
 export async function sendPrefilledDossierEmail(
   to: string,
-  input: PrefilledDossierInput
+  input: PrefilledDossierInput,
+  ctx: DeliveryContext = {}
 ): Promise<boolean> {
+  let pdf: Buffer;
   try {
-    const { sendEmail } = await import('./emailService');
-    const pdf = await generatePrefilledDossierPdf(input);
+    pdf = await generatePrefilledDossierPdf(input);
+  } catch (err) {
+    logger.error('Prefilled dossier PDF failed (non-fatal):', err);
+    await recordDelivery('dossier', to, 'failed', ctx, 'pdf generation failed');
+    return false;
+  }
+  try {
     const html = `
       <p>Bonjour,</p>
       <p>Voici votre dossier pré-rempli (aperçu préparatoire, pas un dossier prêt au dépôt) pour <strong>${escapeHtml(input.opportunityTitle)}</strong>${input.lotLabel ? ` (lot : <strong>${escapeHtml(input.lotLabel)}</strong>)` : ''}, préparé à partir des informations de votre entreprise et de cette opportunité.</p>
@@ -144,12 +152,15 @@ export async function sendPrefilledDossierEmail(
     // in emailService.ts. A misconfigured/no-op send (no RESEND_API_KEY)
     // now correctly reports dossierEmailed: false to the caller, instead of
     // the site claiming "Dossier envoyé" for a message nobody received.
-    return await sendEmail({
+    // Every attempt leaves a delivery row (sent / failed / not_configured): the site only says "envoyé" for 'sent'.
+    return (await deliverEmail({
+      kind: 'dossier',
       to,
       subject: `Votre dossier pré-rempli - ${input.opportunityTitle}${input.lotLabel ? ` (lot : ${input.lotLabel})` : ''}`,
       html,
       attachments: [{ filename: 'dossier-pre-rempli.pdf', content: pdf }],
-    });
+      ctx,
+    })).sent;
   } catch (err) {
     logger.error('Prefilled dossier email failed (non-fatal):', err);
     return false;

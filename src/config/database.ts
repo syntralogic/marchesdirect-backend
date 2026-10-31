@@ -1017,6 +1017,23 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`);
+  // Outgoing message log (part D): request saved, CRM sync and message delivery each have their own status.
+  await step(`CREATE TABLE IF NOT EXISTS message_deliveries (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    kind VARCHAR(40) NOT NULL,
+    channel VARCHAR(10) NOT NULL DEFAULT 'email',
+    recipient VARCHAR(255) NOT NULL,
+    status VARCHAR(20) NOT NULL,          -- sent | failed | not_configured | disabled
+    error TEXT,
+    lead_id UUID REFERENCES crm_leads(id) ON DELETE CASCADE,
+    session_id VARCHAR(100),
+    opportunity_id UUID,
+    dedupe_key VARCHAR(200),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await step(`CREATE INDEX IF NOT EXISTS message_deliveries_lead ON message_deliveries(lead_id)`);
+  await step(`CREATE INDEX IF NOT EXISTS message_deliveries_dossier ON message_deliveries(kind, session_id, opportunity_id)`);
+  await step(`CREATE INDEX IF NOT EXISTS message_deliveries_dedupe ON message_deliveries(dedupe_key) WHERE dedupe_key IS NOT NULL`);
   // Real result of an appointment, recorded by staff: scheduled | attended | no_show | reschedule | cancelled.
   await step(`ALTER TABLE appointment_bookings ADD COLUMN IF NOT EXISTS outcome VARCHAR(20)`);
   await step(`ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS event_id VARCHAR(100)`);
