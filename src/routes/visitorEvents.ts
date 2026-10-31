@@ -7,6 +7,12 @@ import { createBoundedCache } from '../utils/ttlCache';
 import { buildConsultationIndicator, ConsultationLang, ConsultationStats } from '../utils/consultationIndicator';
 
 const router = Router();
+
+// Event codes agreed with the client for the HubSpot journey (kept next to the older ones, which stay valid).
+export const HUBSPOT_EVENT_CODES = [
+  'offer_view', 'company_selected', 'analysis_started', 'analysis_completed',
+  'dossier_preview', 'dossier_requested', 'callback_requested', 'appointment_booked',
+];
 const cachedStats = createBoundedCache(2000);
 
 // POST /api/visitor-events - fire-and-forget analytics ingestion (public,
@@ -23,7 +29,13 @@ router.post(
   '/',
   [
     body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
-    body('eventType').isString().trim().isIn(['search', 'view_opportunity', 'view_seo_page', 'company_identified', 'concordance_shown', 'form_started', 'request_submitted']),
+    body('eventType').isString().trim().isIn(['search', 'view_opportunity', 'view_seo_page', 'company_identified', 'concordance_shown', 'form_started', 'request_submitted', ...HUBSPOT_EVENT_CODES]),
+    body('eventId').optional({ checkFalsy: true }).isString().trim().isLength({ min: 8, max: 100 }),
+    body('occurredAt').optional({ checkFalsy: true }).isISO8601(),
+    body('siret').optional({ checkFalsy: true }).matches(/^\d{14}$/),
+    body('opportunityId').optional({ checkFalsy: true }).isString().trim().isLength({ max: 100 }),
+    body('lotRef').optional({ checkFalsy: true }).isString().trim().isLength({ max: 100 }),
+    body('analysisId').optional({ checkFalsy: true }).isString().trim().isLength({ max: 100 }),
     body('eventLabel').optional({ checkFalsy: true }).isString().trim().isLength({ max: 500 }),
     body('brandId').optional({ checkFalsy: true }).isString(),
   ],
@@ -35,11 +47,15 @@ router.post(
       return res.status(204).end();
     }
     try {
-      const { sessionId, brandId, eventType, eventLabel, eventData } = req.body;
+      const { sessionId, brandId, eventType, eventLabel, eventData, eventId, occurredAt, siret, opportunityId, lotRef, analysisId } = req.body;
+      // ON CONFLICT DO NOTHING on (session_id, event_id): a double click or a network retry resending the same
+      // eventId is stored once. Events sent without an eventId keep the previous behaviour.
       await db.query(
-        `INSERT INTO visitor_events (session_id, brand_id, event_type, event_label, event_data)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [sessionId, brandId || null, eventType, eventLabel || null, eventData ? JSON.stringify(eventData) : null]
+        `INSERT INTO visitor_events (session_id, brand_id, event_type, event_label, event_data, event_id, occurred_at, siret, opportunity_id, lot_ref, analysis_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (session_id, event_id) WHERE event_id IS NOT NULL DO NOTHING`,
+        [sessionId, brandId || null, eventType, eventLabel || null, eventData ? JSON.stringify(eventData) : null,
+         eventId || null, occurredAt || null, siret || null, opportunityId || null, lotRef || null, analysisId || null]
       );
       res.status(204).end();
     } catch (err: any) {
