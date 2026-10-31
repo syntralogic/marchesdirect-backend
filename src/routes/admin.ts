@@ -8,6 +8,7 @@ import { verifyDeduplicationQuality, getDeduplicationReport, deduplicateOpportun
 import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities, generateAnalysisSectionsForOpportunities, generateOpportunityAnalysisSections } from '../services/aiService';
 import { collectBoampData, collectPlaceData, collectTedData, collectDecpData, collectBatiwebData, collectApprochData } from '../services/dataCollectionService';
 import { runBackup, testRestore } from '../jobs/backupManagement';
+import { abandonmentReport } from '../services/abandonmentReportService';
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { APPOINTMENT_OUTCOMES } from '../services/hubspotDealService';
 import { stopFollowUpsForLead } from '../services/followUpService';
@@ -1470,6 +1471,16 @@ router.get('/leads/:id/journey', async (req: AuthRequest, res: Response) => {
   } catch (err: any) {
     logger.error('Admin lead journey error:', err);
     res.status(500).json({ error: 'Failed to fetch visitor journey' });
+  }
+});
+
+// GET /api/admin/reports/abandonment?days=30 - where visitors stop in the journey (brief part F).
+router.get('/reports/abandonment', async (req: AuthRequest, res: Response) => {
+  try {
+    res.json(await abandonmentReport(Number(req.query.days) || 30));
+  } catch (err: any) {
+    logger.error('Admin abandonment report error:', err);
+    res.status(500).json({ error: 'Failed to build abandonment report' });
   }
 });
 
