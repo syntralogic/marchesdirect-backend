@@ -1,14 +1,16 @@
 import { db } from '../config/database';
 import { generateSlots, freeSlotDays, isOfferedSlot, formatSlotFr, APPOINTMENT_TZ } from '../utils/appointmentSlots';
+import { getBusy, removeBusySlots, isSlotCalendarFree } from './calendarAvailabilityService';
 
 export type Reservation =
   | { ok: true; bookingId: string; slotDate: Date }
   | { ok: false; status: number; body: Record<string, unknown> };
 
-export async function freeAlternatives() {
+/** Slots that are free in BOTH the bookings table and the team's real calendar. */
+export async function freeAlternatives(businessDays = 5) {
   const booked = await db.query(`SELECT slot_at FROM appointment_bookings WHERE status = 'booked' AND slot_at > NOW()`);
   const taken = new Set<number>(booked.rows.map((r: any) => new Date(r.slot_at).getTime()));
-  return freeSlotDays(generateSlots(new Date(), 5), taken);
+  return removeBusySlots(freeSlotDays(generateSlots(new Date(), businessDays), taken), await getBusy());
 }
 
 /** Atomically reserves a slot: the partial unique index lets exactly one request win. */
@@ -17,6 +19,9 @@ export async function reserveSlot(slotAtIso: string, opportunityId: string | nul
     return { ok: false, status: 400, body: { error: "Ce créneau n'est pas proposé. Choisissez un autre créneau.", code: 'slot_invalid' } };
   }
   const slotDate = new Date(slotAtIso);
+  if (!(await isSlotCalendarFree(slotAtIso))) {
+    return { ok: false, status: 409, body: { error: "Ce créneau n'est plus disponible. Vos informations sont conservées : choisissez un autre créneau.", code: 'slot_taken', timezone: APPOINTMENT_TZ, alternatives: await freeAlternatives() } };
+  }
   try {
     const r = await db.query(`INSERT INTO appointment_bookings (slot_at, opportunity_id) VALUES ($1, $2) RETURNING id`, [slotDate.toISOString(), opportunityId]);
     return { ok: true, bookingId: r.rows[0].id, slotDate };

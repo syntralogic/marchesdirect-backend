@@ -17,6 +17,9 @@ import { computeMatchScore } from '../services/matchScoreService';
 import { resolveTradeFromText, keywordsForSlugs } from '../services/tradeResolver';
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { sendAppointmentConfirmation } from '../services/appointmentConfirmationService';
+import { freeAlternatives } from '../services/appointmentService';
+import { scheduleFollowUps, stopFollowUpsForEmail } from '../services/followUpService';
+import { isSlotCalendarFree } from '../services/calendarAvailabilityService';
 import { geocodeCity } from '../services/geocodingService';
 import { optionalAuth, authenticate, requireRole, AuthRequest } from '../middleware/auth';
 
@@ -1625,10 +1628,7 @@ async function computeDocumentsAnalyzedCount(opportunityId: string, dceDocuments
 // GET /api/opportunities/appointment-slots - free RDV slots (server-owned, Europe/Paris).
 router.get('/appointment-slots', async (_req: Request, res: Response) => {
   try {
-    const days = generateSlots(new Date(), 5);
-    const booked = await db.query(`SELECT slot_at FROM appointment_bookings WHERE status = 'booked' AND slot_at > NOW()`);
-    const taken = new Set<number>(booked.rows.map((r: any) => new Date(r.slot_at).getTime()));
-    res.json({ timezone: APPOINTMENT_TZ, days: freeSlotDays(days, taken) });
+    res.json({ timezone: APPOINTMENT_TZ, days: await freeAlternatives() });
   } catch (err: any) {
     logger.error('appointment-slots error:', err);
     res.status(500).json({ error: 'Impossible de charger les créneaux.' });
@@ -1875,6 +1875,10 @@ router.post(
           return res.status(400).json({ error: "Ce créneau n'est pas proposé. Choisissez un autre créneau." });
         }
         slotDate = new Date(slotAt);
+        if (!(await isSlotCalendarFree(slotAt))) {
+          return res.status(409).json({ error: "Ce créneau n'est plus disponible. Vos informations sont conservées : choisissez un autre créneau.",
+            code: 'slot_taken', timezone: APPOINTMENT_TZ, alternatives: await freeAlternatives() });
+        }
         // A visitor who already holds an upcoming RDV on this market is not offered a second booking.
         const mine = await db.query(
           `SELECT b.slot_at, l.id AS lead_id FROM appointment_bookings b JOIN crm_leads l ON l.id = b.lead_id
@@ -1890,10 +1894,8 @@ router.post(
           bookingId = b.rows[0].id;
         } catch (e: any) {
           if (e?.code === '23505') {
-            const booked = await db.query(`SELECT slot_at FROM appointment_bookings WHERE status = 'booked' AND slot_at > NOW()`);
-            const taken = new Set<number>(booked.rows.map((r: any) => new Date(r.slot_at).getTime()));
             return res.status(409).json({ error: "Ce créneau vient d'être pris. Vos informations sont conservées : choisissez un autre créneau.",
-              code: 'slot_taken', timezone: APPOINTMENT_TZ, alternatives: freeSlotDays(generateSlots(new Date(), 5), taken) });
+              code: 'slot_taken', timezone: APPOINTMENT_TZ, alternatives: await freeAlternatives() });
           }
           throw e;
         }
@@ -1925,6 +1927,7 @@ router.post(
       }
 
       if (bookingId) await db.query(`UPDATE appointment_bookings SET lead_id = $1 WHERE id = $2`, [leadId, bookingId]);
+      if (bookingId) stopFollowUpsForEmail(email, 'appointment_booked').catch(() => {}); else scheduleFollowUps(leadId).catch(() => {});
       // Fired only once the booking is attached to the lead, so the CRM sees a CONFIRMED appointment, not a bare
       // request. Also covers an existing lead whose request evolved (callback -> appointment): same deal, new stage.
       syncLeadToCrm(leadId).catch((err) => logger.error('Unexpected error firing CRM sync:', err));

@@ -10,6 +10,8 @@ import { collectBoampData, collectPlaceData, collectTedData, collectDecpData, co
 import { runBackup, testRestore } from '../jobs/backupManagement';
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { APPOINTMENT_OUTCOMES } from '../services/hubspotDealService';
+import { stopFollowUpsForLead } from '../services/followUpService';
+import { calendarStatus, resetCalendarCache } from '../services/calendarAvailabilityService';
 
 const router = Router();
 
@@ -1339,6 +1341,37 @@ router.put('/opportunity-leads/:id/grant-access', async (req: AuthRequest, res: 
     logger.error('Admin grant access error:', err);
     res.status(500).json({ error: 'Failed to grant access' });
   }
+});
+
+// POST /api/admin/leads/:id/reply-received - the person answered (e-mail, phone...): their reminders stop.
+router.post('/leads/:id/reply-received', async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await db.query(`UPDATE crm_leads SET reply_received_at = COALESCE(reply_received_at, NOW()) WHERE id = $1 RETURNING id`, [req.params.id]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
+    const stopped = await stopFollowUpsForLead(req.params.id, 'reply_received');
+    res.json({ success: true, remindersStopped: stopped });
+  } catch (err: any) {
+    logger.error('Admin reply-received error:', err);
+    res.status(500).json({ error: 'Failed to record the reply' });
+  }
+});
+
+// Real availability: staff blocks (holidays, training) on top of the team calendar feed (APPOINTMENT_BUSY_ICS_URL).
+router.get('/availability-blocks', async (_req: AuthRequest, res: Response) => {
+  const r = await db.query(`SELECT id, starts_at, ends_at, reason FROM availability_blocks WHERE ends_at > NOW() ORDER BY starts_at`);
+  res.json({ blocks: r.rows, calendar: calendarStatus() });
+});
+router.post('/availability-blocks', async (req: AuthRequest, res: Response) => {
+  const { startsAt, endsAt, reason } = req.body || {};
+  const s = new Date(startsAt), e = new Date(endsAt);
+  if (!Number.isFinite(s.getTime()) || !Number.isFinite(e.getTime()) || e <= s) return res.status(400).json({ error: 'startsAt and endsAt must be ISO dates, endsAt after startsAt' });
+  const r = await db.query(`INSERT INTO availability_blocks (starts_at, ends_at, reason) VALUES ($1, $2, $3) RETURNING id`, [s.toISOString(), e.toISOString(), typeof reason === 'string' ? reason.slice(0, 200) : null]);
+  resetCalendarCache();
+  res.status(201).json({ id: r.rows[0].id });
+});
+router.delete('/availability-blocks/:id', async (req: AuthRequest, res: Response) => {
+  await db.query(`DELETE FROM availability_blocks WHERE id = $1`, [req.params.id]);
+  res.json({ success: true });
 });
 
 // POST /api/admin/leads/:id/appointment-outcome { outcome } - staff record what REALLY happened to the appointment.

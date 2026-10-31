@@ -7,6 +7,8 @@ import { lookupCompanyPresence, isPresenceConfigured } from '../services/company
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { isOpportunityClosed } from '../utils/opportunityStatus';
 import { sendPrefilledDossierEmail, generatePrefilledDossierPdf } from '../services/prefilledDossierService';
+import { scheduleFollowUps } from '../services/followUpService';
+import { applyContactChoice, parseContactMode } from '../services/contactPreferenceService';
 import { AuthRequest } from '../middleware/auth';
 import {
   requestVerificationCode,
@@ -697,6 +699,9 @@ async function handleLeadCapture(
 
     const companyName = existing.rows[0].company_data?.name || null;
     const companySiret = existing.rows[0].siret || null;
+    // The choice made in "Préférences de contact" travels with the contact details (server-side, not just page state).
+    const contactChoice = parseContactMode((req.body as any)?.contactMode);
+    if (contactChoice && email) await applyContactChoice(email, contactChoice).catch((err) => logger.error('contact choice error:', err));
 
     // Client's brief (concordance -> dossier flow): once contact details are
     // validated (and phone OTP-confirmed, when required - the guard above
@@ -761,6 +766,7 @@ async function handleLeadCapture(
               [brandId, email, phone, companyName, opportunityId, sessionId, lotLabel || null]
             );
             syncLeadToCrm(insertResult.rows[0].id).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
+            scheduleFollowUps(insertResult.rows[0].id).catch(() => {});
           }
         }
       } catch (err) {

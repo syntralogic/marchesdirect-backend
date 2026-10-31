@@ -115,3 +115,23 @@ and `message_deliveries` (`sent` = accepted by the provider, `failed`, `not_conf
 (sent -> available, failed / not sent -> error). The appointment confirmation e-mail is OFF until `APPOINTMENT_CONFIRMATION_EMAILS=true`
 (after the template, `RESEND_API_KEY` and the sender domain are validated); while off, a `disabled` row is recorded and nothing is sent.
 SMS (other than the phone-verification code), calendar sync and the reminder sequence are not part of this step.
+
+### Part D (continued): real calendar, contact preferences, reminders, trade/zone alerts
+
+All of these are inert for outgoing mail until the matching switch is `true`; nothing is announced to the visitor that did not happen.
+
+- **Real availability.** The weekday pattern is only "when the team normally takes calls". A slot is offered and reserved only if it is also
+  free in the team calendar: set `APPOINTMENT_BUSY_ICS_URL` to the secret iCal address (Google Calendar: *Adresse secrète au format iCal*;
+  Outlook: published ICS). Recurring events are expanded, events shown "libre" do not block. `APPOINTMENT_SLOT_MINUTES` (default 30) is the
+  length checked. Manual blocks: `GET/POST/DELETE /api/admin/availability-blocks` (`{ startsAt, endsAt, reason }`, ISO dates).
+  If the feed is configured but unreadable and no copy under 6 h exists, **no slot is offered** (callback still works);
+  `APPOINTMENT_CALENDAR_FAIL_OPEN=true` offers the weekday pattern instead. Creating the event in the advisor's calendar is not done here (needs write access).
+- **Contact preferences.** "Suivi de ma demande uniquement" is now stored server-side (`POST /api/contact/preferences`, `crm_leads.contact_mode`,
+  `contact_suppressions`). The page only says it is recorded when the server confirmed it. Selecting a company never creates or removes a preference.
+- **Reminders.** `follow_ups` (2 steps, 48 h and 120 h after a dossier/callback request that has an e-mail). Stopped when an appointment is booked,
+  when staff record a reply (`POST /api/admin/leads/:id/reply-received`), or when the person objects / unsubscribes; checked again at send time.
+  `FOLLOW_UP_EMAILS_ENABLED=true` turns real sending on (draft template in `followUpService.ts` to validate first). Needs `PUBLIC_API_URL`
+  (this API's public URL) and `CONTACT_LINK_SECRET` (or `JWT_SECRET`) for the one-click unsubscribe link; without them nothing is sent.
+- **Alerts by trade and zone.** `POST /api/alert-subscriptions { email, tradeId?, area?, consent: true }` (double opt-in, unsubscribe link in every mail).
+  The answer says what really happened to the confirmation e-mail (`sent | failed | not_configured | disabled`). `ALERT_EMAILS_ENABLED=true` turns it on.
+- **Still open:** SMS (provider and sender not chosen), a frontend form to ask for alerts, and the real end-to-end test with a live mailbox/calendar.

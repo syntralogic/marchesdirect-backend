@@ -18,7 +18,7 @@ import { sendEmail } from './emailService';
 // ============================================================================
 
 export type DeliveryStatus = 'sent' | 'failed' | 'not_configured' | 'disabled';
-export type DeliveryKind = 'dossier' | 'appointment_confirmation';
+export type DeliveryKind = 'dossier' | 'appointment_confirmation' | 'follow_up' | 'alert';
 
 export type DeliveryContext = {
   leadId?: string | null;
