@@ -16,6 +16,8 @@ TypeScript compilation passed. The complete unit test run passed 431 tests acros
 
 ## Production checks still required
 
+Post-release logs also revealed concurrent index builders deadlocking with later schema migrations during startup. A follow-up moves these builders after all schema DDL and executes the three index families sequentially. `/ready` returns 503 until initialization has completed; `/health` remains the existing liveness endpoint. Render's HTTP health-check path should use `/ready` (the current service uses TCP checks).
+
 These changes do not configure Resend, a verified sender domain, or an SMS provider. They must not turn an email failure into a success or mark a phone verified because its format is valid.
 
 Browser searches, views and previews are conditional on the site's existing analytics consent. The frontend's `trackVisitorEvent` deliberately sends no beacon when consent is absent or refused. Zero counters are not proof that the visitor did not browse. This release does not remove that consent control or reconstruct unrecorded history.

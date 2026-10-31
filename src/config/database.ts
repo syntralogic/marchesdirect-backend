@@ -535,9 +535,8 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // buildUnlocatedCityIndex): a plain CREATE INDEX over ~100k rows exceeded
   // the DB's statement timeout on boot (Render logs, 28 Sep 15:48) and it
   // would have blocked startup + write traffic while running.
-  void buildUnlocatedCityIndex();
-  void buildUnresolvedRegionIndex();
-  void buildSearchTrigramIndexes();
+  // Background index builds are started only after all schema DDL below has finished.
+  // Running CREATE INDEX CONCURRENTLY here deadlocked with later ALTER TABLE steps.
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
 
   // BUG (found live on Render, 2026-09-03): documentExpiry.ts's daily sweep
@@ -1721,6 +1720,16 @@ const applyIncrementalMigrations = async (): Promise<void> => {
       END LOOP;
     END $$;
   `);
+  // Yield until ensureSchema resolves and the API readiness gate is opened.
+  // Build one index family at a time: concurrent builders on the same table
+  // can wait on each other and on the schema DDL (observed on Render 31 Oct).
+  setImmediate(() => {
+    void (async () => {
+      await buildUnlocatedCityIndex();
+      await buildUnresolvedRegionIndex();
+      await buildSearchTrigramIndexes();
+    })().catch(err => logger.error('Background index maintenance failed (non-fatal):', err));
+  });
 };
 
 // One-time (but safe-to-repeat) cleanup of the demo data the old

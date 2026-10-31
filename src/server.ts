@@ -207,6 +207,12 @@ app.get('/health', (req: Request, res: Response) => {
   res.json({ status: 'ok', timestamp: new Date() });
 });
 
+// Liveness alone is insufficient during schema initialization. Operators and
+// HTTP health checks can use /ready without declaring the API ready too soon.
+app.get('/ready', (_req: Request, res: Response) => {
+  res.status(dbReady ? 200 : 503).json({ status: dbReady ? 'ready' : 'starting' });
+});
+
 // Client audit (found while fixing Site Name/Support Email persistence):
 // maintenanceMode has been saveable from AdminSettings since 30 Sep, but
 // schema.sql's own comment on app_settings said it plainly - "stored here
