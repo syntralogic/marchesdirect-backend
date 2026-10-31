@@ -99,11 +99,11 @@ describe('syncLeadToHubspot', () => {
     expect(req).toHaveBeenCalledTimes(2);
   });
 
-  it('refuses to run without a token or an e-mail', async () => {
+  it('refuses to run without a token, or without any e-mail or phone to identify the contact', async () => {
     delete process.env.HUBSPOT_ACCESS_TOKEN;
     await expect(syncLeadToHubspot(lead)).rejects.toThrow('HUBSPOT_ACCESS_TOKEN');
     process.env.HUBSPOT_ACCESS_TOKEN = 'x';
-    await expect(syncLeadToHubspot({ ...lead, email: '' })).rejects.toThrow('no e-mail');
+    await expect(syncLeadToHubspot({ ...lead, email: '', phone: null })).rejects.toThrow('no e-mail and no phone');
   });
 });
 

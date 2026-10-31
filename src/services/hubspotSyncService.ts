@@ -44,7 +44,7 @@ export type SyncLead = DealLead & {
   id: string;
   first_name: string | null;
   last_name: string | null;
-  email: string;
+  email: string | null;
   phone: string | null;
   company_name: string | null;
   session_id: string | null;
@@ -71,7 +71,7 @@ export function buildContactProperties(lead: SyncLead, j: JourneySummary): Recor
     ...journeyLinkProperties(lead.id),
     firstname: clean(lead.first_name),
     lastname: clean(lead.last_name),
-    email: lead.email.trim().toLowerCase(),
+    email: lead.email ? lead.email.trim().toLowerCase() : null,
     phone: clean(lead.phone, 40),
     md_search_trade: j.lastTrade,
     md_search_area: j.lastArea,
@@ -180,10 +180,14 @@ export async function upsertCompany(siret: string, name: string | null, agg: Par
 }
 
 export async function upsertContact(lead: SyncLead, j: JourneySummary): Promise<string> {
-  const email = lead.email.trim().toLowerCase();
-  return withLock(`contact:${email}`, async () => {
+  // A callback request only collects a phone number (no e-mail field in that form): the contact is then identified
+  // by that number, still never by the SIRET.
+  const email = lead.email ? lead.email.trim().toLowerCase() : '';
+  const phone = lead.phone ? String(lead.phone).trim() : '';
+  return withLock(`contact:${email || phone}`, async () => {
     let id: string | null = lead.crm_system === 'hubspot' && lead.crm_contact_id ? String(lead.crm_contact_id) : null;
-    if (!id) id = await findOne('contacts', 'email', email);
+    if (!id && email) id = await findOne('contacts', 'email', email);
+    if (!id && !email && phone) id = await findOne('contacts', 'phone', phone);
     const properties = buildContactProperties(lead, j);
     if (id) {
       await hs({ method: 'PATCH', url: `/crm/v3/objects/contacts/${id}`, data: { properties } });
@@ -203,13 +207,12 @@ export async function associateContactWithCompany(contactId: string, companyId: 
 
 export async function syncLeadToHubspot(lead: SyncLead): Promise<{ contactId: string; companyId: string | null }> {
   if (!isHubspotConfigured()) throw new Error('HUBSPOT_ACCESS_TOKEN not configured');
-  if (!lead.email) throw new Error('Lead has no e-mail: a HubSpot contact cannot be identified');
+  if (!lead.email && !lead.phone) throw new Error('Lead has no e-mail and no phone: a HubSpot contact cannot be identified');
 
-  // The contact's journey = every session that ever left this e-mail on a lead (one person, several visits).
-  const sessions = await db.query(
-    `SELECT DISTINCT session_id FROM crm_leads WHERE lower(email) = lower($1) AND session_id IS NOT NULL`,
-    [lead.email]
-  );
+  // The contact's journey = every session that ever left this e-mail (or, without e-mail, this phone) on a lead.
+  const sessions = lead.email
+    ? await db.query(`SELECT DISTINCT session_id FROM crm_leads WHERE lower(email) = lower($1) AND session_id IS NOT NULL`, [lead.email])
+    : await db.query(`SELECT DISTINCT session_id FROM crm_leads WHERE email IS NULL AND phone = $1 AND session_id IS NOT NULL`, [lead.phone]);
   const sessionIds: string[] = sessions.rows.map((r: any) => r.session_id);
   if (lead.session_id && !sessionIds.includes(lead.session_id)) sessionIds.push(lead.session_id);
 
