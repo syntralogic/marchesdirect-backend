@@ -85,3 +85,16 @@ Without them the Google fields stay empty (nothing is invented, nothing is bille
 - The Facebook page is the facebook.com link published on the company's own website.
 - SIRET-lookup results are stored in `company_lookup_cache` and refreshed every 30 days; companies already
   cached are filled in on their next lookup (no extra Pappers call).
+
+## HubSpot sync (companies + contacts)
+
+Set on the server only (never in the frontend):
+
+- `CRM_SYSTEM=hubspot`
+- `HUBSPOT_ACCESS_TOKEN` - private-app token with CRM read/write on contacts and companies
+- `HUBSPOT_BASE_URL` - optional, defaults to `https://api.hubapi.com`
+
+Every lead (callback, appointment, dossier, contact form) is synced to a HubSpot contact (found by e-mail) and, when the visitor
+selected a company, to a HubSpot company (found by `md_siret`), then the two are associated. The `md_*` properties are summaries
+recomputed from `visitor_events`; the journal in the database stays the full history. Failures keep the lead as `failed` with the
+reason in `crm_leads.crm_last_error`, and the 30-minute retry sweep tries again. Deals/tasks are not part of this step.

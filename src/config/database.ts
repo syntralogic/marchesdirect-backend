@@ -1008,6 +1008,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // HubSpot integration brief (journal part): every event carries a unique id so a double click or a network
   // retry cannot create a duplicate row, plus the identifiers needed to tell visitors apart even when several
   // of them select the same SIRET (session_id stays the visitor key; siret is only context).
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS crm_last_error TEXT`);
   await step(`ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS event_id VARCHAR(100)`);
   await step(`ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS occurred_at TIMESTAMP`);
   await step(`ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS siret VARCHAR(14)`);

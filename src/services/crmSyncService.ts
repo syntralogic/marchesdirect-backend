@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { isHubspotConfigured, syncLeadToHubspot, describeHubspotError } from './hubspotSyncService';
 
 // ============================================================================
 // CRM SYNC (Milestone 8 / Technical Requirements section 9: "Lead capture
@@ -44,6 +45,8 @@ type LeadRow = {
   opportunity_title?: string | null;
   lot_label?: string | null;
   crm_contact_id?: string | null;
+  crm_system?: string | null;
+  session_id?: string | null;
 };
 
 async function syncToPipedrive(lead: LeadRow): Promise<{ contactId: string }> {
@@ -145,7 +148,15 @@ async function syncToPipedrive(lead: LeadRow): Promise<{ contactId: string }> {
 // 'failed' so it picks back up on its own, with no manual re-triggering
 // needed, whenever CRM_API_KEY/CRM_BASE_URL do get set.
 let loggedNotConfiguredOnce = false;
-function isCrmConfigured(): boolean {
+function isCrmConfigured(system: string = 'pipedrive'): boolean {
+  if (system === 'hubspot') {
+    const ok = isHubspotConfigured();
+    if (!ok && !loggedNotConfiguredOnce) {
+      loggedNotConfiguredOnce = true;
+      logger.warn('[CRM] CRM_SYSTEM=hubspot but HUBSPOT_ACCESS_TOKEN is not set - HubSpot sync is disabled (leads still save normally). This message only logs once per process.');
+    }
+    return ok;
+  }
   const configured = !!(process.env.CRM_API_KEY && process.env.CRM_BASE_URL);
   if (!configured && !loggedNotConfiguredOnce) {
     loggedNotConfiguredOnce = true;
@@ -156,7 +167,7 @@ function isCrmConfigured(): boolean {
 
 export const syncLeadToCrm = async (leadId: string): Promise<void> => {
   const system = (process.env.CRM_SYSTEM || 'pipedrive').toLowerCase();
-  if (system === 'pipedrive' && !isCrmConfigured()) return;
+  if ((system === 'pipedrive' || system === 'hubspot') && !isCrmConfigured(system)) return;
 
   try {
     const result = await db.query(
@@ -170,15 +181,15 @@ export const syncLeadToCrm = async (leadId: string): Promise<void> => {
     }
     const lead: LeadRow = result.rows[0];
 
-    if (system !== 'pipedrive') {
-      logger.warn(`[CRM] CRM_SYSTEM=${system} has no adapter implemented yet (only 'pipedrive' is wired) - leaving lead ${leadId} as pending`);
+    if (system !== 'pipedrive' && system !== 'hubspot') {
+      logger.warn(`[CRM] CRM_SYSTEM=${system} has no adapter implemented yet (only 'pipedrive' and 'hubspot' are wired) - leaving lead ${leadId} as pending`);
       return;
     }
 
-    const { contactId } = await syncToPipedrive(lead);
+    const { contactId } = system === 'hubspot' ? await syncLeadToHubspot(lead as any) : await syncToPipedrive(lead);
 
     await db.query(
-      `UPDATE crm_leads SET crm_system = $1, crm_contact_id = $2, crm_sync_status = 'synced', crm_last_sync = NOW()
+      `UPDATE crm_leads SET crm_system = $1, crm_contact_id = $2, crm_sync_status = 'synced', crm_last_sync = NOW(), crm_last_error = NULL
        WHERE id = $3`,
       [system, contactId, leadId]
     );
@@ -195,9 +206,10 @@ export const syncLeadToCrm = async (leadId: string): Promise<void> => {
     // that convention here is what actually gets the reason logged.
     logger.error(`[CRM] Sync failed for lead ${leadId}:`, err);
     try {
+      // crm_last_error = the error journal of the HubSpot brief: why it failed, without any token.
       await db.query(
-        `UPDATE crm_leads SET crm_sync_status = 'failed', crm_last_sync = NOW() WHERE id = $1`,
-        [leadId]
+        `UPDATE crm_leads SET crm_sync_status = 'failed', crm_last_sync = NOW(), crm_last_error = $2 WHERE id = $1`,
+        [leadId, describeHubspotError(err)]
       );
     } catch (updateErr) {
       logger.error(`[CRM] Failed to record sync failure for lead ${leadId}:`, updateErr);
@@ -210,7 +222,7 @@ export const syncLeadToCrm = async (leadId: string): Promise<void> => {
 // repeatedly; each attempt just re-tries the same not-yet-synced rows.
 export const retryPendingCrmSyncs = async (limit: number = 50): Promise<number> => {
   const system = (process.env.CRM_SYSTEM || 'pipedrive').toLowerCase();
-  if (system === 'pipedrive' && !isCrmConfigured()) return 0;
+  if ((system === 'pipedrive' || system === 'hubspot') && !isCrmConfigured(system)) return 0;
 
   const result = await db.query(
     `SELECT id FROM crm_leads WHERE crm_sync_status IN ('pending', 'failed') ORDER BY crm_last_sync ASC NULLS FIRST, created_at ASC LIMIT $1`,
