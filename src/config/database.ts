@@ -1009,6 +1009,16 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // retry cannot create a duplicate row, plus the identifiers needed to tell visitors apart even when several
   // of them select the same SIRET (session_id stays the visitor key; siret is only context).
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS crm_last_error TEXT`);
+  // HubSpot deals (part C): which HubSpot deal belongs to which request (crm_leads row). UNIQUE(lead_id) = one deal per request.
+  await step(`CREATE TABLE IF NOT EXISTS crm_deals (
+    lead_id UUID PRIMARY KEY REFERENCES crm_leads(id) ON DELETE CASCADE,
+    hubspot_deal_id VARCHAR(50) NOT NULL,
+    request_type VARCHAR(20) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  // Real result of an appointment, recorded by staff: scheduled | attended | no_show | reschedule | cancelled.
+  await step(`ALTER TABLE appointment_bookings ADD COLUMN IF NOT EXISTS outcome VARCHAR(20)`);
   await step(`ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS event_id VARCHAR(100)`);
   await step(`ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS occurred_at TIMESTAMP`);
   await step(`ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS siret VARCHAR(14)`);
