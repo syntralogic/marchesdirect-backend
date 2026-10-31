@@ -1651,6 +1651,38 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     )
   `);
 
+  // SEO audit 23 Oct, point 6: impossible years (7017, 3025, 2925) showed up in imported dates. Root cause
+  // is upstream data typos that the ingesters passed straight through. Guard at the database so EVERY
+  // write path (BOAMP / TED / PLACE / DECP / manual) is covered and the problem cannot come back:
+  //   deadline / estimated_start_date outside [2000-01-01, now + 10 years]  -> NULL ("no deadline")
+  //   publication_date outside [2000-01-01, now + 1 year]                   -> the row's created_at
+  // The untouched original stays in raw_data. Trigger name starts with "a_" so it runs before the other
+  // BEFORE triggers (e.g. the "deadline passed -> expired" one) and they see clean values.
+  await step(`CREATE OR REPLACE FUNCTION a_sanitize_opportunity_dates() RETURNS trigger AS $$
+    BEGIN
+      IF NEW.deadline IS NOT NULL AND (NEW.deadline < TIMESTAMP '2000-01-01' OR NEW.deadline > NOW() + INTERVAL '10 years') THEN
+        NEW.deadline := NULL;
+      END IF;
+      IF NEW.estimated_start_date IS NOT NULL AND (NEW.estimated_start_date < TIMESTAMP '2000-01-01' OR NEW.estimated_start_date > NOW() + INTERVAL '10 years') THEN
+        NEW.estimated_start_date := NULL;
+      END IF;
+      IF NEW.publication_date < TIMESTAMP '2000-01-01' OR NEW.publication_date > NOW() + INTERVAL '1 year' THEN
+        NEW.publication_date := COALESCE(NEW.created_at, NOW());
+      END IF;
+      RETURN NEW;
+    END $$ LANGUAGE plpgsql`);
+  await step(`DROP TRIGGER IF EXISTS a_sanitize_opportunity_dates ON opportunities`);
+  await step(`CREATE TRIGGER a_sanitize_opportunity_dates BEFORE INSERT OR UPDATE OF deadline, estimated_start_date, publication_date
+    ON opportunities FOR EACH ROW EXECUTE FUNCTION a_sanitize_opportunity_dates()`);
+  // One-time repair of rows already stored with an impossible date (idempotent: matches nothing afterwards).
+  await step(`UPDATE opportunities SET
+      deadline = CASE WHEN deadline < TIMESTAMP '2000-01-01' OR deadline > NOW() + INTERVAL '10 years' THEN NULL ELSE deadline END,
+      estimated_start_date = CASE WHEN estimated_start_date < TIMESTAMP '2000-01-01' OR estimated_start_date > NOW() + INTERVAL '10 years' THEN NULL ELSE estimated_start_date END,
+      publication_date = CASE WHEN publication_date < TIMESTAMP '2000-01-01' OR publication_date > NOW() + INTERVAL '1 year' THEN COALESCE(created_at, NOW()) ELSE publication_date END
+    WHERE deadline < TIMESTAMP '2000-01-01' OR deadline > NOW() + INTERVAL '10 years'
+       OR estimated_start_date < TIMESTAMP '2000-01-01' OR estimated_start_date > NOW() + INTERVAL '10 years'
+       OR publication_date < TIMESTAMP '2000-01-01' OR publication_date > NOW() + INTERVAL '1 year'`);
+
   // SECURITY (Supabase advisory 3 Oct 2026: "RLS disabled in public"):
   // Supabase auto-exposes every table in the public schema through its
   // PostgREST API to anyone holding the (public) anon key. This backend
