@@ -7,7 +7,7 @@ import http from 'http';
 import type { AddressInfo } from 'net';
 
 export const ALLOWED_PROPERTIES = new Set([
-  'firstname', 'lastname', 'email', 'phone', 'name', 'dealname', 'pipeline', 'dealstage',
+  'firstname', 'lastname', 'email', 'phone', 'name', 'dealname', 'pipeline', 'dealstage', 'hubspot_owner_id',
   'md_search_trade', 'md_search_area', 'md_last_journey_step', 'md_last_site_activity', 'md_offer_views_count', 'md_analyses_count',
   'md_siret', 'md_visitors_count',
   'md_request_id', 'md_request_type', 'md_request_date', 'md_market_type', 'md_market_reference', 'md_lot_reference', 'md_market_url',

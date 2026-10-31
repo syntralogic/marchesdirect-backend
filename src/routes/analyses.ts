@@ -6,6 +6,7 @@ import { logger } from '../utils/logger';
 import { computeMatchScore } from '../services/matchScoreService';
 import { RULES_VERSION } from '../services/matchEngine';
 import { buildFacts } from '../services/analysisFacts';
+import { recordJourneyEvent, refreshJourneyForSession } from '../services/journeyEventService';
 
 // Server-side analysis snapshot (guide v24 s.4): ONE record binds company + establishment +
 // market + lot + versions + answers, so homepage, fiche, animation, concordance and dossier all
@@ -57,7 +58,9 @@ router.put('/', [
          VALUES ($1, $2, $2, $3, $4, $5, $6, $7::jsonb, 1, $8) RETURNING *`,
         [sessionId, siret, companyName, opportunityId, lotId, marketVersion, JSON.stringify(answers), RULES_VERSION])).rows[0];
     }
+    await recordJourneyEvent({ sessionId, eventType: 'analysis_started', eventId: `analysis-start:${row.id}`, siret, opportunityId, analysisId: row.id });
     res.json(publicShape(row));
+    void refreshJourneyForSession(sessionId);
   } catch (err: any) {
     logger.error('analysis snapshot upsert error:', err);
     res.status(500).json({ error: 'Impossible d\'enregistrer l\'analyse.' });
@@ -79,7 +82,11 @@ router.get('/:id', async (req: Request, res: Response) => {
                 FROM opportunities o LEFT JOIN data_sources ds ON ds.id = o.source_id WHERE o.id = $1`, [s.opportunity_id]),
     ]);
     const facts = op.rows[0] ? buildFacts({ siret: s.siret, company: lk.rows[0]?.company_data, companyLookedUpAt: lk.rows[0]?.created_at, opp: op.rows[0], sourceName: op.rows[0].source_name, answers: s.answers }) : [];
+    // A stored questionnaire is not a completed computation. Record completion
+    // only after the match and facts have actually been produced successfully.
+    await recordJourneyEvent({ sessionId, eventType: 'analysis_completed', eventId: `analysis-done:${s.id}:${s.answers_version}`, siret: s.siret, opportunityId: s.opportunity_id, analysisId: s.id });
     res.json({ ...publicShape(s), match, facts });
+    void refreshJourneyForSession(sessionId);
   } catch (err: any) {
     logger.error('analysis snapshot read error:', err);
     res.status(500).json({ error: "Impossible de charger l'analyse." });

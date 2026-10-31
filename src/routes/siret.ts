@@ -1,3 +1,4 @@
+import { recordJourneyEvent, refreshJourneyForSession } from '../services/journeyEventService';
 import { Router, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import axios from 'axios';
@@ -765,8 +766,13 @@ async function handleLeadCapture(
                RETURNING id`,
               [brandId, email, phone, companyName, opportunityId, sessionId, lotLabel || null]
             );
+            await recordJourneyEvent({ sessionId, opportunityId, eventType: 'dossier_requested', eventId: `dossier:${insertResult.rows[0].id}` });
             syncLeadToCrm(insertResult.rows[0].id).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
             scheduleFollowUps(insertResult.rows[0].id).catch(() => {});
+          } else if (dup.rows[0]) {
+            await db.query("UPDATE crm_leads SET phone = $2, lot_label = COALESCE($3, lot_label), crm_sync_status = 'pending' WHERE id = $1", [dup.rows[0].id, phone, lotLabel || null]);
+            await recordJourneyEvent({ sessionId, opportunityId, eventType: 'dossier_requested', eventId: `dossier:${dup.rows[0].id}:${Date.now()}` });
+            void syncLeadToCrm(dup.rows[0].id);
           }
         }
       } catch (err) {
@@ -986,6 +992,8 @@ router.post(
            ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
           [sessionId, DEMO_SIRET, JSON.stringify(DEMO_COMPANY)]
         );
+        await recordJourneyEvent({ sessionId, siret: DEMO_SIRET, eventType: 'company_selected', eventId: `company:${DEMO_SIRET}:${Date.now()}` });
+        void refreshJourneyForSession(sessionId);
         return res.json({ companyKnown: true, siret: DEMO_SIRET, company: DEMO_COMPANY });
       }
 
@@ -1047,6 +1055,8 @@ router.post(
         [sessionId, query, JSON.stringify(result.company)]
       );
 
+      await recordJourneyEvent({ sessionId, siret: query, eventType: 'company_selected', eventId: `company:${query}:${Date.now()}` });
+      void refreshJourneyForSession(sessionId);
       res.json({ companyKnown: true, siret: query, company: result.company });
     } catch (err) {
       logger.error('POST /siret/lookup failed:', err);
@@ -1086,6 +1096,8 @@ router.post(
            ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
           [sessionId, DEMO_SIRET, JSON.stringify(DEMO_COMPANY)]
         );
+        await recordJourneyEvent({ sessionId, siret: DEMO_SIRET, eventType: 'company_selected', eventId: `company:${DEMO_SIRET}:${Date.now()}` });
+        void refreshJourneyForSession(sessionId);
         return res.json({ companyKnown: true, siret: DEMO_SIRET, company: DEMO_COMPANY });
       }
 
@@ -1121,6 +1133,8 @@ router.post(
         [sessionId, siret, JSON.stringify(result.company)]
       );
 
+      await recordJourneyEvent({ sessionId, siret: siret, eventType: 'company_selected', eventId: `company:${siret}:${Date.now()}` });
+      void refreshJourneyForSession(sessionId);
       res.json({ companyKnown: true, siret, company: result.company });
     } catch (err) {
       logger.error('POST /siret/confirm failed:', err);

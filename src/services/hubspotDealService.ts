@@ -39,6 +39,10 @@ const STAGE_RANK: Record<string, number> = {
   [STAGES.callback]: 0, [STAGES.contact]: 1, [STAGES.confirmed]: 2, [STAGES.held]: 3, [STAGES.proposal]: 4, [STAGES.signed]: 5,
 };
 
+// Portal-specific default, matching this project's portal and pipeline. An
+// explicit environment value permits another commercial owner on deployment.
+export const defaultCommercialOwner = () => (process.env.HUBSPOT_DEFAULT_OWNER_ID || '102050175').trim();
+
 export type RequestType = 'dossier' | 'callback' | 'appointment';
 export const APPOINTMENT_OUTCOMES = ['scheduled', 'attended', 'no_show', 'reschedule', 'cancelled'] as const;
 export type AppointmentOutcome = typeof APPOINTMENT_OUTCOMES[number];
@@ -227,17 +231,18 @@ export async function syncDealForLead(lead: DealLead, contactId: string, company
     if (!dealId) {
       const created = await hs<{ id: string }>({
         method: 'POST', url: '/crm/v3/objects/deals',
-        data: { properties: { ...buildDealProperties({ ...common, type, forCreate: true }), pipeline: PIPELINE_ID, dealstage: targetStage(type, confirmed, outcome) } },
+        data: { properties: { ...buildDealProperties({ ...common, type, forCreate: true }), pipeline: PIPELINE_ID, dealstage: targetStage(type, confirmed, outcome), hubspot_owner_id: defaultCommercialOwner() } },
       });
       dealId = String(created.id);
     } else {
       const cur = await hs<{ properties?: Record<string, string | null> }>({
-        method: 'GET', url: `/crm/v3/objects/deals/${dealId}`, params: { properties: 'dealstage,md_request_type' },
+        method: 'GET', url: `/crm/v3/objects/deals/${dealId}`, params: { properties: 'dealstage,md_request_type,hubspot_owner_id' },
       });
       const merged = strongestType((cur.properties?.md_request_type as RequestType) || null, type);
       const stage = targetStage(merged, confirmed, outcome);
       const props: Record<string, unknown> = buildDealProperties({ ...common, type: merged, forCreate: false });
       if (shouldWriteStage(cur.properties?.dealstage, stage)) props.dealstage = stage;
+      if (!cur.properties?.hubspot_owner_id) props.hubspot_owner_id = defaultCommercialOwner();
       await hs({ method: 'PATCH', url: `/crm/v3/objects/deals/${dealId}`, data: { properties: props } });
     }
 
