@@ -10,6 +10,7 @@ import { collectBoampData, collectPlaceData, collectTedData, collectDecpData, co
 import { runBackup, testRestore } from '../jobs/backupManagement';
 import { abandonmentReport } from '../services/abandonmentReportService';
 import { syncLeadToCrm } from '../services/crmSyncService';
+import { hubspotDiagnostic } from '../services/hubspotSyncService';
 import { APPOINTMENT_OUTCOMES } from '../services/hubspotDealService';
 import { stopFollowUpsForLead } from '../services/followUpService';
 import { calendarStatus, resetCalendarCache } from '../services/calendarAvailabilityService';
@@ -164,6 +165,16 @@ const SETTINGS_DEFAULTS = {
 };
 const SETTINGS_KEYS = Object.keys(SETTINGS_DEFAULTS) as Array<keyof typeof SETTINGS_DEFAULTS>;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Why does (or doesn't) a lead reach HubSpot? Never returns the token.
+router.get('/hubspot/status', async (_req: AuthRequest, res: Response) => {
+  try {
+    res.json({ success: true, data: await hubspotDiagnostic() });
+  } catch (err) {
+    logger.error('[HubSpot] diagnostic failed:', err);
+    res.status(500).json({ success: false, error: 'Diagnostic failed' });
+  }
+});
 
 router.get('/settings', async (req: AuthRequest, res: Response) => {
   try {

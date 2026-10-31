@@ -370,6 +370,9 @@ const startServer = async () => {
       logger.info(`🚀 Server running on http://localhost:${PORT}`);
       logger.info(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
       logger.info(`🎨 Frontend URL: ${process.env.FRONTEND_URL}`);
+      if ((process.env.CRM_SYSTEM || 'pipedrive').toLowerCase() !== 'hubspot' || !process.env.HUBSPOT_ACCESS_TOKEN) {
+        logger.warn(`[CRM] HubSpot sync is OFF on this deploy (CRM_SYSTEM=${process.env.CRM_SYSTEM || '(unset, defaults to pipedrive)'}, HUBSPOT_ACCESS_TOKEN ${process.env.HUBSPOT_ACCESS_TOKEN ? 'set' : 'MISSING'}). Set CRM_SYSTEM=hubspot and HUBSPOT_ACCESS_TOKEN, then check GET /api/admin/hubspot/status.`);
+      }
 
       // C08 (contre-audit 15 Sep, correction partielle): the OTP gate on
       // POST /siret/lead (phoneVerificationService.ts) is fully built, but
