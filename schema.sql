@@ -934,6 +934,7 @@ CREATE TABLE visitor_events (
 CREATE INDEX visitor_events_session ON visitor_events(session_id);
 CREATE INDEX visitor_events_created ON visitor_events(created_at);
 -- HubSpot integration (journal): idempotent events + identifiers (see applyIncrementalMigrations()).
+ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS crm_last_error TEXT;
 ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS event_id VARCHAR(100);
 ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS occurred_at TIMESTAMP;
 ALTER TABLE visitor_events ADD COLUMN IF NOT EXISTS siret VARCHAR(14);
