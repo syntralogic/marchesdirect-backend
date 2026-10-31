@@ -11,6 +11,7 @@ import { applyContactChoice, parseContactMode } from '../services/contactPrefere
 import { toE164French } from '../services/smsService';
 import { notifyTeamOfNewLead } from '../services/leadNotificationService';
 import { isValidLeadPhone } from '../utils/leadValidation';
+import { recordJourneyEvent } from '../services/journeyEventService';
 
 // Contre-audit follow-up: crm_leads.phone was stored exactly as typed
 // ("06 00 00 00 00", "0033600000000", "+33 6 00 00 00 00", ...), so the
@@ -195,6 +196,11 @@ router.post(
         return res.status(200).json({ success: true, id: result.rows[0].id, duplicate: true, ...recordedInfo(result.rows[0].created_at) });
       }
       if (bookingId) await attachBooking(bookingId, result.rows[0].id);
+      if (sessionId && (bookingId || leadSource === 'callback_modal')) {
+        await recordJourneyEvent({ sessionId, opportunityId,
+          eventType: bookingId ? 'appointment_booked' : 'callback_requested',
+          eventId: `request:${result.rows[0].id}` });
+      }
 
       // Intentionally return only id/created_at, not the full row - this is a
       // public endpoint, no need to echo back internal CRM sync fields.

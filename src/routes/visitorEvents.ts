@@ -5,6 +5,7 @@ import { logger } from '../utils/logger';
 import { isUuid } from '../utils/uuid';
 import { createBoundedCache } from '../utils/ttlCache';
 import { buildConsultationIndicator, ConsultationLang, ConsultationStats } from '../utils/consultationIndicator';
+import { refreshJourneyForSession } from '../services/journeyEventService';
 
 const router = Router();
 
@@ -58,6 +59,7 @@ router.post(
          eventId || null, occurredAt || null, siret || null, opportunityId || null, lotRef || null, analysisId || null]
       );
       res.status(204).end();
+      void refreshJourneyForSession(sessionId);
     } catch (err: any) {
       logger.error('Visitor event capture error:', err);
       res.status(204).end();

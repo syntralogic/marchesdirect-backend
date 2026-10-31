@@ -14,6 +14,7 @@ import { tokenizeQuery, tsqueryAlternatives, isTradeWord, matchTermsOf, domainMi
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts, generateOpportunityAnalysisSections } from '../services/aiService';
 import { ingestOpportunityDocuments } from '../services/documentIngestionService';
 import { computeMatchScore } from '../services/matchScoreService';
+import { recordJourneyEvent, refreshJourneyForSession } from '../services/journeyEventService';
 import { resolveTradeFromText, keywordsForSlugs } from '../services/tradeResolver';
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { sendAppointmentConfirmation } from '../services/appointmentConfirmationService';
@@ -2047,6 +2048,12 @@ router.get('/:id/match-score', optionalAuth, async (req: AuthRequest, res: Respo
       answers: parseRefineAnswers(req.query.answers),
       lot: typeof req.query.lot === 'string' ? req.query.lot : null,
     });
+    const journeySession = typeof req.query.sessionId === 'string' ? req.query.sessionId : '';
+    if (journeySession.length >= 8 && journeySession.length <= 100) {
+      await recordJourneyEvent({ sessionId: journeySession, opportunityId: req.params.id,
+        eventType: 'analysis_completed', eventId: `match:${req.params.id}:${String(req.query.lot || '').slice(0, 30)}` });
+      void refreshJourneyForSession(journeySession);
+    }
     res.json(result);
   } catch (err: any) {
     if (err.message === 'Opportunity not found') {

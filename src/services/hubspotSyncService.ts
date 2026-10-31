@@ -3,6 +3,7 @@ import { activeCrmSystem } from './crmSystem';
 import axios, { AxiosRequestConfig } from 'axios';
 import { db } from '../config/database';
 import { syncDealForLead, DealLead } from './hubspotDealService';
+import { isVerificationRequired } from './phoneVerificationService';
 
 // ============================================================================
 // HUBSPOT SYNC - companies and contacts (client brief 31 Oct, part B)
@@ -108,7 +109,7 @@ async function journeyForSessions(sessionIds: string[]): Promise<JourneySummary>
   const counts = await db.query(
     `SELECT
        COUNT(*) FILTER (WHERE event_type IN ('offer_view', 'view_opportunity'))::int AS offer_views,
-       COUNT(DISTINCT COALESCE(analysis_id, session_id || ':' || COALESCE(opportunity_id, event_data->>'opportunityId', '')))
+       COUNT(DISTINCT (session_id || ':' || COALESCE(opportunity_id, event_data->>'opportunityId', analysis_id, '')))
          FILTER (WHERE event_type = 'analysis_completed')::int AS analyses,
        MAX(COALESCE(occurred_at, created_at)) AS last_activity
      FROM visitor_events WHERE session_id = ANY($1)`,
@@ -136,6 +137,21 @@ async function journeyForSessions(sessionIds: string[]): Promise<JourneySummary>
     offerViews: c.offer_views || 0,
     analyses: c.analyses || 0,
   };
+}
+
+// A company selection is useful even before coordinates are submitted. It
+// creates/refreshes a company only: no invented contact or commercial deal.
+export async function syncCompanyJourneyForSession(sessionId: string): Promise<void> {
+  if (!isHubspotConfigured()) return;
+  const lookup = await db.query('SELECT siret, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
+  const siret = lookup.rows[0]?.siret;
+  if (!siret || !/^\d{14}$/.test(siret)) return;
+  const sessions = await db.query('SELECT DISTINCT session_id FROM siret_lookups WHERE siret = $1', [siret]);
+  const ids = sessions.rows.map((r: any) => r.session_id);
+  const j = await journeyForSessions(ids);
+  await upsertCompany(siret, clean(lookup.rows[0]?.company_data?.name), {
+    visitors: ids.length, offerViews: j.offerViews, analyses: j.analyses, lastActivity: j.lastActivity,
+  });
 }
 
 // ---------------------------------------------------------------- HubSpot HTTP
@@ -212,7 +228,7 @@ export async function syncLeadToHubspot(lead: SyncLead): Promise<{ contactId: st
 
   // The contact's journey = every session that ever left this e-mail (or, without e-mail, this phone) on a lead.
   const sessions = lead.email
-    ? await db.query(`SELECT DISTINCT session_id FROM crm_leads WHERE lower(email) = lower($1) AND session_id IS NOT NULL`, [lead.email])
+    ? await db.query(`SELECT session_id FROM crm_leads WHERE lower(email) = lower($1) AND session_id IS NOT NULL UNION SELECT session_id FROM siret_lookups WHERE lower(email) = lower($1)`, [lead.email])
     : await db.query(`SELECT DISTINCT session_id FROM crm_leads WHERE email IS NULL AND phone = $1 AND session_id IS NOT NULL`, [lead.phone]);
   const sessionIds: string[] = sessions.rows.map((r: any) => r.session_id);
   if (lead.session_id && !sessionIds.includes(lead.session_id)) sessionIds.push(lead.session_id);
@@ -275,6 +291,12 @@ export async function hubspotDiagnostic() {
     pipeline: { found: false, error: null as string | null },
     leadsBySyncStatus: {} as Record<string, number>,
     lastErrors: [] as Array<{ id: string; error: string | null; at: Date | null }>,
+    deliveryConfiguration: {
+      emailProviderConfigured: !!process.env.RESEND_API_KEY,
+      emailSenderConfigured: !!process.env.EMAIL_FROM,
+      phoneVerificationRequired: isVerificationRequired(),
+    },
+    deliveriesByStatus: [] as Array<{ kind: string; status: string; count: number }>,
     verdict: [] as string[],
   };
   if (!out.crmSystemIsHubspot) out.verdict.push(`CRM_SYSTEM is "${crmSystem}", not "hubspot": syncLeadToCrm never calls HubSpot.`);
@@ -299,6 +321,8 @@ export async function hubspotDiagnostic() {
     }
   }
   try {
+    const deliveries = await db.query(`SELECT kind, status, COUNT(*)::int AS count FROM message_deliveries WHERE created_at > NOW() - INTERVAL '7 days' GROUP BY kind, status`);
+    out.deliveriesByStatus = deliveries.rows;
     const r = await db.query(`SELECT COALESCE(crm_sync_status,'null') AS s, COUNT(*)::int AS n FROM crm_leads GROUP BY 1`);
     for (const row of r.rows) out.leadsBySyncStatus[row.s] = row.n;
     const e = await db.query(`SELECT id, crm_last_error, crm_last_sync FROM crm_leads WHERE crm_last_error IS NOT NULL ORDER BY crm_last_sync DESC NULLS LAST LIMIT 5`);
