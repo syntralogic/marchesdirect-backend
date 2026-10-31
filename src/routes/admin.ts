@@ -1420,25 +1420,53 @@ router.get('/leads/:id/deliveries', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// GET /api/admin/leads/:id/journey - visitor_events for this lead's session,
-// so a chargé d'affaires calling the lead back can see what they searched
-// for and looked at instead of re-asking from scratch (client requirement).
+// GET /api/admin/leads/:id/journey - the full journal behind a request (HubSpot link target, brief part E).
+// `events` keeps its old shape (this lead's session) for the leads list; `history` is the whole person: every
+// session that ever left this e-mail on a lead, each event tagged with its session, so several visits of one
+// contact show up together while another visitor on the same SIRET stays out (visitor = session/e-mail, never SIRET).
 router.get('/leads/:id/journey', async (req: AuthRequest, res: Response) => {
   try {
-    const leadResult = await db.query('SELECT session_id, email FROM crm_leads WHERE id = $1', [req.params.id]);
+    if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) return res.status(404).json({ error: 'Lead not found' });
+    const leadResult = await db.query(
+      `SELECT id, session_id, email, first_name, last_name, phone, company_name, lead_source, created_at
+       FROM crm_leads WHERE id = $1`, [req.params.id]);
     if (leadResult.rows.length === 0) {
       return res.status(404).json({ error: 'Lead not found' });
     }
-    const { session_id } = leadResult.rows[0];
-    if (!session_id) {
-      return res.json({ events: [] });
+    const lead = leadResult.rows[0];
+    const sessionIds: string[] = [];
+    if (lead.email) {
+      const s = await db.query(
+        `SELECT DISTINCT session_id FROM crm_leads WHERE lower(email) = lower($1) AND session_id IS NOT NULL`, [lead.email]);
+      sessionIds.push(...s.rows.map((r: any) => r.session_id));
     }
-    const eventsResult = await db.query(
-      `SELECT event_type, event_label, event_data, created_at
-       FROM visitor_events WHERE session_id = $1 ORDER BY created_at ASC`,
-      [session_id]
-    );
-    res.json({ events: eventsResult.rows });
+    if (lead.session_id && !sessionIds.includes(lead.session_id)) sessionIds.push(lead.session_id);
+
+    const cols = `event_id, session_id, event_type, event_label, event_data, siret, opportunity_id, lot_ref, analysis_id,
+                  COALESCE(occurred_at, created_at) AS created_at`;
+    const [own, all, requests] = await Promise.all([
+      lead.session_id
+        ? db.query(`SELECT event_type, event_label, event_data, COALESCE(occurred_at, created_at) AS created_at
+                    FROM visitor_events WHERE session_id = $1 ORDER BY COALESCE(occurred_at, created_at) ASC`, [lead.session_id])
+        : Promise.resolve({ rows: [] as any[] }),
+      sessionIds.length
+        ? db.query(`SELECT ${cols} FROM visitor_events WHERE session_id = ANY($1)
+                    ORDER BY COALESCE(occurred_at, created_at) ASC, created_at ASC LIMIT 2000`, [sessionIds])
+        : Promise.resolve({ rows: [] as any[] }),
+      lead.email
+        ? db.query(`SELECT id, lead_source, created_at FROM crm_leads WHERE lower(email) = lower($1) ORDER BY created_at ASC`, [lead.email])
+        : Promise.resolve({ rows: [] as any[] }),
+    ]);
+    res.json({
+      events: own.rows,
+      contact: {
+        leadId: lead.id, email: lead.email, firstName: lead.first_name, lastName: lead.last_name,
+        phone: lead.phone, companyName: lead.company_name,
+      },
+      sessions: sessionIds.length,
+      requests: requests.rows,
+      history: all.rows,
+    });
   } catch (err: any) {
     logger.error('Admin lead journey error:', err);
     res.status(500).json({ error: 'Failed to fetch visitor journey' });

@@ -1,3 +1,4 @@
+import { journeyLinkProperties } from './journeyLinkService';
 import axios, { AxiosRequestConfig } from 'axios';
 import { db } from '../config/database';
 import { syncDealForLead, DealLead } from './hubspotDealService';
@@ -67,6 +68,7 @@ const compact = (o: Record<string, unknown>): Record<string, unknown> => {
 
 export function buildContactProperties(lead: SyncLead, j: JourneySummary): Record<string, unknown> {
   return compact({
+    ...journeyLinkProperties(lead.id),
     firstname: clean(lead.first_name),
     lastname: clean(lead.last_name),
     email: lead.email.trim().toLowerCase(),
