@@ -12,6 +12,10 @@ const router = Router();
 router.get('/', async (req: Request, res: Response) => {
   try {
     const brandId = await resolveBrandId(req);
+    // Optional ?journey=&limit= lets the category landing pages (/marches-publics, /appels-doffres,
+    // /sous-traitance) link to their own local pages without downloading the whole sitemap list.
+    const journey = typeof req.query.journey === 'string' ? req.query.journey : null;
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? ''), 10) || 0, 0), 500);
     const result = await db.query(
       `SELECT sp.page_slug, sp.page_type, sp.updated_at, sp.filter_city, sp.filter_department,
               t.name as filter_trade_name, ot.code as filter_journey
@@ -19,8 +23,10 @@ router.get('/', async (req: Request, res: Response) => {
        LEFT JOIN trades t ON sp.filter_trade_id = t.id
        LEFT JOIN opportunity_types ot ON sp.filter_opportunity_type_id = ot.id
        WHERE sp.brand_id = $1 AND sp.is_published = true
-       ORDER BY sp.updated_at DESC`,
-      [brandId]
+         AND ($2::text IS NULL OR ot.code = $2)
+       ORDER BY sp.updated_at DESC
+       ${limit ? 'LIMIT ' + limit : ''}`,
+      [brandId, journey]
     );
     res.json({ pages: result.rows });
   } catch (err: any) {
@@ -29,34 +35,57 @@ router.get('/', async (req: Request, res: Response) => {
   }
 });
 
-// GET /api/seo-pages/:slug - single published page's content, keyed by the
-// slug the generation job produces (e.g. "maconnerie-ile-de-france"). Also
-// bumps page_views so the admin stats you're already looking at reflect real
-// traffic instead of staying at 0 forever.
-router.get('/:slug', async (req: Request, res: Response) => {
+// NOTE: literal routes (/lookup, /opportunities-sitemap, /opportunity-meta/:id) MUST be declared before
+// '/:slug', otherwise Express matches them as slug="lookup" and answers 404 (this made every nested local page
+// - /marches-publics/:city, /:city/:trade, /departement/:d - report "page introuvable").
+
+// GET /api/seo-pages/opportunities-sitemap - ids of the open, non-demo opportunities that deserve a
+// place in sitemap.xml (SEO audit 23 Oct: "aucune URL /opportunites/"). Cheap, no side effects.
+router.get('/opportunities-sitemap', async (_req: Request, res: Response) => {
   try {
-    const brandId = await resolveBrandId(req);
     const result = await db.query(
-      `SELECT sp.page_slug, sp.page_title, sp.page_meta_description, sp.page_keywords, sp.page_content,
-              sp.filter_trade_id, sp.filter_region, sp.filter_city, sp.filter_department,
-              ot.code as filter_journey
-       FROM seo_pages sp
-       LEFT JOIN opportunity_types ot ON sp.filter_opportunity_type_id = ot.id
-       WHERE sp.brand_id = $1 AND sp.page_slug = $2 AND sp.is_published = true`,
-      [brandId, req.params.slug]
+      `SELECT o.id, COALESCE(o.updated_at, o.created_at) AS updated_at
+         FROM opportunities o
+         LEFT JOIN data_sources ds ON o.source_id = ds.id
+        WHERE o.deleted_at IS NULL AND COALESCE(o.status, '') = 'active'
+          AND (o.deadline IS NULL OR o.deadline >= NOW())
+          AND COALESCE(ds.code, '') <> 'editorial_catalog'
+        ORDER BY COALESCE(o.updated_at, o.created_at) DESC
+        LIMIT 40000`
     );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Page not found' });
-    }
-
-    db.query('UPDATE seo_pages SET page_views = page_views + 1 WHERE page_slug = $1', [req.params.slug])
-      .catch((err) => logger.error('SEO page view increment failed:', err));
-
-    res.json(result.rows[0]);
+    res.set('Cache-Control', 'public, max-age=900');
+    res.json({ opportunities: result.rows });
   } catch (err: any) {
-    logger.error('Public SEO page fetch error:', err);
-    res.status(500).json({ error: 'Failed to fetch SEO page' });
+    logger.error('Opportunities sitemap error:', err);
+    res.status(500).json({ error: 'Failed to fetch opportunities' });
+  }
+});
+
+// GET /api/seo-pages/opportunity-meta/:id - the few PUBLIC, teaser-level facts needed to pre-render the
+// fiche's HTML for crawlers (title, trade, place, deadline). Deliberately NOT /api/opportunities/:id: that
+// route can trigger paid LLM extraction and returns the full record. No buyer identity, no description.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+router.get('/opportunity-meta/:id', async (req: Request, res: Response) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Opportunity not found' });
+    const r = await db.query(
+      `SELECT o.id, o.title, o.deadline, o.publication_date, o.status,
+              o.location_city, o.location_department, o.location_region,
+              t.name AS trade_name, ot.code AS journey,
+              (ds.code = 'editorial_catalog') AS is_demo
+         FROM opportunities o
+         LEFT JOIN trades t ON o.trade_id = t.id
+         LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
+         LEFT JOIN data_sources ds ON o.source_id = ds.id
+        WHERE o.id = $1 AND o.deleted_at IS NULL AND COALESCE(o.status, '') <> 'merged'`,
+      [req.params.id]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Opportunity not found' });
+    res.set('Cache-Control', 'public, max-age=300');
+    res.json(r.rows[0]);
+  } catch (err: any) {
+    logger.error('Opportunity meta error:', err);
+    res.status(500).json({ error: 'Failed to fetch opportunity' });
   }
 });
 
@@ -150,6 +179,37 @@ router.get('/lookup', async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     logger.error('Public SEO page lookup error:', err);
+    res.status(500).json({ error: 'Failed to fetch SEO page' });
+  }
+});
+
+// GET /api/seo-pages/:slug - single published page's content, keyed by the
+// slug the generation job produces (e.g. "maconnerie-ile-de-france"). Also
+// bumps page_views so the admin stats you're already looking at reflect real
+// traffic instead of staying at 0 forever.
+router.get('/:slug', async (req: Request, res: Response) => {
+  try {
+    const brandId = await resolveBrandId(req);
+    const result = await db.query(
+      `SELECT sp.page_slug, sp.page_title, sp.page_meta_description, sp.page_keywords, sp.page_content,
+              sp.filter_trade_id, sp.filter_region, sp.filter_city, sp.filter_department,
+              ot.code as filter_journey
+       FROM seo_pages sp
+       LEFT JOIN opportunity_types ot ON sp.filter_opportunity_type_id = ot.id
+       WHERE sp.brand_id = $1 AND sp.page_slug = $2 AND sp.is_published = true`,
+      [brandId, req.params.slug]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Page not found' });
+    }
+
+    db.query('UPDATE seo_pages SET page_views = page_views + 1 WHERE page_slug = $1', [req.params.slug])
+      .catch((err) => logger.error('SEO page view increment failed:', err));
+
+    res.json(result.rows[0]);
+  } catch (err: any) {
+    logger.error('Public SEO page fetch error:', err);
     res.status(500).json({ error: 'Failed to fetch SEO page' });
   }
 });
