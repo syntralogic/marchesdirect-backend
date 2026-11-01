@@ -94,6 +94,7 @@ describe('syncDealForLead', () => {
     .mockResolvedValueOnce({ rows: [{ title: 'T', source_reference: 'R', official_url: null, journey: 'tender' }] }) // opportunity
     .mockResolvedValueOnce({ rows: [{ answers: { capacity: 'oui' }, lot_id: '' }] })                                  // snapshot
     .mockResolvedValueOnce({ rows: [] })                                                                               // booking
+    .mockResolvedValueOnce({ rows: [] }) // generation
     .mockResolvedValueOnce({ rows: [] });                                                                              // dossier delivery
 
   it('does nothing for a contact-form lead', async () => {

@@ -1,0 +1,302 @@
+diff --git a/src/contexts/CompanyKnownContext.tsx b/src/contexts/CompanyKnownContext.tsx
+index 036ad3c..2068f34 100644
+--- a/src/contexts/CompanyKnownContext.tsx
++++ b/src/contexts/CompanyKnownContext.tsx
+@@ -1,6 +1,6 @@
+-import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from 'react';
++import { createContext, useContext, useEffect, useState, useCallback, useRef, type ReactNode } from 'react';
+ import { siretApi, getApiErrorMessage, getApiErrorCode, type ApiSiretCompany, type ApiSiretCandidate } from '@/lib/apiClient';
+-import { getSessionId } from '@/lib/visitorTracking';
++import { getSessionId, setTrackingSiret } from '@/lib/visitorTracking';
+ 
+ interface CompanyKnownContextType {
+   companyKnown: boolean;
+@@ -45,14 +45,17 @@ export function CompanyKnownProvider({ children }: { children: ReactNode }) {
+   const [phoneVerified, setPhoneVerified] = useState(false);
+   const [loading, setLoading] = useState(true);
+ 
++  const identityVersion = useRef(0);
+   useEffect(() => {
++    const version = identityVersion.current;
+     let cancelled = false;
+     siretApi.status(getSessionId())
+       .then(status => {
+-        if (cancelled) return;
++        if (cancelled || version !== identityVersion.current) return;
+         setCompanyKnown(status.companyKnown);
+         setCompany(status.company || null);
+         setSiret(status.siret || null);
++        setTrackingSiret(status.siret || null);
+         setLeadCaptured(!!status.leadCaptured);
+         setLeadPhone(status.phone || null);
+         setLeadEmail(status.email || null);
+@@ -73,11 +76,15 @@ export function CompanyKnownProvider({ children }: { children: ReactNode }) {
+   // then call confirm() with the chosen SIRET - no longer auto-resolved to
+   // Pappers' best guess.
+   const lookup = useCallback(async (query: string) => {
++    const version = ++identityVersion.current;
+     try {
+       const result = await siretApi.lookup(query, getSessionId());
++      if (version !== identityVersion.current) return { error: "Une autre sélection est en cours." };
+       setCompanyKnown(result.companyKnown);
+       setCompany(result.company || null);
+       setSiret(result.siret || null);
++      setTrackingSiret(result.siret || null);
++      setPhoneVerified(!!result.phoneVerified);
+       setCandidates(result.candidates || []);
+       setLeadCaptured(!!result.leadCaptured);
+       setLeadPhone(result.phone || null);
+@@ -96,11 +103,15 @@ export function CompanyKnownProvider({ children }: { children: ReactNode }) {
+ 
+   // Visitor picked one candidate off the list lookup() returned.
+   const confirm = useCallback(async (candidateSiret: string) => {
++    const version = ++identityVersion.current;
+     try {
+       const result = await siretApi.confirm(candidateSiret, getSessionId());
++      if (version !== identityVersion.current) return { error: "Une autre sélection est en cours." };
+       setCompanyKnown(result.companyKnown);
+       setCompany(result.company || null);
+       setSiret(result.siret || null);
++      setTrackingSiret(result.siret || null);
++      setPhoneVerified(!!result.phoneVerified);
+       setCandidates([]);
+       setLeadCaptured(!!result.leadCaptured);
+       setLeadPhone(result.phone || null);
+diff --git a/src/lib/reliableEventQueue.ts b/src/lib/reliableEventQueue.ts
+new file mode 100644
+index 0000000..1543d29
+--- /dev/null
++++ b/src/lib/reliableEventQueue.ts
+@@ -0,0 +1,88 @@
++export interface EventEnvelope { eventId: string; sessionId: string; occurredAt: string; [key: string]: unknown }
++interface Queued { payload: EventEnvelope; attempts: number; nextAt: number }
++export interface QueueOptions {
++  storage: () => Storage | null; consent: () => boolean;
++  send: (payload: EventEnvelope, signal: AbortSignal) => Promise<{ ok: boolean; status: number; headers: { get(name: string): string | null } }>;
++  now?: () => number;
++}
++const PREFIX = 'md_event_queue_v1:';
++const TTL = 24 * 60 * 60 * 1000;
++const MAX_EVENTS = 200;
++
++// Per-event keys avoid overwriting another tab's queue. The server's unique
++// (session_id,event_id) key makes concurrent tab sends safe. Payloads never change.
++export class ReliableEventQueue {
++  private memory = new Map<string, Queued>();
++  private timer?: ReturnType<typeof setTimeout>;
++  private running = false;
++  private controller?: AbortController;
++  private now: () => number;
++  constructor(private options: QueueOptions) { this.now = options.now || Date.now; }
++  private storage() { try { return this.options.storage(); } catch { return null; } }
++  private remove(id: string) { this.memory.delete(id); try { this.storage()?.removeItem(PREFIX + id); } catch { /* memory only */ } }
++  private save(item: Queued) {
++    this.memory.set(item.payload.eventId, item);
++    try { this.storage()?.setItem(PREFIX + item.payload.eventId, JSON.stringify(item)); } catch { /* memory retry still works */ }
++  }
++  private load(): Queued[] {
++    const storage = this.storage();
++    try {
++      if (storage) for (let i = 0; i < storage.length; i++) {
++        const key = storage.key(i);
++        if (!key?.startsWith(PREFIX)) continue;
++        try {
++          const item = JSON.parse(storage.getItem(key) || 'null') as Queued;
++          if (item?.payload?.eventId && Number.isFinite(Date.parse(item.payload.occurredAt))) this.memory.set(item.payload.eventId, item);
++        } catch { /* skip malformed item */ }
++      }
++    } catch { /* blocked storage */ }
++    for (const [id, item] of this.memory) if (this.now() - Date.parse(item.payload.occurredAt) > TTL) this.remove(id);
++    return [...this.memory.values()].sort((a,b) => a.nextAt - b.nextAt);
++  }
++  enqueue(payload: EventEnvelope): boolean {
++    if (!this.options.consent()) { this.clear(); return false; }
++    const items = this.load();
++    if (items.some(x => x.payload.eventId === payload.eventId)) return true;
++    if (items.length >= MAX_EVENTS || JSON.stringify(payload).length > 24_000) return false;
++    // Deep copy once so caller changes / a later SIRET selection cannot alter retries.
++    this.save({ payload: JSON.parse(JSON.stringify(payload)), attempts: 0, nextAt: this.now() });
++    void this.flush(); return true;
++  }
++  clear() {
++    if (this.timer) clearTimeout(this.timer);
++    this.controller?.abort();
++    for (const item of this.load()) this.remove(item.payload.eventId);
++    this.memory.clear();
++  }
++  async flush(): Promise<void> {
++    if (!this.options.consent()) { this.clear(); return; }
++    if (this.running) return;
++    this.running = true;
++    if (this.timer) clearTimeout(this.timer);
++    try {
++      for (const item of this.load().filter(x => x.nextAt <= this.now())) {
++        if (!this.options.consent()) { this.clear(); break; }
++        this.controller = new AbortController();
++        const timeout = setTimeout(() => this.controller?.abort(), 20_000);
++        let retryAfter = 0;
++        try {
++          const res = await this.options.send(item.payload, this.controller.signal);
++          if (res.status === 204 || (res.status >= 400 && res.status < 500 && ![408,425,429].includes(res.status))) {
++            this.remove(item.payload.eventId); continue;
++          }
++          const delay = res.headers.get('Retry-After');
++          if (delay) retryAfter = /^\d+$/.test(delay) ? Number(delay)*1000 : Date.parse(delay)-this.now();
++        } catch { /* network error, timeout or offline: retain the original event */ }
++        finally { clearTimeout(timeout); }
++        if (!this.options.consent()) { this.remove(item.payload.eventId); continue; }
++        item.attempts++;
++        item.nextAt = this.now() + Math.max(1000, Math.min(300_000, Math.max(retryAfter || 0, Math.min(60_000,1000*2**Math.min(item.attempts,6)))));
++        this.save(item);
++      }
++    } finally {
++      this.running = false; this.controller = undefined;
++      const remaining = this.options.consent() ? this.load() : [];
++      if (remaining.length) this.timer = setTimeout(() => void this.flush(), Math.max(500,remaining[0].nextAt-this.now()));
++    }
++  }
++}
+diff --git a/src/lib/visitorTracking.ts b/src/lib/visitorTracking.ts
+index 4e8ba30..d231a46 100644
+--- a/src/lib/visitorTracking.ts
++++ b/src/lib/visitorTracking.ts
+@@ -1,5 +1,6 @@
+ import { API_URL } from '@/lib/apiClient';
+-import { getAnalyticsConsent } from '@/lib/consent';
++import { getAnalyticsConsent, onConsentChange } from '@/lib/consent';
++import { ReliableEventQueue } from './reliableEventQueue';
+ 
+ const SESSION_KEY = 'md_visitor_session_id';
+ 
+@@ -25,7 +26,8 @@ export function getSessionId(): string {
+   } catch {
+     // Storage blocked (private browsing, etc.) - fall back to a
+     // per-page-load id rather than crashing the tracking call.
+-    return `nostorage-${Date.now()}-${Math.random().toString(36).slice(2)}`;
++    if (!memoryId) memoryId = `nostorage-${Date.now()}-${Math.random().toString(36).slice(2)}`;
++    return memoryId;
+   }
+ }
+ 
+@@ -81,8 +83,7 @@ export function trackRequestSubmitted(kind: RequestKind, extra?: Record<string,
+   }
+ }
+ 
+-// Fire-and-forget by design: a failed analytics beacon must never surface
+-// an error to the visitor or block navigation. Swallows all errors.
++// Analytics stays off the navigation path; the durable queue retries storage/network failures.
+ // Guide v24 s.12: contact details never go to traffic-analytics tools. Drop PII-named keys and
+ // redact anything that looks like an e-mail or a phone number, whatever the caller passed.
+ const PII_KEY_RE = /^(e-?mail|mail|phone|tel|telephone|mobile|nom|name|firstname|lastname|prenom|contact)$/i;
+@@ -121,26 +122,51 @@ function pickIds(data?: Record<string, unknown>) {
+   };
+ }
+ 
++let activeSiret: string | null = null;
++const ACTIVE_SIRET_KEY = 'md_tracking_siret';
++export function setTrackingSiret(siret: string | null) {
++  activeSiret = siret && /^\d{14}$/.test(siret) ? siret : null;
++  try {
++    if (getAnalyticsConsent() === 'granted' && activeSiret) sessionStorage.setItem(ACTIVE_SIRET_KEY,activeSiret);
++    else sessionStorage.removeItem(ACTIVE_SIRET_KEY);
++  } catch { /* in-memory identity still applies */ }
++}
++try {
++  if (getAnalyticsConsent() === 'granted') {
++    const stored = sessionStorage.getItem(ACTIVE_SIRET_KEY);
++    if (stored && /^\d{14}$/.test(stored)) activeSiret = stored;
++  }
++} catch { /* storage unavailable */ }
++const eventQueue = new ReliableEventQueue({
++  storage: () => localStorage,
++  consent: () => getAnalyticsConsent() === 'granted',
++  send: (payload,signal) => fetch(`${API_URL}/api/visitor-events`, {
++    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),keepalive:true,signal,
++  }),
++});
++if (typeof window !== 'undefined') {
++  window.addEventListener('online', () => void eventQueue.flush());
++  window.addEventListener('pageshow', () => void eventQueue.flush());
++  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void eventQueue.flush(); });
++  onConsentChange(() => {
++    if (getAnalyticsConsent() !== 'granted') { eventQueue.clear(); setTrackingSiret(null); memoryId=null; }
++    else void eventQueue.flush();
++  });
++  void eventQueue.flush();
++}
++
+ export function trackVisitorEvent(eventType: VisitorEventType, eventLabel?: string, brandId?: string, eventData?: Record<string, unknown>) {
+-  // No consent (not asked yet, or refused) = nothing is recorded.
+   if (getAnalyticsConsent() !== 'granted') return;
+   try {
+     const ids = pickIds(eventData);
+-    const { eventId: _drop, siret: _siret, ...dataWithoutIds } = (eventData || {}) as Record<string, unknown>;
+-    fetch(`${API_URL}/api/visitor-events`, {
+-      method: 'POST',
+-      headers: { 'Content-Type': 'application/json' },
+-      body: JSON.stringify({
+-        sessionId: getSessionId(), eventType, eventLabel, brandId,
+-        eventData: eventData ? stripPii(dataWithoutIds) : eventData,
+-        eventId: ids.eventId || newEventId(), occurredAt: new Date().toISOString(),
+-        siret: ids.siret, opportunityId: ids.opportunityId, lotRef: ids.lotRef, analysisId: ids.analysisId,
+-      }),
+-      keepalive: true,
+-    }).catch(() => {});
+-  } catch {
+-    // ignore
+-  }
++    const { eventId: _drop, siret: _siret, ...dataWithoutIds } = eventData || {};
++    eventQueue.enqueue({
++      sessionId: getSessionId(),eventType,eventLabel: eventLabel ? stripPii(eventLabel) : undefined,brandId,
++      eventData: eventData ? stripPii(dataWithoutIds) : undefined,
++      eventId: ids.eventId || newEventId(),occurredAt: new Date().toISOString(),trackingVersion:1,
++      siret: ids.siret || activeSiret,opportunityId:ids.opportunityId,lotRef:ids.lotRef,analysisId:ids.analysisId,
++    });
++  } catch { /* analytics cannot block the visitor's navigation */ }
+ }
+ 
+ // Consultation indicator of a fiche (client brief 18 Oct): the sentence comes from the REAL tracking of THIS
+diff --git a/tests/reliableEventQueue.test.cjs b/tests/reliableEventQueue.test.cjs
+new file mode 100644
+index 0000000..088f691
+--- /dev/null
++++ b/tests/reliableEventQueue.test.cjs
+@@ -0,0 +1,38 @@
++const {test}=require('node:test');
++const assert=require('node:assert/strict');
++const ts=require('typescript');
++const fs=require('node:fs');
++const Module=require('node:module');
++const compiled=ts.transpileModule(fs.readFileSync('src/lib/reliableEventQueue.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
++const mod=new Module('queue');mod._compile(compiled,'queue.cjs');
++const {ReliableEventQueue}=mod.exports;
++function storage(){const m=new Map();return {get length(){return m.size},key:i=>[...m.keys()][i]??null,getItem:k=>m.get(k)??null,setItem:(k,v)=>m.set(k,v),removeItem:k=>m.delete(k)};}
++const idle=()=>new Promise(r=>setImmediate(r));
++const response=(status,retry=null)=>({ok:status>=200&&status<300,status,headers:{get:()=>retry}});
++const event={sessionId:'session-test',eventId:'event-test',occurredAt:'2026-11-01T10:00:00Z',siret:'83438617900024',eventType:'offer_view'};
++test('503 is retained, then retries with original SIRET/id/time after navigation',async()=>{
++ let now=Date.parse(event.occurredAt),calls=[],fail=true;const st=storage();
++ const q=new ReliableEventQueue({storage:()=>st,consent:()=>true,now:()=>now,send:async p=>{calls.push(JSON.parse(JSON.stringify(p)));return response(fail?503:204,'5')}});
++ const payload={...event};q.enqueue(payload);payload.siret='12345678901234';await idle();
++ assert.equal(st.length,1);now+=6000;fail=false;await q.flush();
++ assert.equal(st.length,0);assert.deepEqual(calls,[event,event]);q.clear();
++});
++test('reload recovers offline event from persistent storage',async()=>{
++ let now=Date.parse(event.occurredAt);const st=storage();
++ const q=new ReliableEventQueue({storage:()=>st,consent:()=>true,now:()=>now,send:async()=>{throw new Error('offline')}});
++ q.enqueue(event);await idle();const saved=st.getItem(st.key(0));q.clear();st.setItem('md_event_queue_v1:'+event.eventId,saved);
++ now+=10000;const seen=[];const reloaded=new ReliableEventQueue({storage:()=>st,consent:()=>true,now:()=>now,send:async p=>{seen.push(p);return response(204)}});
++ await reloaded.flush();assert.deepEqual(seen,[event]);assert.equal(st.length,0);reloaded.clear();
++});
++test('an intermediary HTTP 200 page does not acknowledge an event',async()=>{
++ const st=storage();const q=new ReliableEventQueue({storage:()=>st,consent:()=>true,now:()=>Date.parse(event.occurredAt),send:async()=>response(200)});
++ q.enqueue(event);await idle();assert.equal(st.length,1);q.clear();
++});
++test('withdrawal of consent clears retries and prevents new collection',async()=>{
++ const st=storage();let consent=true,calls=0;const q=new ReliableEventQueue({storage:()=>st,consent:()=>consent,now:()=>Date.parse(event.occurredAt),send:async()=>{calls++;return response(503)}});
++ q.enqueue(event);await idle();consent=false;await q.flush();assert.equal(st.length,0);assert.equal(q.enqueue(event),false);assert.equal(calls,1);
++});
++test('invalid 400 payload is not retried forever',async()=>{
++ const st=storage();const q=new ReliableEventQueue({storage:()=>st,consent:()=>true,now:()=>Date.parse(event.occurredAt),send:async()=>response(400)});
++ q.enqueue(event);await idle();assert.equal(st.length,0);q.clear();
++});

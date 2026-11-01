@@ -103,7 +103,7 @@ export function buildCompanyProperties(
 
 // ---------------------------------------------------------------- journal queries
 
-async function journeyForSessions(sessionIds: string[]): Promise<JourneySummary> {
+async function journeyForSessions(sessionIds: string[], siret: string | null = null): Promise<JourneySummary> {
   if (sessionIds.length === 0) {
     return { lastTrade: null, lastArea: null, lastStep: null, lastActivity: null, offerViews: 0, analyses: 0 };
   }
@@ -113,20 +113,20 @@ async function journeyForSessions(sessionIds: string[]): Promise<JourneySummary>
        COUNT(DISTINCT (session_id || ':' || COALESCE(opportunity_id, event_data->>'opportunityId', analysis_id, '')))
          FILTER (WHERE event_type = 'analysis_completed')::int AS analyses,
        MAX(COALESCE(occurred_at, created_at)) AS last_activity
-     FROM visitor_events WHERE session_id = ANY($1)`,
-    [sessionIds]
+     FROM visitor_events WHERE session_id = ANY($1) AND ($2::text IS NULL OR COALESCE(attribution_siret,siret)=$2)`,
+    [sessionIds,siret]
   );
   const step = await db.query(
     `SELECT event_type FROM visitor_events
-     WHERE session_id = ANY($1) AND event_type = ANY($2)
+     WHERE session_id = ANY($1) AND event_type = ANY($2) AND ($3::text IS NULL OR COALESCE(attribution_siret,siret)=$3)
      ORDER BY COALESCE(occurred_at, created_at) DESC, created_at DESC LIMIT 1`,
-    [sessionIds, STEP_CODES]
+    [sessionIds, STEP_CODES, siret]
   );
   const search = await db.query(
     `SELECT event_data FROM visitor_events
-     WHERE session_id = ANY($1) AND event_type = 'search'
+     WHERE session_id = ANY($1) AND event_type = 'search' AND ($2::text IS NULL OR COALESCE(attribution_siret,siret)=$2)
      ORDER BY COALESCE(occurred_at, created_at) DESC, created_at DESC LIMIT 1`,
-    [sessionIds]
+    [sessionIds,siret]
   );
   const c = counts.rows[0] || {};
   const sd = search.rows[0]?.event_data || {};
@@ -142,27 +142,55 @@ async function journeyForSessions(sessionIds: string[]): Promise<JourneySummary>
 
 // A company selection is useful even before coordinates are submitted. It
 // creates/refreshes a company only: no invented contact or commercial deal.
-export async function syncCompanyJourneyForSession(sessionId: string): Promise<void> {
-  if (!isHubspotConfigured()) return;
-  const lookup = await db.query('SELECT siret, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
-  const siret = lookup.rows[0]?.siret;
-  if (!siret || !/^\d{14}$/.test(siret)) return;
-  const sessions = await db.query('SELECT DISTINCT session_id FROM siret_lookups WHERE siret = $1', [siret]);
-  const ids = sessions.rows.map((r: any) => r.session_id);
-  const j = await journeyForSessions(ids);
-  const companyId = await upsertCompany(siret, clean(lookup.rows[0]?.company_data?.name), {
-    visitors: ids.length, offerViews: j.offerViews, analyses: j.analyses, lastActivity: j.lastActivity,
-  });
-  await syncCompanyCockpit(companyId, ids);
+async function companySessionsFor(siret: string): Promise<string[]> {
+  const r = await db.query(`SELECT DISTINCT session_id FROM journey_company_selections WHERE siret=$1
+    UNION SELECT DISTINCT session_id FROM visitor_events WHERE COALESCE(attribution_siret,siret)=$1`, [siret]);
+  return r.rows.map((row: any) => row.session_id);
 }
 
-async function syncCompanyCockpit(companyId: string, sessionIds: string[]): Promise<void> {
-  const events = await db.query('SELECT DISTINCT event_type FROM visitor_events WHERE session_id = ANY($1)', [sessionIds]);
-  const coordinates = await db.query('SELECT 1 FROM siret_lookups WHERE session_id = ANY($1) AND lead_captured_at IS NOT NULL LIMIT 1', [sessionIds]);
+export async function syncCompanyJourneyForSiret(siret: string): Promise<void> {
+  if (!isHubspotConfigured() || !/^\d{14}$/.test(siret)) return;
+  const pending = await db.query('SELECT version FROM crm_company_sync_queue WHERE siret=$1', [siret]);
+  const version = pending.rows[0]?.version;
+  const lookup = await db.query(`SELECT company_data FROM journey_company_selections WHERE siret=$1 AND company_data IS NOT NULL
+    ORDER BY selected_at DESC LIMIT 1`, [siret]);
+  const ids = await companySessionsFor(siret);
+  const j = await journeyForSessions(ids,siret);
+  const companyId = await upsertCompany(siret,clean(lookup.rows[0]?.company_data?.name), {
+    visitors:ids.length,offerViews:j.offerViews,analyses:j.analyses,lastActivity:j.lastActivity,
+  });
+  await syncCompanyCockpit(companyId,ids,siret);
+  if (version !== undefined) await db.query(`UPDATE crm_company_sync_queue SET processed_version=$2
+    WHERE siret=$1 AND version=$2`, [siret,version]);
+}
+
+export async function syncCompanyJourneyForSession(sessionId: string): Promise<void> {
+  if (!isHubspotConfigured()) return;
+  const companies = await db.query(`SELECT DISTINCT siret FROM journey_company_selections WHERE session_id=$1
+    UNION SELECT DISTINCT COALESCE(attribution_siret,siret) AS siret FROM visitor_events
+    WHERE session_id=$1 AND COALESCE(attribution_siret,siret) IS NOT NULL`, [sessionId]);
+  for (const row of companies.rows) await syncCompanyJourneyForSiret(row.siret);
+}
+
+export async function retryPendingCompanySyncs(limit=50): Promise<number> {
+  if (activeCrmSystem() !== 'hubspot' || !isHubspotConfigured()) return 0;
+  const r = await db.query(`SELECT siret FROM crm_company_sync_queue WHERE processed_version<version
+    ORDER BY updated_at LIMIT $1`, [limit]);
+  for (const row of r.rows) {
+    try { await syncCompanyJourneyForSiret(row.siret); }
+    catch { /* The durable row remains pending; retry next sweep. */ }
+  }
+  return r.rows.length;
+}
+
+async function syncCompanyCockpit(companyId: string, sessionIds: string[], siret: string): Promise<void> {
+  const events = await db.query('SELECT DISTINCT event_type FROM visitor_events WHERE session_id = ANY($1) AND COALESCE(attribution_siret,siret)=$2', [sessionIds,siret]);
+  const coordinates = await db.query('SELECT 1 FROM siret_lookups WHERE session_id = ANY($1) AND siret=$2 AND lead_captured_at IS NOT NULL LIMIT 1', [sessionIds,siret]);
   const requests = await db.query(
     `SELECT l.*, d.hubspot_deal_id FROM crm_leads l LEFT JOIN crm_deals d ON d.lead_id = l.id
-     WHERE l.session_id = ANY($1) AND (l.lead_source IN ('analysis_gate','callback_modal','appointment_modal') OR l.appointment_mode IN ('callback','slot'))
-     ORDER BY GREATEST(l.updated_at, l.created_at) DESC, l.id DESC LIMIT 1`, [sessionIds]);
+     WHERE l.session_id = ANY($1) AND COALESCE(l.siret,(SELECT s.siret FROM journey_company_selections s
+       WHERE s.session_id=l.session_id AND s.selected_at<=l.created_at ORDER BY s.selected_at DESC,s.id DESC LIMIT 1))=$2 AND (l.lead_source IN ('analysis_gate','callback_modal','appointment_modal') OR l.appointment_mode IN ('callback','slot'))
+     ORDER BY GREATEST(l.updated_at, l.created_at) DESC, l.id DESC LIMIT 1`, [sessionIds,siret]);
   const request = requests.rows[0];
   let dealStage: string | null = null;
   if (request?.hubspot_deal_id) {
@@ -270,31 +298,27 @@ export async function syncLeadToHubspot(lead: SyncLead): Promise<{ contactId: st
   const contactJourney = await journeyForSessions(sessionIds);
   const contactId = await upsertContact(lead, contactJourney);
 
-  // SIRET of the company this contact chose (the most recent lookup among their sessions).
-  const lookup = sessionIds.length
-    ? await db.query(
-        `SELECT siret, company_data FROM siret_lookups WHERE session_id = ANY($1) ORDER BY created_at DESC LIMIT 1`,
-        [sessionIds]
-      )
-    : { rows: [] as any[] };
-  const siret: string | null = lookup.rows[0]?.siret && /^\d{14}$/.test(lookup.rows[0].siret) ? lookup.rows[0].siret : null;
-  if (!siret) {
-    await syncDealForLead(lead, contactId, null);
-    return { contactId, companyId: null };
+  // A lead keeps its original company. Historical records may only use a
+  // dated selection at/before creation, never the latest company in the browser.
+  const lookup = lead.siret
+    ? await db.query(`SELECT siret,company_data FROM journey_company_selections WHERE siret=$1
+        ORDER BY selected_at DESC LIMIT 1`, [lead.siret])
+    : lead.session_id && lead.created_at
+      ? await db.query(`SELECT siret,company_data FROM journey_company_selections WHERE session_id=$1
+          AND selected_at<=$2 ORDER BY selected_at DESC,id DESC LIMIT 1`, [lead.session_id,lead.created_at])
+      : { rows: [] };
+  const siret = lead.siret || lookup.rows[0]?.siret || null;
+  if (!siret || !/^\d{14}$/.test(siret)) {
+    await syncDealForLead(lead,contactId,null);
+    return {contactId,companyId:null};
   }
-
-  // Company summary = ALL visitors (sessions) that selected this SIRET, not only this contact.
-  const all = await db.query(`SELECT session_id FROM siret_lookups WHERE siret = $1`, [siret]);
-  const companySessions: string[] = all.rows.map((r: any) => r.session_id);
-  const cj = await journeyForSessions(companySessions);
-  const companyId = await upsertCompany(
-    siret,
-    clean(lookup.rows[0]?.company_data?.name) || clean(lead.company_name),
-    { visitors: companySessions.length, offerViews: cj.offerViews, analyses: cj.analyses, lastActivity: cj.lastActivity }
-  );
+  const companySessions = await companySessionsFor(siret);
+  const cj = await journeyForSessions(companySessions,siret);
+  const companyId = await upsertCompany(siret,clean(lookup.rows[0]?.company_data?.name) || clean(lead.company_name),
+    {visitors:companySessions.length,offerViews:cj.offerViews,analyses:cj.analyses,lastActivity:cj.lastActivity});
   await associateContactWithCompany(contactId, companyId);
-  await syncDealForLead(lead, contactId, companyId);
-  await syncCompanyCockpit(companyId, companySessions);
+  await syncDealForLead({ ...lead, siret }, contactId, companyId);
+  await syncCompanyCockpit(companyId, companySessions, siret);
   return { contactId, companyId };
 }
 

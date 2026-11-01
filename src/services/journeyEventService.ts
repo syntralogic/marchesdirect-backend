@@ -1,3 +1,4 @@
+import { storeJourneyEvent } from './journeyStorageService';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { syncLeadToCrm } from './crmSyncService';
@@ -11,14 +12,8 @@ export async function recordJourneyEvent(args: {
   siret?: string | null; opportunityId?: string | null; analysisId?: string | null;
 }): Promise<void> {
   try {
-    await db.query(
-      `INSERT INTO visitor_events (session_id, event_type, event_id, occurred_at, siret, opportunity_id, analysis_id, event_data)
-       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7::jsonb)
-       ON CONFLICT (session_id, event_id) WHERE event_id IS NOT NULL DO NOTHING`,
-      [args.sessionId, args.eventType, args.eventId, args.siret || null,
-        args.opportunityId || null, args.analysisId || null,
-        JSON.stringify({ source: 'server', opportunityId: args.opportunityId || null })]
-    );
+    await storeJourneyEvent({ ...args, trackingVersion: 1,
+      eventData: { source: 'server', opportunityId: args.opportunityId || null } });
   } catch (err) {
     logger.error('Server journey event could not be recorded:', err);
   }
@@ -39,7 +34,7 @@ export async function refreshJourneyForSession(sessionId: string): Promise<void>
       try {
         const current = await db.query('SELECT id FROM crm_leads WHERE session_id = $1', [sessionId]);
         for (const lead of current.rows) await syncLeadToCrm(lead.id);
-        if (!current.rows.length) await syncCompanyJourneyForSession(sessionId);
+        await syncCompanyJourneyForSession(sessionId);
       } catch (err) { logger.error('Journey refresh failed (pending leads will retry):', err); }
     }, 2000);
     timer.unref();

@@ -10,7 +10,7 @@ const q = db.query as jest.Mock;
 const send = sendEmail as jest.Mock;
 const insertedStatus = () => q.mock.calls.filter(c => String(c[0]).includes('INSERT INTO message_deliveries')).map(c => c[1][2]);
 
-beforeEach(() => { jest.clearAllMocks(); delete process.env.APPOINTMENT_CONFIRMATION_EMAILS; q.mockResolvedValue({ rows: [] }); });
+beforeEach(() => { jest.resetAllMocks(); delete process.env.APPOINTMENT_CONFIRMATION_EMAILS; q.mockResolvedValue({ rows: [] }); });
 
 describe('deliverEmail', () => {
   const base = { kind: 'dossier' as const, to: 'a@x.fr', subject: 's', html: 'h', ctx: { sessionId: 's1', opportunityId: 'o1' } };
@@ -29,7 +29,7 @@ describe('deliverEmail', () => {
     const r = await deliverEmail(base);
     expect(r).toEqual({ status: 'failed', sent: false });
     const row = q.mock.calls.find(c => String(c[0]).includes('INSERT INTO message_deliveries'))!;
-    expect(row[1][3]).toBe('Resend API 422: invalid to Bearer ***');
+    expect(row[1][3]).toBe('Resend API 422: invalid to Bearer [redacted]');
   });
   it('still returns the real status when the log itself cannot be written', async () => {
     send.mockResolvedValue(true);
@@ -39,16 +39,15 @@ describe('deliverEmail', () => {
 });
 
 describe('dossier status for the CRM', () => {
-  it('maps the latest real delivery', async () => {
-    q.mockResolvedValueOnce({ rows: [{ status: 'sent' }] });
-    expect(await dossierStatusFor('s1', 'o1')).toBe('available');
-    q.mockResolvedValueOnce({ rows: [{ status: 'failed' }] });
-    expect(await dossierStatusFor('s1', 'o1')).toBe('error');
-    q.mockResolvedValueOnce({ rows: [{ status: 'not_configured' }] });
-    expect(await dossierStatusFor('s1', 'o1')).toBe('error');
-    q.mockResolvedValueOnce({ rows: [] });
-    expect(await dossierStatusFor('s1', 'o1')).toBeNull();
-    expect(await dossierStatusFor(null, 'o1')).toBeNull();
+  it('keeps historical generation evidence separate from sending, without resending', async () => {
+    for (const [status, expected] of [['sent','available'],['failed',null],['not_configured','available']]) {
+      q.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ status }] });
+      expect(await dossierStatusFor('s1','o1')).toBe(expected);
+    }
+    q.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] });
+    expect(await dossierStatusFor('s1','o1')).toBeNull();
+    expect(await dossierStatusFor(null,'o1')).toBeNull();
+    expect(send).not.toHaveBeenCalled();
   });
 });
 
