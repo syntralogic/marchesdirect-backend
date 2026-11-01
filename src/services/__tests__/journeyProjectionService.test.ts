@@ -54,7 +54,7 @@ it('handles Paris calendar days, elapsed deadlines and unavailable metadata hone
  const offer={offer_id:'a/b',source_reference:'DEMO-seed',deadline:'2026-11-01T11:00:00Z'};
  expect(describeOffer(offer,new Date('2026-11-01T23:15:00Z'))).toContain('Échue depuis 1 j (01/11/2026)');
  expect(describeOffer(offer,new Date('2026-11-01T10:00:00Z'))).toContain('J-0');
- expect(describeOffer({...offer,deadline:'invalid'},new Date())).toBe('Annonce (département non renseigné) · réf. MD-AB · Échéance non renseignée · https://marchesdirect.fr/opportunites/a%2Fb');
+ expect(describeOffer({...offer,deadline:'invalid'},new Date())).toBe('Annonce · réf. MD-AB · Échéance non renseignée · https://marchesdirect.fr/opportunites/a%2Fb');
 });
 it('coalesces matching display events under a minute across sessions without removing raw activity',()=>{
  const events=[event('company_selected','2026-10-31T20:19:15.858Z',{session_id:'first'}),event('company_selected','2026-10-31T20:19:21.338Z',{session_id:'second'})];
