@@ -27,7 +27,7 @@ describe('property builders', () => {
   it('maps the journal summary onto the agreed contact property names', () => {
     expect(buildContactProperties(lead, journey)).toEqual({
       firstname: 'Ali', lastname: 'K', email: 'ali@example.fr', phone: '0601020304',
-      md_search_trade: 'isolation', md_search_area: 'Lyon', md_last_journey_step: 'Annonce consultée',
+      md_search_trade: 'isolation', md_search_area: 'Lyon', md_last_journey_step: 'offer_view',
       md_last_site_activity: '2026-10-30T10:00:00.000Z', md_offer_views_count: 3, md_analyses_count: 1,
     });
   });

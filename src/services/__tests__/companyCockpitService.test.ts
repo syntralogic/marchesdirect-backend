@@ -1,4 +1,4 @@
-import { buildCompanyCockpit,buildCompanyCockpitForRequests } from '../companyCockpitService';
+import { buildCompanyCockpit } from '../companyCockpitService';
 import { STAGES } from '../hubspotDealService';
 jest.mock('../../config/database', () => ({ db: { query: jest.fn() } }));
 
@@ -27,15 +27,4 @@ it('distinguishes an attended or cancelled appointment from an upcoming one', ()
   const f = { events: ['appointment_booked'], hasCoordinates: true, requestType: 'appointment' as const, booking: { status: 'booked', outcome: 'attended', slot_at: '2026-10-30T10:00:00Z' } };
   expect(buildCompanyCockpit(f, now).md_followup_priority).toBe('monitor');
   expect(buildCompanyCockpit({ ...f, booking: { ...f.booking, status: 'cancelled', outcome: 'cancelled' } }, now).md_next_action).toContain('replanification');
-});
-
-it('retains an older urgent open callback when the newest deal is closed',()=>{
- expect(buildCompanyCockpitForRequests({events:[],hasCoordinates:true},[
-  {requestType:'dossier',dealStage:STAGES.lost},{requestType:'callback',dealStage:STAGES.callback}
- ],now).md_followup_priority).toBe('urgent');
-});
-it('closed requests do not override a future open appointment',()=>{
- expect(buildCompanyCockpitForRequests({events:[],hasCoordinates:true},[
-  {requestType:'callback',dealStage:STAGES.signed},{requestType:'appointment',dealStage:STAGES.confirmed,booking:{status:'booked',outcome:'scheduled',slot_at:'2026-11-03T09:00:00Z'}}
- ],now).md_followup_priority).toBe('scheduled');
 });

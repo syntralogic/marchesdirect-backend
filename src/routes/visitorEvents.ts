@@ -13,7 +13,6 @@ const router = Router();
 
 // Event codes agreed with the client for the HubSpot journey (kept next to the older ones, which stay valid).
 export const HUBSPOT_EVENT_CODES = [
-  'arrival','retour_arriere','coordonnees_saisies','demande_info',
   'offer_view', 'company_selected', 'analysis_started', 'analysis_completed',
   'dossier_preview', 'dossier_requested', 'callback_requested', 'appointment_booked',
 ];
