@@ -703,6 +703,7 @@ async function handleLeadCapture(
     const companySiret = existing.rows[0].siret || null;
     // The choice made in "Préférences de contact" travels with the contact details (server-side, not just page state).
     const contactChoice = parseContactMode((req.body as any)?.contactMode);
+    await recordJourneyEvent({sessionId,siret:existing.rows[0].siret,opportunityId,eventType:'coordonnees_saisies',eventId:`coordinates:${sessionId}:${existing.rows[0].siret}`});
     if (contactChoice && email) await applyContactChoice(email, contactChoice).catch((err) => logger.error('contact choice error:', err));
 
     // Client's brief (concordance -> dossier flow): once contact details are
