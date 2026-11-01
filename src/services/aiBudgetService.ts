@@ -25,6 +25,7 @@ export function reservationMicrousd(model: string, payload: any): number {
 }
 export async function paidClaudeRequest(payload: any, functionName: string): Promise<any> {
   if (!process.env.ANTHROPIC_API_KEY) throw new Error('ai_not_configured');
+  if (Buffer.byteLength(JSON.stringify(payload),'utf8')>95000) throw new Error('ai_context_too_large');
   const model=String(payload.model), reserve=reservationMicrousd(model,payload), id=randomUUID();
   const day=await db.transaction(async client=>{
     const d=(await client.query("SELECT (NOW() AT TIME ZONE 'Europe/Paris')::date::text AS day")).rows[0].day;
