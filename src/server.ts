@@ -607,6 +607,13 @@ const startServer = async () => {
         ['seoGeneration', 'startSEOGeneration', 'SEO generation'],
       ];
       startups.forEach(([mod, fn, label], i) => {
+        // Paid enrichment is opt-in. Keep CRM retries, collection and the
+        // visitor's rule-based scoring alive while unattended AI is paused.
+        const aiEnrichmentJobs = ['factsBackfillJob', 'aiProcessing', 'analysisSectionsBackfillJob', 'staleSummaryBackfillJob'];
+        if (aiEnrichmentJobs.includes(mod) && process.env.AI_BACKGROUND_ENRICHMENT_ENABLED !== 'true') {
+          logger.info(`[Jobs] Automatic AI enrichment paused: ${mod} (AI_BACKGROUND_ENRICHMENT_ENABLED is not true)`);
+          return;
+        }
         const start = () => {
           try {
             require(`./jobs/${mod}`)[fn]();
