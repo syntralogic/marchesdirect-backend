@@ -1,3 +1,5 @@
+import { JOURNEY_PROJECTION_DDL } from '../services/hubspotJourneySchema';
+import { JOURNEY_SCORE_DDL } from '../services/journeyScoreService';
 import { AI_BUDGET_DDL } from '../services/aiBudgetService';
 import { JOURNEY_IDENTITY_DDL } from '../services/journeyIdentitySchema';
 import { Pool, QueryResult, PoolClient } from 'pg';
@@ -1036,6 +1038,8 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   await step(`CREATE INDEX IF NOT EXISTS message_deliveries_dossier ON message_deliveries(kind, session_id, opportunity_id)`);
   await step(`CREATE INDEX IF NOT EXISTS message_deliveries_dedupe ON message_deliveries(dedupe_key) WHERE dedupe_key IS NOT NULL`);
   // Prerequisite A: separate PDF generation from acceptance of its e-mail.
+  await step(`ALTER TABLE analysis_snapshots ADD COLUMN IF NOT EXISTS compatibility_score INTEGER`);
+  await step(`ALTER TABLE analysis_snapshots ADD COLUMN IF NOT EXISTS score_computed_at TIMESTAMPTZ`);
   await step(`CREATE TABLE IF NOT EXISTS dossier_generations (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     lead_id UUID REFERENCES crm_leads(id) ON DELETE SET NULL,
@@ -1143,6 +1147,9 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   await step(`CREATE INDEX IF NOT EXISTS siret_lookups_session ON siret_lookups(session_id)`);
   for (const ddl of JOURNEY_IDENTITY_DDL) await step(ddl);
   for (const ddl of AI_BUDGET_DDL) await step(ddl);
+  for (const ddl of JOURNEY_PROJECTION_DDL) await step(ddl);
+  for (const ddl of JOURNEY_SCORE_DDL) await step(ddl);
+  await step(`ALTER TABLE crm_company_sync_queue ADD COLUMN IF NOT EXISTS inactivity_processed_version BIGINT NOT NULL DEFAULT 0`);
 
   // Client's explicit priority (WhatsApp): integrate the public tender
   // databases as real content before finalizing UX, because testing against

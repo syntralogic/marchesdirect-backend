@@ -436,8 +436,10 @@ const startServer = async () => {
     // Supabase project) — no manual psql step required.
     await ensureSchema();
     dbReady = true;
+    await import('./services/hubspotJourneySchema').then(m=>m.ensureJourneySchema());
+    setInterval(()=>{void import('./services/hubspotSyncService').then(m=>m.refreshInactiveCompanyJourneys()).catch(()=>logger.warn('Inactivity refresh pending'));},60000).unref();
     // Owner-approved one-off benchmark, protected by a durable unique run ID.
-    void import('./services/aiEnrichmentService').then(m => m.runApprovedHaikuBenchmark()).catch(() => logger.error('Approved AI benchmark failed; no automatic retry'));
+    void import('./services/aiEnrichmentService').then(async m => { await m.runApprovedHaikuBenchmark(); await m.retryApprovedHaikuFailure(); }).catch(() => logger.error('Approved AI benchmark failed; no automatic retry'));
     // Warm the homepage counts cache (fire-and-forget; never blocks boot).
     setTimeout(() => { require('./routes/opportunities').warmOpportunityCounts().catch(() => {}); }, 3000);
     setTimeout(() => { require('./routes/trades').warmTradeCounts(); }, 20000);

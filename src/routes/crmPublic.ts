@@ -196,6 +196,10 @@ router.post(
         return res.status(200).json({ success: true, id: result.rows[0].id, duplicate: true, ...recordedInfo(result.rows[0].created_at) });
       }
       if (bookingId) await attachBooking(bookingId, result.rows[0].id);
+      if(sessionId){
+        await recordJourneyEvent({sessionId,opportunityId,eventType:'coordonnees_saisies',eventId:`coordinates:${result.rows[0].id}`});
+        if((req.body as any).visitorChoice==='info')await recordJourneyEvent({sessionId,opportunityId,eventType:'demande_info',eventId:`info:${result.rows[0].id}`});
+      }
       if (sessionId && (bookingId || leadSource === 'callback_modal')) {
         await recordJourneyEvent({ sessionId, opportunityId,
           eventType: bookingId ? 'appointment_booked' : 'callback_requested',
