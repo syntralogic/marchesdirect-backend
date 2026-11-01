@@ -73,6 +73,12 @@ describe('deal properties', () => {
     expect(p).not.toHaveProperty('md_score_version');
     expect(p).not.toHaveProperty('md_appointment_outcome');
   });
+  it('marks approved test companies before creating a deal or entering a stage',()=>{
+    const base={type:'callback' as const,market,answers:null,score:null,booking:null,forCreate:true,contactLabel:'TEST'};
+    expect(buildDealProperties({...base,lead:{...lead,siret:'10945324100019'}}).md_is_test).toBe('true');
+    expect(buildDealProperties({...base,lead:{...lead,company_name:'4060 INVEST'}}).md_is_test).toBe('true');
+    expect(buildDealProperties({...base,lead:{...lead,company_name:'AIS ELEC BORDEAUX'}})).not.toHaveProperty('md_is_test');
+  });
   it('takes the dossier status from the real delivery of the e-mail', () => {
     const base = { lead, type: 'dossier' as const, market, answers: null, score: null, booking: null, contactLabel: 'ACME' };
     expect(buildDealProperties({ ...base, forCreate: true, dossierStatus: 'available' }).md_dossier_status).toBe('available');
