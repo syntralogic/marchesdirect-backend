@@ -1,3 +1,4 @@
+import { AI_BUDGET_DDL } from '../services/aiBudgetService';
 import { JOURNEY_IDENTITY_DDL } from '../services/journeyIdentitySchema';
 import { Pool, QueryResult, PoolClient } from 'pg';
 import dotenv from 'dotenv';
@@ -1141,6 +1142,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   `);
   await step(`CREATE INDEX IF NOT EXISTS siret_lookups_session ON siret_lookups(session_id)`);
   for (const ddl of JOURNEY_IDENTITY_DDL) await step(ddl);
+  for (const ddl of AI_BUDGET_DDL) await step(ddl);
 
   // Client's explicit priority (WhatsApp): integrate the public tender
   // databases as real content before finalizing UX, because testing against
@@ -1174,7 +1176,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // BOAMP data collection was wanted again. Removed for good; see the
   // one-time cleanup below for undoing what those lines already left in
   // production databases.
-  await removeDemoSeedData();
+  // Owner policy: preserve all historical and demonstration rows.
 
   // Same no-shell-on-Render reasoning: force these back to active in code
   // rather than relying on someone running `psql ... UPDATE data_sources`
@@ -1744,23 +1746,4 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   });
 };
 
-// One-time (but safe-to-repeat) cleanup of the demo data the old
-// seedDemoOpportunities() call above used to insert on every boot - deletes
-// the demo_seed source's opportunities plus the source row itself. Does
-// NOT touch the separate, manually-run scripts/seed.js demo rows
-// (source_reference LIKE 'DEMO-%' under the real 'boamp' source id) -
-// those were an intentional one-off for browsing the app pre-launch and
-// aren't inserted automatically, so removing them is a separate decision.
-async function removeDemoSeedData(): Promise<void> {
-  const source = await pool.query(`SELECT id FROM data_sources WHERE code = 'demo_seed'`);
-  if (source.rows.length === 0) return; // nothing to clean up
-
-  const sourceId = source.rows[0].id;
-  const deleted = await pool.query(`DELETE FROM opportunities WHERE source_id = $1`, [sourceId]);
-  await pool.query(`DELETE FROM data_sources WHERE id = $1`, [sourceId]);
-
-  if (deleted.rowCount && deleted.rowCount > 0) {
-    logger.info(`🧹 Removed ${deleted.rowCount} auto-seeded demo opportunities and the demo_seed source`);
-  }
-}
-
+// Historical demonstration data is deliberately preserved.

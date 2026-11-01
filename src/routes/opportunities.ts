@@ -1671,14 +1671,9 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     // the platform's own gateway timeout before the response ever went out
     // - which reads to the visitor as "the fiche just didn't update",
     // indistinguishable from generation never having run at all.
-    const [extractedFacts, analysisSections] = await Promise.all([
-      ensureFactsExtracted(opportunity.id, opportunity.ai_extracted_facts),
-      ensureAnalysisSectionsGenerated(opportunity.id, opportunity.ai_analysis_sections, opportunity.ai_analysis_sections_status),
-      ensureClassified(opportunity),
-      ensureSummaryGenerated(opportunity),
-    ]);
-    opportunity.ai_extracted_facts = extractedFacts;
-    opportunity.ai_analysis_sections = analysisSections;
+    // A public GET (including crawlers and refreshes) never initiates a paid AI call.
+    const extractedFacts = opportunity.ai_extracted_facts;
+    const analysisSections = opportunity.ai_analysis_sections;
     // 30 Sep audit, point 1: when the AI sections are missing/empty/failed, the
     // fiche shows the source's own information in the same 3 accordions instead
     // of staying on "Analyse en cours". Built from stored fields only.
@@ -2068,7 +2063,7 @@ router.get('/:id/match-score', optionalAuth, async (req: AuthRequest, res: Respo
 });
 
 // POST /api/opportunities/:id/classify - trigger AI classification (Milestone 6)
-router.post('/:id/classify', async (req: Request, res: Response) => {
+router.post('/:id/classify', authenticate, requireRole(['admin', 'super_admin']), async (req: Request, res: Response) => {
   try {
     const success = await classifyOpportunity(req.params.id);
     if (!success) {

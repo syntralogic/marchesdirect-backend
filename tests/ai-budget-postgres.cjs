@@ -1,0 +1,27 @@
+const {PGlite}=require('@electric-sql/pglite');
+const assert=require('node:assert/strict');
+const path=require('node:path');
+(async()=>{
+ const pg=new PGlite();
+ const db={query:(...a)=>pg.query(...a),transaction:fn=>pg.transaction(tx=>fn({query:(...a)=>tx.query(...a)}))};
+ const f=path.resolve(__dirname,'../dist/src/config/database.js');
+ require.cache[f]={id:f,filename:f,loaded:true,exports:{db}};
+ const axios=require('axios');let calls=0;
+ axios.post=async()=>{calls++;await new Promise(r=>setTimeout(r,10));return {data:{usage:{input_tokens:5000,output_tokens:10000},content:[{type:'text',text:'ok'}]}};};
+ process.env.ANTHROPIC_API_KEY='test-only-not-a-real-key';
+ const {AI_BUDGET_DDL,paidClaudeRequest,reservationMicrousd,usageCostMicrousd}=require('../dist/src/services/aiBudgetService');
+ for(const sql of AI_BUDGET_DDL)await pg.exec(sql);
+ assert.equal(usageCostMicrousd('claude-sonnet-5',{input_tokens:2000,output_tokens:500}),9000);
+ assert.equal(usageCostMicrousd('claude-haiku-5-5',{input_tokens:2000,output_tokens:500}),450);
+ const payload={model:'claude-sonnet-5',max_tokens:10000,messages:[{role:'user',content:'test'}]};
+ const reserved=reservationMicrousd(payload.model,payload);
+ const results=await Promise.allSettled(Array.from({length:20},()=>paidClaudeRequest(payload,'concurrency-test')));
+ assert(results.some(r=>r.status==='rejected'));
+ assert(calls<=Math.floor(1000000/reserved));
+ const balance=(await pg.query('SELECT * FROM ai_daily_spend')).rows[0];
+ assert.equal(Number(balance.reserved_microusd),0);
+ assert(Number(balance.spent_microusd)<=1000000);
+ assert.equal((await pg.query("SELECT count(*)::int n FROM ai_usage WHERE status='completed'")).rows[0].n,calls);
+ await assert.rejects(paidClaudeRequest({...payload,model:'unknown-model'},'test'),/ai_model_price_unknown/);
+ await pg.close();console.log('PASS AI budget: concurrent reservations, $1 cap, actual token costs, unknown model denied; no network call');
+})().catch(e=>{console.error(e);process.exitCode=1;});

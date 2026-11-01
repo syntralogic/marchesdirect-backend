@@ -435,6 +435,8 @@ const startServer = async () => {
     // Supabase project) — no manual psql step required.
     await ensureSchema();
     dbReady = true;
+    // Owner-approved one-off benchmark, protected by a durable unique run ID.
+    void import('./services/aiEnrichmentService').then(m => m.runApprovedHaikuBenchmark()).catch(() => logger.error('Approved AI benchmark failed; no automatic retry'));
     // Warm the homepage counts cache (fire-and-forget; never blocks boot).
     setTimeout(() => { require('./routes/opportunities').warmOpportunityCounts().catch(() => {}); }, 3000);
     setTimeout(() => { require('./routes/trades').warmTradeCounts(); }, 20000);
