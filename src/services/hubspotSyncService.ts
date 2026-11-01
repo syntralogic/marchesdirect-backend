@@ -4,7 +4,9 @@ import axios, { AxiosRequestConfig } from 'axios';
 import { db } from '../config/database';
 import { syncDealForLead, DealLead, requestTypeForLead } from './hubspotDealService';
 import { isVerificationRequired } from './phoneVerificationService';
-import { buildCompanyCockpit } from './companyCockpitService';
+import { buildCompanyCockpitForRequests } from './companyCockpitService';
+import { syncJourneyProjection, STEP_LABELS } from './journeyProjectionService';
+import { journeySchemaReady } from './hubspotJourneySchema';
 
 // ============================================================================
 // HUBSPOT SYNC - companies and contacts (client brief 31 Oct, part B)
@@ -29,7 +31,7 @@ const BASE_URL = () => (process.env.HUBSPOT_BASE_URL || 'https://api.hubapi.com'
 export const isHubspotConfigured = (): boolean => !!process.env.HUBSPOT_ACCESS_TOKEN;
 
 // Journal codes that can be "the last step reached" (legacy view_opportunity counts as offer_view).
-const STEP_CODES = [
+const STEP_CODES = ['arrival','retour_arriere','coordonnees_saisies','demande_info',
   'search', 'offer_view', 'view_opportunity', 'company_selected', 'analysis_started', 'analysis_completed',
   'dossier_preview', 'dossier_requested', 'callback_requested', 'appointment_booked',
 ];
@@ -78,7 +80,7 @@ export function buildContactProperties(lead: SyncLead, j: JourneySummary): Recor
     phone: clean(lead.phone, 40),
     md_search_trade: j.lastTrade,
     md_search_area: j.lastArea,
-    md_last_journey_step: j.lastStep === 'view_opportunity' ? 'offer_view' : j.lastStep,
+    md_last_journey_step: j.lastStep ? (STEP_LABELS[j.lastStep] || 'Étape enregistrée') : null,
     md_last_site_activity: j.lastActivity ? j.lastActivity.toISOString() : null,
     md_offer_views_count: j.offerViews,
     md_analyses_count: j.analyses,
@@ -160,6 +162,7 @@ export async function syncCompanyJourneyForSiret(siret: string): Promise<void> {
     visitors:ids.length,offerViews:j.offerViews,analyses:j.analyses,lastActivity:j.lastActivity,
   });
   await syncCompanyCockpit(companyId,ids,siret);
+  await syncJourneyProjection(companyId,siret);
   if (version !== undefined) await db.query(`UPDATE crm_company_sync_queue SET processed_version=$2
     WHERE siret=$1 AND version=$2`, [siret,version]);
 }
@@ -187,21 +190,24 @@ async function syncCompanyCockpit(companyId: string, sessionIds: string[], siret
   const events = await db.query('SELECT DISTINCT event_type FROM visitor_events WHERE session_id = ANY($1) AND COALESCE(attribution_siret,siret)=$2', [sessionIds,siret]);
   const coordinates = await db.query('SELECT 1 FROM siret_lookups WHERE session_id = ANY($1) AND siret=$2 AND lead_captured_at IS NOT NULL LIMIT 1', [sessionIds,siret]);
   const requests = await db.query(
-    `SELECT l.*, d.hubspot_deal_id FROM crm_leads l LEFT JOIN crm_deals d ON d.lead_id = l.id
-     WHERE l.session_id = ANY($1) AND COALESCE(l.siret,(SELECT s.siret FROM journey_company_selections s
-       WHERE s.session_id=l.session_id AND s.selected_at<=l.created_at ORDER BY s.selected_at DESC,s.id DESC LIMIT 1))=$2 AND (l.lead_source IN ('analysis_gate','callback_modal','appointment_modal') OR l.appointment_mode IN ('callback','slot'))
-     ORDER BY GREATEST(l.updated_at, l.created_at) DESC, l.id DESC LIMIT 1`, [sessionIds,siret]);
-  const request = requests.rows[0];
-  let dealStage: string | null = null;
-  if (request?.hubspot_deal_id) {
-    const deal = await hs({ method: 'GET', url: `/crm/v3/objects/deals/${request.hubspot_deal_id}`, params: { properties: 'dealstage' } });
-    dealStage = deal.properties?.dealstage || null;
+    `SELECT l.*, d.hubspot_deal_id FROM crm_leads l LEFT JOIN crm_deals d ON d.lead_id=l.id
+     WHERE l.session_id=ANY($1) AND COALESCE(l.siret,(SELECT s.siret FROM journey_company_selections s
+     WHERE s.session_id=l.session_id AND s.selected_at<=l.created_at ORDER BY s.selected_at DESC,s.id DESC LIMIT 1))=$2
+     AND (l.lead_source IN ('analysis_gate','callback_modal','appointment_modal') OR l.appointment_mode IN ('callback','slot'))
+     ORDER BY GREATEST(l.updated_at,l.created_at) DESC,l.id DESC`,[sessionIds,siret]);
+  const stages=new Map<string,string>();
+  const ids=[...new Set(requests.rows.map((r:any)=>r.hubspot_deal_id).filter(Boolean))];
+  for(let i=0;i<ids.length;i+=100){
+    const batch=await hs({method:'POST',url:'/crm/v3/objects/deals/batch/read',data:{properties:['dealstage'],inputs:ids.slice(i,i+100).map(id=>({id}))}});
+    for(const d of batch.results||[])stages.set(String(d.id),d.properties?.dealstage);
   }
-  const bookings = request
-    ? await db.query('SELECT status, outcome, slot_at FROM appointment_bookings WHERE lead_id = $1 ORDER BY created_at DESC LIMIT 1', [request.id])
-    : { rows: [] };
-  const properties = buildCompanyCockpit({ events: events.rows.map((r: any) => r.event_type), hasCoordinates: !!coordinates.rows.length || !!(request?.email || request?.phone),
-    requestType: request ? requestTypeForLead(request) : null, dealStage, booking: bookings.rows[0] || null });
+  const bookingRows=requests.rows.length?await db.query(`SELECT DISTINCT ON(lead_id) lead_id,status,outcome,slot_at FROM appointment_bookings
+    WHERE lead_id=ANY($1) ORDER BY lead_id,created_at DESC`,[requests.rows.map((r:any)=>r.id)]):{rows:[]};
+  const facts=requests.rows.map((r:any)=>{
+    if(r.hubspot_deal_id&&!stages.has(String(r.hubspot_deal_id)))throw new Error('crm_deal_state_unavailable');
+    return {requestType:requestTypeForLead(r),dealStage:stages.get(String(r.hubspot_deal_id))||null,booking:bookingRows.rows.find((b:any)=>b.lead_id===r.id)||null};
+  });
+  const properties=buildCompanyCockpitForRequests({events:events.rows.map((r:any)=>r.event_type),hasCoordinates:!!coordinates.rows.length||requests.rows.some((r:any)=>r.email||r.phone)},facts);
   await hs({ method: 'PATCH', url: `/crm/v3/objects/companies/${companyId}`, data: { properties } });
 }
 
@@ -319,6 +325,7 @@ export async function syncLeadToHubspot(lead: SyncLead): Promise<{ contactId: st
   await associateContactWithCompany(contactId, companyId);
   await syncDealForLead({ ...lead, siret }, contactId, companyId);
   await syncCompanyCockpit(companyId, companySessions, siret);
+  await syncJourneyProjection(companyId,siret);
   return { contactId, companyId };
 }
 
@@ -391,4 +398,15 @@ export async function hubspotDiagnostic() {
   }
   if (!out.verdict.length) out.verdict.push('Configuration looks correct.');
   return out;
+}
+
+// One refresh when inactivity crosses 30 minutes; a return increments the version.
+export async function refreshInactiveCompanyJourneys():Promise<void>{
+ if(!journeySchemaReady)return;
+ const r=await db.query(`SELECT siret,version FROM crm_company_sync_queue WHERE updated_at<=NOW()-INTERVAL '30 minutes'
+  AND inactivity_processed_version<version AND processed_version=version ORDER BY updated_at LIMIT 50`);
+ for(const row of r.rows){
+  await syncCompanyJourneyForSiret(row.siret);
+  await db.query('UPDATE crm_company_sync_queue SET inactivity_processed_version=$2 WHERE siret=$1 AND version=$2',[row.siret,row.version]);
+ }
 }

@@ -7,6 +7,8 @@ import { computeMatchScore } from '../services/matchScoreService';
 import { RULES_VERSION } from '../services/matchEngine';
 import { buildFacts } from '../services/analysisFacts';
 import { recordJourneyEvent, refreshJourneyForSession } from '../services/journeyEventService';
+import { recordComputedScore } from '../services/journeyScoreService';
+import { enrichSelectedNotice } from '../services/aiEnrichmentService';
 
 // Server-side analysis snapshot (guide v24 s.4): ONE record binds company + establishment +
 // market + lot + versions + answers, so homepage, fiche, animation, concordance and dossier all
@@ -74,9 +76,13 @@ router.get('/:id', async (req: Request, res: Response) => {
     const r = await db.query('SELECT * FROM analysis_snapshots WHERE id = $1', [req.params.id]).catch(() => ({ rows: [] as any[] }));
     if (!r.rows.length || r.rows[0].session_id !== sessionId) return res.status(404).json({ error: 'Analyse introuvable.' });
     const s = r.rows[0];
-    const match = await computeMatchScore(s.opportunity_id, null, { sessionId, answers: s.answers, lot: s.lot_id || null });
+    const match = await computeMatchScore(s.opportunity_id, null, { sessionId, siret:s.siret, answers: s.answers, lot: s.lot_id || null });
+    // Exact server computation time, separate from snapshot creation and CRM retry.
+    await db.query(`UPDATE analysis_snapshots SET compatibility_score=$2, score_computed_at=NOW() WHERE id=$1`, [s.id, match.score]);
+    await recordComputedScore({sessionId,siret:s.siret,opportunityId:s.opportunity_id,score:match.score,answers:s.answers,lot:s.lot_id});
+    if(!/bot|crawler|spider|headless|slurp/i.test(req.get('user-agent')||''))void enrichSelectedNotice(s.opportunity_id).catch(()=>logger.warn('AI enrichment remains pending'));
     const [lk, op] = await Promise.all([
-      db.query('SELECT company_data, created_at FROM siret_lookups WHERE session_id = $1', [sessionId]),
+      db.query('SELECT company_data,selected_at AS created_at FROM journey_company_selections WHERE session_id=$1 AND siret=$2 ORDER BY selected_at DESC LIMIT 1', [sessionId,s.siret]),
       db.query(`SELECT o.title, o.buyer_name, o.official_url, o.publication_date, o.updated_at, o.location_city, o.location_department, o.deadline,
                        o.estimated_value, o.currency, o.ai_extracted_facts, ds.name AS source_name
                 FROM opportunities o LEFT JOIN data_sources ds ON ds.id = o.source_id WHERE o.id = $1`, [s.opportunity_id]),

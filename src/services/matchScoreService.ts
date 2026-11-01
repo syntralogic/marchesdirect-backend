@@ -244,7 +244,7 @@ const toNumber = (v: any): number | null => (v == null || v === '' || Number.isN
 // client's own test path) uses what the SIRET lookup returned. Before this,
 // the SIRET-only visitor fell into a branch that never read the company at
 // all.
-async function loadCompanyProfile(companyId: string | null | undefined, sessionId?: string | null): Promise<CompanyProfile | null> {
+async function loadCompanyProfile(companyId: string | null | undefined, sessionId?: string | null, siret?: string | null): Promise<CompanyProfile | null> {
   if (companyId) {
     const r = await db.query('SELECT * FROM companies WHERE id = $1 AND deleted_at IS NULL', [companyId]);
     const c = r.rows[0];
@@ -276,7 +276,7 @@ async function loadCompanyProfile(companyId: string | null | undefined, sessionI
     };
   }
   if (!sessionId) return null;
-  const l = await db.query('SELECT company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
+  const l = siret ? await db.query('SELECT company_data FROM journey_company_selections WHERE session_id=$1 AND siret=$2 ORDER BY selected_at DESC LIMIT 1',[sessionId,siret]) : await db.query('SELECT company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
   const d = l.rows[0]?.company_data;
   if (!d) return null;
   const department = departmentFromPostal(d.postal);
@@ -327,7 +327,7 @@ export function marketTradeSlugs(opp: any, facts: any): string[] {
 export const computeMatchScore = async (
   opportunityId: string,
   companyId?: string | null,
-  options: { sessionId?: string | null; answers?: RefineAnswers; lot?: string | null } = {}
+  options: { siret?: string | null; sessionId?: string | null; answers?: RefineAnswers; lot?: string | null } = {}
 ): Promise<MatchScoreResult> => {
   const oppResult = await db.query(
     `SELECT o.*, ot.code as journey, t.name as trade_name, t.slug as trade_slug
@@ -363,7 +363,7 @@ export const computeMatchScore = async (
     : null;
 
   const lotTitle = String(options.lot || '').trim().slice(0, 200) || null;
-  const company = await loadCompanyProfile(companyId, options.sessionId);
+  const company = await loadCompanyProfile(companyId, options.sessionId, options.siret);
   const evaluation = evaluateMatch(
     company,
     {
