@@ -112,14 +112,15 @@ describe('syncDealForLead', () => {
     factsRows();
     score.mockResolvedValue({ score: 64 });
     q.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] });   // crm_deals lookup, insert
-    req.mockResolvedValueOnce({ data: { results: [] } })     // search by md_request_id
+    req.mockResolvedValueOnce({ data: { properties: { md_is_test: 'false' } } }) // company test flag
+       .mockResolvedValueOnce({ data: { results: [] } })     // search by md_request_id
        .mockResolvedValueOnce({ data: { id: 'D1' } })        // create
        .mockResolvedValue({ data: {} });                     // associations
     expect(await syncDealForLead(lead, 'c1', 'co1')).toBe('D1');
-    const create = req.mock.calls[1][0];
+    const create = req.mock.calls.find(c=>c[0].method==='POST'&&c[0].url==='/crm/v3/objects/deals')[0];
     expect(create.url).toBe('/crm/v3/objects/deals');
     expect(create.data.properties).toMatchObject({ pipeline: PIPELINE_ID, dealstage: STAGES.callback, hubspot_owner_id: '102050175', md_request_id: 'L1', md_market_type: 'private', md_compatibility_score: 64 });
-    expect(req.mock.calls.slice(2).map(c => c[0].url)).toEqual([
+    expect(req.mock.calls.filter(c=>c[0].method==='PUT').map(c => c[0].url)).toEqual([
       '/crm/v4/objects/deals/D1/associations/default/contacts/c1', '/crm/v4/objects/deals/D1/associations/default/companies/co1']);
     expect(q.mock.calls.some(c => String(c[0]).includes('INSERT INTO crm_deals'))).toBe(true);
   });
@@ -141,7 +142,8 @@ describe('syncDealForLead', () => {
     factsRows();
     score.mockResolvedValue({ score: null });
     q.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] });
-    req.mockResolvedValueOnce({ data: { results: [{ id: 'D7' }] } })                                 // found by md_request_id
+    req.mockResolvedValueOnce({ data: { properties: { md_is_test: 'false' } } })
+       .mockResolvedValueOnce({ data: { results: [{ id: 'D7' }] } })                                 // found by md_request_id
        .mockResolvedValueOnce({ data: { properties: { dealstage: STAGES.proposal, md_request_type: 'appointment', hubspot_owner_id: 'existing-owner' } } })
        .mockResolvedValue({ data: {} });
     expect(await syncDealForLead(lead, 'c1', 'co1')).toBe('D7');
@@ -149,5 +151,17 @@ describe('syncDealForLead', () => {
     expect(patch.data.properties).not.toHaveProperty('dealstage');
     expect(patch.data.properties).not.toHaveProperty('hubspot_owner_id');
     expect(patch.data.properties.md_request_type).toBe('appointment');
+  });
+  it('creates no commercial activity for a known test company', async () => {
+    expect(await syncDealForLead({...lead,siret:'10945324100019'},'c1','co1')).toBeNull();
+    expect(req).not.toHaveBeenCalled(); expect(q).not.toHaveBeenCalled();
+  });
+  it('respects a manually marked test company and fails closed on lookup failure', async () => {
+    req.mockResolvedValueOnce({data:{properties:{md_is_test:'true'}}});
+    expect(await syncDealForLead(lead,'c1','co1')).toBeNull();
+    expect(q).not.toHaveBeenCalled();
+    req.mockRejectedValueOnce(new Error('HubSpot unavailable'));
+    await expect(syncDealForLead(lead,'c1','co1')).rejects.toThrow('HubSpot unavailable');
+    expect(req.mock.calls.every(c=>c[0].method==='GET')).toBe(true);
   });
 });

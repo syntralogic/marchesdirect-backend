@@ -5,6 +5,11 @@ export let journeySchemaReady=false;
 export const JOURNEY_PROJECTION_DDL=[
  `CREATE TABLE IF NOT EXISTS journey_note_outbox(event_id UUID NOT NULL,company_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',hubspot_note_id TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),PRIMARY KEY(event_id,company_id))`,
  `CREATE TABLE IF NOT EXISTS crm_setup_log(key TEXT PRIMARY KEY,status TEXT NOT NULL,details JSONB,updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+ `CREATE TABLE IF NOT EXISTS journey_visit_notes(id UUID PRIMARY KEY,company_id TEXT NOT NULL,session_id TEXT NOT NULL,
+   started_at TIMESTAMPTZ NOT NULL,last_event_at TIMESTAMPTZ NOT NULL,hubspot_note_id TEXT UNIQUE,
+   status TEXT NOT NULL DEFAULT 'pending',body_hash TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+ `CREATE INDEX IF NOT EXISTS journey_visit_notes_session ON journey_visit_notes(company_id,session_id,started_at)`,
+ `INSERT INTO crm_setup_log(key,status) VALUES('visit_notes_policy','ready') ON CONFLICT(key) DO NOTHING`,
 ];
 export async function hubspotRequest(cfg:any):Promise<any>{
  return (await axios.request({baseURL:'https://api.hubapi.com',timeout:15000,...cfg,

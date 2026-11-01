@@ -1,4 +1,5 @@
 import {isTestCompany} from './companyProfileService';
+import { isTestCrmCompany } from './hubspotTestPolicy';
 import { journeyLinkProperties } from './journeyLinkService';
 import axios, { AxiosRequestConfig } from 'axios';
 import { db } from '../config/database';
@@ -226,6 +227,7 @@ export async function syncDealForLead(lead: DealLead, contactId: string, company
   if (!type) return null;
 
   return withLock(`deal:${lead.id}`, async () => {
+    if (await isTestCrmCompany(companyId, lead.siret || '', lead.company_name, hs)) return null;
     const facts = await gatherDealFacts(lead);
     const confirmed = type === 'appointment' && facts.booking?.status === 'booked';
     const outcome = (facts.booking?.outcome as AppointmentOutcome | null) || null;
