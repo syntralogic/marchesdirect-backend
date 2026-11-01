@@ -14,7 +14,7 @@ const q = db.query as jest.Mock;
 const req = (axios as any).request as jest.Mock;
 const score = computeMatchScore as jest.Mock;
 
-beforeEach(() => { jest.clearAllMocks(); process.env.HUBSPOT_ACCESS_TOKEN = 't'; });
+beforeEach(() => { jest.clearAllMocks(); process.env.HUBSPOT_ACCESS_TOKEN = 't';process.env.HUBSPOT_DOSSIER_STAGE_ID='dossier-stage'; });
 
 describe('request type', () => {
   it('only real commercial requests become deals', () => {
@@ -47,7 +47,7 @@ describe('answers and stages', () => {
   });
   it('a booking confirms the RDV, only an attended outcome reaches RDV réalisé', () => {
     expect(targetStage('callback', false, null)).toBe(STAGES.callback);
-    expect(targetStage('dossier', false, null)).toBe(STAGES.callback);
+    expect(targetStage('dossier', false, null)).toBe('dossier-stage');
     expect(targetStage('appointment', true, 'scheduled')).toBe(STAGES.confirmed);
     expect(targetStage('appointment', true, 'no_show')).toBe(STAGES.confirmed);
     expect(targetStage('appointment', true, 'attended')).toBe(STAGES.held);
@@ -82,7 +82,7 @@ describe('deal properties', () => {
   });
   it('carries score + version + date when really computed, and scheduled for a booked slot', () => {
     const p = buildDealProperties({ lead, type: 'appointment', market, answers: null, score: 72, booking: { status: 'booked', outcome: null }, forCreate: false, contactLabel: 'ACME', now: new Date('2026-10-31T10:00:00Z') });
-    expect(p).toMatchObject({ md_compatibility_score: 72, md_score_date: '2026-10-31', md_appointment_outcome: 'scheduled' });
+    expect(p).toMatchObject({ md_compatibility_score: 72, md_score_date: '2026-10-31T10:00:00.000Z', md_appointment_outcome: 'scheduled' });
     expect(p.md_score_version).toBeTruthy();
     expect(p).not.toHaveProperty('dealname');
   });
@@ -92,7 +92,7 @@ describe('syncDealForLead', () => {
   const lead = { id: 'L1', first_name: 'Ali', last_name: 'K', email: 'a@x.fr', company_name: 'ACME', appointment_mode: 'callback', opportunity_id: 'O1', session_id: 's1', created_at: '2026-10-30T09:00:00Z' };
   const factsRows = () => q
     .mockResolvedValueOnce({ rows: [{ title: 'T', source_reference: 'R', official_url: null, journey: 'tender' }] }) // opportunity
-    .mockResolvedValueOnce({ rows: [{ answers: { capacity: 'oui' }, lot_id: '' }] })                                  // snapshot
+    .mockResolvedValueOnce({ rows: [{ answers: { capacity: 'oui' }, lot_id: '',compatibility_score:64,score_computed_at:'2026-10-31T11:22:33Z' }] })                                  // snapshot
     .mockResolvedValueOnce({ rows: [] })                                                                               // booking
     .mockResolvedValueOnce({ rows: [] }) // generation
     .mockResolvedValueOnce({ rows: [] });                                                                              // dossier delivery

@@ -3,7 +3,7 @@ import { db } from '../config/database';
 import { paidClaudeRequest } from './aiBudgetService';
 import { logger } from '../utils/logger';
 
-const VERSION='notice-bundle-v1';
+const VERSION='notice-bundle-v2';
 const SYSTEM=`Tu analyses un avis réel de marché. Utilise uniquement les données fournies, sans inventer d'entreprise, de montant, de date, de qualification ni d'effectif.
 Réponds en JSON strict : {"summary":"résumé français en 2 à 4 phrases, 120 mots maximum", "sections":{"presentation":"objet et prestations","conditions":"conditions et points à vérifier","entreprises":"métiers concernés sans promettre l'éligibilité"},"facts":{}}.
 Les facts ont chacun la forme {"value":"valeur source ou not available","available":true/false} : buyer_name, contract_object, procedure_type, submission_deadline, estimated_value, required_qualifications, team_size_estimate, contract_duration, submission_method, allotment, technical_visit, scope_details, intervention_calendar, constraints_expectations, order_caps, attribution_winner, attribution_amount, attribution_date, buyer_phone, buyer_website, contact_email.
@@ -17,11 +17,13 @@ export function bundleKey(o:any):string {
   return `${VERSION}:${o.id}:${createHash('sha256').update(JSON.stringify(sourceOf(o))).digest('hex')}`;
 }
 export async function generateNoticeBundle(o:any, model:string, task:string):Promise<any> {
-  const response=await paidClaudeRequest({model,max_tokens:3500,cache_control:{type:'ephemeral'},
-    system:SYSTEM,messages:[{role:'user',content:JSON.stringify(sourceOf(o))}]},task);
-  const text=response.data.content?.find((b:any)=>b.type==='text')?.text;
-  if(typeof text!=='string') throw new Error('ai_bundle_text_missing');
-  const result=JSON.parse(text.replace(/^```(?:json)?\s*/,'').replace(/\s*```$/,''));
+  const response=await paidClaudeRequest({model,max_tokens:6000,cache_control:{type:'ephemeral'},
+    system:SYSTEM+' Les dates et heures doivent être en heure de Paris, avec le fuseau indiqué. Ne reproduis pas une heure UTC comme heure locale.',
+    tools:[{name:'notice_bundle',description:'Résumé et extraction fidèle de l’avis source',input_schema:{type:'object',required:['summary','sections','facts'],properties:{summary:{type:'string'},sections:{type:'object',required:['presentation','conditions','entreprises'],properties:{presentation:{type:'string'},conditions:{type:'string'},entreprises:{type:'string'}}},facts:{type:'object'}}}}],
+    tool_choice:{type:'tool',name:'notice_bundle'},messages:[{role:'user',content:JSON.stringify(sourceOf(o))}]},task);
+  if(response.data.stop_reason==='max_tokens')throw new Error('ai_bundle_incomplete');
+  const result=response.data.content?.find((b:any)=>b.type==='tool_use'&&b.name==='notice_bundle')?.input;
+  if(!result)throw new Error('ai_bundle_tool_missing');
   if(typeof result.summary!=='string'||!result.summary.trim()||!result.facts||!result.sections) throw new Error('ai_bundle_invalid');
   if(!Array.isArray(result.facts.key_risks?.value)) result.facts.key_risks={value:[],available:false};
   if(!Array.isArray(result.facts.selection_criteria?.value)) result.facts.selection_criteria={value:[],available:false};
@@ -71,4 +73,18 @@ export async function runApprovedHaikuBenchmark():Promise<void> {
   }
   await db.query('UPDATE ai_result_cache SET result=$2::jsonb WHERE cache_key=$1',[run,JSON.stringify({status:'completed',notices:10,references:3})]);
   logger.info('Approved AI benchmark completed; automatic enrichment remains paused');
+}
+
+// Only the failed item from the approved ten-notice benchmark is retried.
+// The original result is retained, with an independent durable claim.
+export async function retryApprovedHaikuFailure():Promise<void>{
+ const run='haiku-validation-retry-20261101';
+ const claim=await db.query(`INSERT INTO ai_result_cache(cache_key,function_name,model,result) VALUES($1,'benchmark','claude-haiku-5-5','{"status":"started"}') ON CONFLICT DO NOTHING RETURNING cache_key`,[run]);
+ if(!claim.rows.length)return;
+ const failed=await db.query(`SELECT o.* FROM ai_benchmark_results b JOIN opportunities o ON o.id=b.opportunity_id WHERE b.run_id='haiku-validation-20261101' AND b.model='claude-haiku-5-5' AND b.result->>'status'='failed'`);
+ for(const o of failed.rows){
+  let result:any;try{result={status:'completed',...await generateNoticeBundle(o,'claude-haiku-5-5','benchmark_retry')};}catch{result={status:'failed',code:'structured_generation_failed'};}
+  await db.query(`INSERT INTO ai_benchmark_results(run_id,opportunity_id,model,title,result) VALUES($1,$2,'claude-haiku-5-5',$3,$4::jsonb) ON CONFLICT DO NOTHING`,[run,o.id,o.title,JSON.stringify(result)]);
+ }
+ await db.query('UPDATE ai_result_cache SET result=$2::jsonb WHERE cache_key=$1',[run,JSON.stringify({status:'completed',count:failed.rows.length})]);
 }
