@@ -72,3 +72,13 @@ it('never overwrites a manually approved test flag with false during projection'
  await syncJourneyProjection('company','83438617900024');
  expect((hubspotRequest as jest.Mock).mock.calls[0][0].data.properties).not.toHaveProperty('md_is_test');
 });
+it('hides untitled announcement lines in the summary without dropping stored activity',()=>{
+ const events=[event('offer_view','2026-11-01T09:00:00Z'),event('offer_view','2026-11-01T09:01:00Z',{offer_id:'real',offer_title:'Chauffage école'}),
+  event('offer_view','2026-11-01T09:02:00Z',{offer_id:'empty',offer_title:'Annonce'})];
+ const values=projectJourney(events,[{opportunity_id:'empty',compatibility_score:25,score_computed_at:'2026-11-01T09:02:00Z'}],null,new Date('2026-11-01T09:32:00Z'));
+ expect(values.md_journey_summary).toContain('Chauffage école');
+ expect(values.md_journey_summary.split('\n').filter((line:string)=>line.includes('– Annonce consultée :'))).toHaveLength(1);
+ expect(values.md_journey_summary).not.toContain('Annonce consultée : Annonce');
+ expect(values.md_journey_summary).not.toContain('Score 25 % sur Annonce');
+ expect(values.md_abandonment_step).toBe('Annonce consultée');expect(events).toHaveLength(3);
+});

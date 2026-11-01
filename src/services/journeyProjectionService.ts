@@ -1,12 +1,12 @@
 import { db } from '../config/database';
-import {describeOffer,distinctTimelineEvents,offerUrl} from './journeyOfferPresentation';
+import {describeOffer,distinctTimelineEvents,hasOfferTitle,offerUrl} from './journeyOfferPresentation';
+import { syncVisitNotes } from './visitNoteService';
 import { buildCompanyProfile,buildCompanyScore,isTestCompany } from './companyProfileService';
 import { hubspotRequest,journeySchemaReady } from './hubspotJourneySchema';
 export const STEP_LABELS:Record<string,string>={arrival:'Arrivée',search:'Recherche',offer_view:'Annonce consultée',view_opportunity:'Annonce consultée',company_selected:'SIRET saisi',company_identified:'Entreprise identifiée',analysis_started:'Analyse commencée',analysis_completed:'Analyse réalisée',retour_arriere:'Retour arrière',coordonnees_saisies:'Coordonnées laissées',contact_details:'Coordonnées laissées',demande_info:'Simple renseignement demandé',dossier_preview:'Aperçu du dossier',dossier_requested:'Dossier demandé',callback_requested:'Rappel demandé',appointment_booked:'Rendez-vous réservé'};
 export {isTestCompany} from './companyProfileService';
 const stamp=(d:any)=>new Date(d).toLocaleString('fr-FR',{timeZone:'Europe/Paris',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}).replace(',','').replace(':','h');
 const clean=(v:any,max=250)=>typeof v==='string'?v.trim().slice(0,max):'';
-const escape=(s:string)=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 export function projectJourney(events:any[],scores:any[],firstSelectedAt:any,now=new Date()) {
  const offers=new Map<string,any>();
  for(const e of events)if(['offer_view','view_opportunity'].includes(e.event_type)&&e.offer_id&&!offers.has(e.offer_id))offers.set(e.offer_id,e);
@@ -16,12 +16,12 @@ export function projectJourney(events:any[],scores:any[],firstSelectedAt:any,now
  const lastRequest=[...events].reverse().find(e=>choices[e.event_type]);
  const last=events[events.length-1];
  const abandoned=!!last&&now.getTime()-new Date(last.at).getTime()>=30*60*1000&&(!lastRequest||new Date(last.at).getTime()>new Date(lastRequest.at).getTime());
- const timeline=distinctTimelineEvents(events).slice(-100).map(e=>{
+ const timeline=distinctTimelineEvents(events).filter(e=>!['offer_view','view_opportunity'].includes(e.event_type)||hasOfferTitle(e)).slice(-100).map(e=>{
   const title=` : ${describeOffer(e,now)}`;
   const attribution=e.event_type==='arrival'?(source?` via ${source}${campaign?' · '+campaign:''}`:' (source non renseignée)'):'';
   return {at:e.at,text:`${stamp(e.at)} – ${STEP_LABELS[e.event_type]||'Étape enregistrée'}${['offer_view','view_opportunity'].includes(e.event_type)?title:''}${attribution}`};
  });
- for(const s of scores.slice(-20))if(typeof s.compatibility_score==='number'&&s.score_computed_at)timeline.push({at:s.score_computed_at,text:`${stamp(s.score_computed_at)} – Score ${s.compatibility_score} % sur ${describeOffer(s,now)}`});
+ for(const s of scores.slice(-20))if(typeof s.compatibility_score==='number'&&s.score_computed_at&&hasOfferTitle(s))timeline.push({at:s.score_computed_at,text:`${stamp(s.score_computed_at)} – Score ${s.compatibility_score} % sur ${describeOffer(s,now)}`});
  const lines=timeline.sort((a,b)=>new Date(a.at).getTime()-new Date(b.at).getTime()).map(x=>x.text);
  if(abandoned)lines.push(`Inactif depuis le ${stamp(last.at)} ; dernière étape : ${STEP_LABELS[last.event_type]||'étape enregistrée'}.`);
  const values:Record<string,any>={
@@ -41,9 +41,11 @@ export function projectJourney(events:any[],scores:any[],firstSelectedAt:any,now
 export async function syncJourneyProjection(companyId:string,siret:string):Promise<void>{
  if(!journeySchemaReady)return;
  const [ev,selected,score,bookings]=await Promise.all([
-  db.query(`SELECT e.id,e.event_type,e.event_data,COALESCE(e.occurred_at,e.created_at) AS at,
-    COALESCE(e.opportunity_id,e.event_data->>'opportunityId') AS offer_id,o.title AS offer_title,o.location_department,o.location_country,o.raw_data,o.source_reference,o.deadline
+  db.query(`SELECT e.id,e.session_id,e.event_type,e.event_data,COALESCE(e.occurred_at,e.created_at) AS at,
+    COALESCE(e.opportunity_id,e.event_data->>'opportunityId') AS offer_id,o.title AS offer_title,o.location_department,o.location_country,o.raw_data,o.source_reference,o.deadline,
+    l.message AS request_message,l.appointment_slot_at AS request_slot_at
     FROM visitor_events e LEFT JOIN opportunities o ON o.id::text=COALESCE(e.opportunity_id,e.event_data->>'opportunityId')
+    LEFT JOIN crm_leads l ON l.id::text=split_part(e.event_id,':',2) AND l.session_id=e.session_id AND l.siret=$1
     WHERE COALESCE(e.attribution_siret,e.siret)=$1 ORDER BY COALESCE(e.occurred_at,e.created_at),e.created_at,e.id`,[siret]),
   db.query('SELECT company_data,selected_at FROM journey_company_selections WHERE siret=$1 ORDER BY selected_at',[siret]),
   db.query(`SELECT a.*,o.title,o.location_department,o.location_country,o.raw_data,o.source_reference,o.deadline FROM journey_scores a JOIN opportunities o ON o.id=a.opportunity_id
@@ -59,17 +61,5 @@ export async function syncJourneyProjection(companyId:string,siret:string):Promi
  const deals=await db.query(`SELECT DISTINCT d.hubspot_deal_id FROM crm_deals d JOIN crm_leads l ON l.id=d.lead_id
   WHERE COALESCE(l.siret,(SELECT s.siret FROM journey_company_selections s WHERE s.session_id=l.session_id AND s.selected_at<=l.created_at ORDER BY s.selected_at DESC LIMIT 1))=$1`,[siret]);
  for(const d of deals.rows)await hubspotRequest({method:'PATCH',url:`/crm/v3/objects/deals/${d.hubspot_deal_id}`,data:{properties:{md_journey_summary:properties.md_journey_summary,...(isTestCompany(siret,company?.name)?{md_is_test:'true'}:{})}}});
- const keyEvents=ev.rows.filter(e=>['company_selected','coordonnees_saisies','callback_requested','appointment_booked','dossier_requested','demande_info'].includes(e.event_type));
- if(!keyEvents.length)return;
- const labels=await hubspotRequest({method:'GET',url:'/crm/v4/associations/notes/companies/labels'});
- const association=labels.results?.find((l:any)=>l.label===null)||labels.results?.[0];
- if(!association)return;
- for(const e of keyEvents){
-  const claim=await db.query(`INSERT INTO journey_note_outbox(event_id,company_id,status) VALUES($1,$2,'posting') ON CONFLICT DO NOTHING RETURNING event_id`,[e.id,companyId]);
-  if(!claim.rows.length)continue;
-  try{
-   const note=await hubspotRequest({method:'POST',url:'/crm/v3/objects/notes',data:{properties:{hs_timestamp:new Date(e.at).toISOString(),hs_note_body:`<p>${escape(stamp(e.at)+' – '+(STEP_LABELS[e.event_type]||'Étape enregistrée'))}</p><p>${escape(properties.md_journey_summary).replace(/\n/g,'<br>')}</p>`},associations:[{to:{id:companyId},types:[{associationCategory:association.category,associationTypeId:association.typeId}]}]}});
-   await db.query("UPDATE journey_note_outbox SET status='created',hubspot_note_id=$3 WHERE event_id=$1 AND company_id=$2",[e.id,companyId,note.id]);
-  }catch{await db.query("UPDATE journey_note_outbox SET status='needs_review' WHERE event_id=$1 AND company_id=$2",[e.id,companyId]);}
- }
+ await syncVisitNotes(companyId,siret,company?.name,ev.rows,score.rows);
 }

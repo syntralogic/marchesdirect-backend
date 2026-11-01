@@ -12,6 +12,19 @@ const parisDate = (date: Date) => new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit',
 }).format(date);
 
+export const hasOfferTitle = (offer: any): boolean => {
+  const title = text(offer.offer_title || offer.title);
+  return !!title && !/^annonce$/i.test(title);
+};
+
+export function offerDeadline(deadline: unknown, now: Date): string | undefined {
+  if (!deadline) return undefined;
+  const date = new Date(deadline as string);
+  if (!Number.isFinite(date.getTime())) return undefined;
+  const days = Math.round((Date.parse(parisDate(date)) - Date.parse(parisDate(now))) / 86400000);
+  return days >= 0 ? `J-${days}` : `Échue depuis ${-days} j`;
+}
+
 export function describeOffer(offer: any, now: Date): string {
   const id = offer.offer_id || offer.opportunity_id;
   const title = text(offer.offer_title || offer.title) || 'Annonce';
