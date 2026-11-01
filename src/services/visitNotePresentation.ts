@@ -1,5 +1,6 @@
 import { distinctTimelineEvents, hasOfferTitle, offerDeadline, offerUrl } from './journeyOfferPresentation';
 import { offerDepartment } from './journeyOfferDepartment';
+import { shortOfferTitle, visitAction, visitSource } from './visitNoteCopy';
 
 const IDLE_MS = 30 * 60 * 1000;
 const views = new Set(['offer_view', 'view_opportunity']);
@@ -9,10 +10,6 @@ const clean = (value: any) => typeof value === 'string' ? value.replace(/\s+/g, 
 const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const millis = (value: any) => new Date(value).getTime();
 const stamp = (value: any) => new Date(value).toLocaleString('fr-FR', {timeZone: 'Europe/Paris', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}).replace(',', '').replace(':', 'h');
-const shortTitle = (value: string) => {
-  const title = value.replace(/^L['’]accord-cadre a pour objet l['’]acquisition de fourniture de\s+/i, 'Fourniture de ');
-  return title.length <= 80 ? title : title.slice(0, 77).replace(/\s+\S*$/, '').trimEnd() + '…';
-};
 
 export type VisitNote = {sessionId: string; startedAt: string; lastAt: string; triggerAt: string; title: string; html: string; text: string};
 
@@ -42,14 +39,18 @@ export function buildVisitNotes(events: any[], scores: any[], now = new Date()):
       const latestScore = visitScores[visitScores.length - 1];
       const lastChoice = [...triggers].reverse().find(e => choices[e.event_type]);
       const arrival = visit.find(e => e.event_data?.utm_source || e.event_data?.utm_campaign);
-      const source = [clean(arrival?.event_data?.utm_source), clean(arrival?.event_data?.utm_campaign).replace(/_/g, ' ')].filter(Boolean).join(' ');
+      const source = visitSource(arrival?.event_data?.utm_source, arrival?.event_data?.utm_campaign);
       const title = [lastChoice ? choices[lastChoice.event_type] : 'Coordonnées laissées',
         latestScore ? `score ${latestScore.compatibility_score} %` : '', source ? `source ${source.slice(0, 100)}` : ''].filter(Boolean).join(' · ');
       const offers = new Map<string, any>();
       for (const event of visit) if (views.has(event.event_type) && event.offer_id && hasOfferTitle(event)) offers.set(event.offer_id, event);
-      const offerLines = [...offers.values()].slice(0, 5).map(offer => {
+      const scoreByOffer = new Map(visitScores.map(s => [s.opportunity_id, s]));
+      for (const score of visitScores) if (!offers.has(score.opportunity_id) && hasOfferTitle(score)) offers.set(score.opportunity_id, {...score, offer_id:score.opportunity_id});
+      const ordered = [...offers.values()].sort((a,b) => Number(b.offer_id === latestScore?.opportunity_id) - Number(a.offer_id === latestScore?.opportunity_id));
+      const offerLines = ordered.slice(0, 5).map(offer => {
         const department = offerDepartment(offer);
-        const label = [shortTitle(clean(offer.offer_title || offer.title)) + (department ? ` (${department})` : ''), offerDeadline(offer.deadline, now)].filter(Boolean).join(' · ');
+        const score = scoreByOffer.get(offer.offer_id);
+        const label = [(score ? `Analysée ${score.compatibility_score} % — ` : '') + shortOfferTitle(clean(offer.offer_title || offer.title)) + (department ? ` (${department})` : ''), offerDeadline(offer.deadline, now)].filter(Boolean).join(' · ');
         return {label, url: offerUrl(offer.offer_id)!};
       });
       const timeline = distinctTimelineEvents(visit).filter(e => !['analysis_started', 'analysis_completed'].includes(e.event_type)
@@ -75,11 +76,12 @@ export function buildVisitNotes(events: any[], scores: any[], now = new Date()):
       const journey = (steps.length > 14 ? [...steps.slice(0, 3), '…', ...steps.slice(-9)] : steps).join(' → ');
       const period = `Visite du ${stamp(startedAt)} — ${stamp(lastAt)}`;
       const more = offers.size > 5 ? `${offers.size - 5} autre(s) annonce(s) consultée(s).` : '';
+      const action = visitAction(lastChoice);
       notes.push({sessionId, startedAt, lastAt, triggerAt: new Date(triggers[triggers.length - 1].at).toISOString(), title,
-        text: [title, period, ...offerLines.map(o => `${o.label} · ${o.url}`), more, journey].filter(Boolean).join('\n'),
+        text: [title, period, ...offerLines.map(o => `${o.label} · lien : ${o.url}`), more, journey, action].filter(Boolean).join('\n'),
         html: `<p><strong>${escape(title)}</strong></p><p>${escape(period)}</p>`
-          + (offerLines.length ? `<ul>${offerLines.map(o => `<li><a href="${escape(o.url)}">${escape(o.label)}</a></li>`).join('')}</ul>` : '')
-          + (more ? `<p>${escape(more)}</p>` : '') + `<p>${escape(journey)}</p>`,
+          + (offerLines.length ? `<ul>${offerLines.map(o => `<li>${escape(o.label)} · <a href="${escape(o.url)}">lien</a></li>`).join('')}</ul>` : '')
+          + (more ? `<p>${escape(more)}</p>` : '') + `<p>${escape(journey)}</p><p>${escape(action)}</p>`,
       });
     }
   }

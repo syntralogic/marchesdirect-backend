@@ -9,6 +9,7 @@ export const JOURNEY_PROJECTION_DDL=[
    started_at TIMESTAMPTZ NOT NULL,last_event_at TIMESTAMPTZ NOT NULL,hubspot_note_id TEXT UNIQUE,
    status TEXT NOT NULL DEFAULT 'pending',body_hash TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
  `CREATE INDEX IF NOT EXISTS journey_visit_notes_session ON journey_visit_notes(company_id,session_id,started_at)`,
+ `ALTER TABLE journey_visit_notes ENABLE ROW LEVEL SECURITY`,
  `INSERT INTO crm_setup_log(key,status) VALUES('visit_notes_policy','ready') ON CONFLICT(key) DO NOTHING`,
 ];
 export async function hubspotRequest(cfg:any):Promise<any>{

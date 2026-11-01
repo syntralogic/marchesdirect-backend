@@ -10,6 +10,7 @@ const path=require('node:path');
  require.cache[databaseFile]={id:databaseFile,filename:databaseFile,loaded:true,exports:{db}};
  const schema=require('../dist/src/services/hubspotJourneySchema');
  for(let i=0;i<2;i++)for(const sql of schema.JOURNEY_PROJECTION_DDL)await pg.exec(sql);
+ assert.equal((await pg.query("SELECT relrowsecurity FROM pg_class WHERE oid='journey_visit_notes'::regclass")).rows[0].relrowsecurity,true);
  await pg.exec("UPDATE crm_setup_log SET updated_at='2026-01-01T00:00:00Z' WHERE key='visit_notes_policy'");
  const calls=[];
  schema.hubspotRequest=async cfg=>{

@@ -1,13 +1,13 @@
 # Notes de visite HubSpot lisibles sur mobile
 
-Correctif préparé le 1er novembre 2026. Déploiement soumis à l'accord d'Hedi après présentation du texte exact.
+Correctif préparé le 1er novembre 2026. Aperçu corrigé présenté ; déploiement autorisé par Hedi après conformité aux quatre corrections.
 
 ## Comportement
 
 - Une visite est une suite d'événements du même navigateur, attribués à la même entreprise, sans interruption de 30 minutes. Le navigateur conserve son identifiant plusieurs jours ; il ne définit donc pas à lui seul une visite.
 - Pas de note à la saisie du SIRET ni à l'analyse seule. La première saisie des coordonnées ou le premier choix (rappel, dossier, rendez-vous, simple renseignement) ouvre la note.
 - La suite de cette visite met à jour le même identifiant HubSpot. Le titre utilise le choix le plus récent, le dernier score de cette visite et sa source/campagne, lorsqu'ils sont connus.
-- Maximum cinq annonces distinctes de cette visite : titre abrégé, département disponible, échéance J-x et lien direct. Une ligne de parcours synthétise les étapes. Aucun appel IA.
+- Maximum cinq annonces distinctes de cette visite : titre de six mots maximum, sans ellipse, département disponible, échéance J-x et lien direct. L'annonce analysée est placée en tête avec son score. Le mot « lien » termine chaque ligne. Une ligne de parcours synthétise les étapes ; « À faire » indique l'action et la préférence de rappel réellement enregistrée (ou « non précisée »), ou la date de rendez-vous en heure de Paris. Aucun appel IA.
 - Le résumé de l'entreprise conserve toutes les visites et reste recopié sur les transactions existantes. Les lignes de consultation ou de score sans titre d'annonce sont masquées dans ce résumé ; les événements et scores sources sont conservés.
 - Les entreprises de test connues et celles dont `md_is_test=true` dans HubSpot ne génèrent plus de notes ni de transactions. Une erreur de lecture du drapeau bloque la création jusqu'à une nouvelle tentative. Les propriétés de l'entreprise continuent à être actualisées.
 - Les notes existantes restent intactes. Les visites antérieures à l'activation et celles possédant déjà une ancienne note ne sont pas converties automatiquement.
@@ -24,26 +24,28 @@ Si une création a un résultat réseau ambigu, la ligne passe à `needs_review`
 
 Exemple produit à partir de la visite de recette ZIENT LABS du 01/11 à 17h36 (heure de Paris). Cette entreprise étant un test, le service ne publiera pas cette note.
 
-**Rappel demandé · score 25 % · source SMS recette electriciens 33**
+**Rappel demandé · score 25 % · source SMS électriciens 33**
 
 Visite du 01/11 17h36 — 01/11 17h37
 
-- [Restauration – conservation sur les œuvres d’art du Musée Jacquemart André (75) · J-39](https://marchesdirect.fr/opportunites/a6a96709-e019-4fc2-94db-d63440a923bf)
-- [Sensibilisation au risque inondation par la mise en place de repères de… (09) · J-33](https://marchesdirect.fr/opportunites/1124659a-76d0-4241-bcb7-73e1dfd26dfb)
-- [Fourniture de produits chimiques divers de laboratoire pour le Laboratoire… (75) · J-32](https://marchesdirect.fr/opportunites/30e1016b-5ad0-49d7-944a-45b440557cc6)
-- [Extension De La Déchetterie De Thones Et Construction D'Un Bâtiment (74) · J-32](https://marchesdirect.fr/opportunites/110aeea5-6d32-467d-bd23-40b12e21e1ab)
-- [Réhabilitation des réseaux d'assainissement et du système d'épuration de la… (23) · J-30](https://marchesdirect.fr/opportunites/e425b0cf-adee-46a2-aea9-709a21e9dfcc)
+- Analysée 25 % — Musée Jacquemart-André (75) · J-39 · [lien](https://marchesdirect.fr/opportunites/a6a96709-e019-4fc2-94db-d63440a923bf)
+- Sensibilisation au risque inondation (09) · J-33 · [lien](https://marchesdirect.fr/opportunites/1124659a-76d0-4241-bcb7-73e1dfd26dfb)
+- Fourniture de produits chimiques divers (75) · J-32 · [lien](https://marchesdirect.fr/opportunites/30e1016b-5ad0-49d7-944a-45b440557cc6)
+- Extension De La Déchetterie De Thones (74) · J-32 · [lien](https://marchesdirect.fr/opportunites/110aeea5-6d32-467d-bd23-40b12e21e1ab)
+- Réhabilitation des réseaux d'assainissement (23) · J-30 · [lien](https://marchesdirect.fr/opportunites/e425b0cf-adee-46a2-aea9-709a21e9dfcc)
 
 SIRET saisi → analyse 25 % → retour arrière → 2 annonces → coordonnées → rappel
 
+À faire : rappeler · préférence : non précisée
+
 ## Validation
 
-- Suite serveur complète : 491 tests réussis, 47 ignorés (54 suites réussies, 6 ignorées).
+- Suite serveur complète : 496 tests réussis, 47 ignorés (55 suites réussies, 6 ignorées).
 - Compilation TypeScript réussie.
-- Après la dernière correction du filtre du résumé : 9 tests de projection réussis. Après correction de la requête SQL : 9 tests du service de notes réussis.
+- Quatre suites ciblées : 30 tests réussis (liens explicites, six mots maximum, annonce analysée en tête, choix et créneau exact, isolation par visite, doublons et exclusions test).
 - `node tests/visit-notes-postgres.cjs` après compilation : migration répétée, création/mise à jour/relance, séparation à 30 minutes et préservation des anciennes notes vérifiées dans PostgreSQL jetable. Aucun appel réel à HubSpot.
 
-## Nettoyage proposé, non exécuté
+## Nettoyage reporté
 
 Neuf notes automatiques de test ont été identifiées sur ZIENT LABS (entreprise 460484274425, portail 149642063), trois par visite :
 
@@ -51,7 +53,7 @@ Neuf notes automatiques de test ont été identifiées sur ZIENT LABS (entrepris
 - 20h38–20h39 : 536980513999, 536980238564, 536924560584.
 - 20h43 : 536980172990, 536859558105, 536979955950.
 
-Proposition : sauvegarder puis archiver uniquement ces neuf notes après accord distinct d'Hedi. Aucun nettoyage de notes manuelles ou de transactions. Le résumé et les données sources restent conservés.
+Sauvegarde des neuf notes effectuée. Archivage reporté à la demande d'Hedi ; aucune note archivée. Aucun nettoyage de notes manuelles ou de transactions. Le résumé et les données sources restent conservés.
 
 ## Mise en service
 

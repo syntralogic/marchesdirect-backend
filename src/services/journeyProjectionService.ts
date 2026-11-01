@@ -42,8 +42,10 @@ export async function syncJourneyProjection(companyId:string,siret:string):Promi
  if(!journeySchemaReady)return;
  const [ev,selected,score,bookings]=await Promise.all([
   db.query(`SELECT e.id,e.session_id,e.event_type,e.event_data,COALESCE(e.occurred_at,e.created_at) AS at,
-    COALESCE(e.opportunity_id,e.event_data->>'opportunityId') AS offer_id,o.title AS offer_title,o.location_department,o.location_country,o.raw_data,o.source_reference,o.deadline
+    COALESCE(e.opportunity_id,e.event_data->>'opportunityId') AS offer_id,o.title AS offer_title,o.location_department,o.location_country,o.raw_data,o.source_reference,o.deadline,
+    l.message AS request_message,l.appointment_slot_at AS request_slot_at
     FROM visitor_events e LEFT JOIN opportunities o ON o.id::text=COALESCE(e.opportunity_id,e.event_data->>'opportunityId')
+    LEFT JOIN crm_leads l ON l.id::text=split_part(e.event_id,':',2) AND l.session_id=e.session_id AND l.siret=$1
     WHERE COALESCE(e.attribution_siret,e.siret)=$1 ORDER BY COALESCE(e.occurred_at,e.created_at),e.created_at,e.id`,[siret]),
   db.query('SELECT company_data,selected_at FROM journey_company_selections WHERE siret=$1 ORDER BY selected_at',[siret]),
   db.query(`SELECT a.*,o.title,o.location_department,o.location_country,o.raw_data,o.source_reference,o.deadline FROM journey_scores a JOIN opportunities o ON o.id=a.opportunity_id
