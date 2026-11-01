@@ -1,6 +1,8 @@
+import { redactLogText } from '../utils/logPrivacy';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { sendEmail } from './emailService';
+import { dossierStatesFor } from './dossierStateService';
 
 // ============================================================================
 // MESSAGE DELIVERY LOG (client brief 31 Oct, part D)
@@ -21,6 +23,8 @@ export type DeliveryStatus = 'sent' | 'failed' | 'not_configured' | 'disabled';
 export type DeliveryKind = 'dossier' | 'appointment_confirmation' | 'follow_up' | 'alert';
 
 export type DeliveryContext = {
+  generationId?: string | null;
+  siret?: string | null;
   leadId?: string | null;
   sessionId?: string | null;
   opportunityId?: string | null;
@@ -29,16 +33,16 @@ export type DeliveryContext = {
 };
 
 const shortError = (err: unknown): string =>
-  String((err as any)?.message || err || 'unknown error').replace(/Bearer\s+\S+/gi, 'Bearer ***').slice(0, 500);
+  redactLogText(String((err as any)?.message || 'delivery_error')).slice(0, 500);
 
 export async function recordDelivery(
   kind: DeliveryKind, recipient: string, status: DeliveryStatus, ctx: DeliveryContext = {}, error?: string
 ): Promise<void> {
   try {
     await db.query(
-      `INSERT INTO message_deliveries (kind, channel, recipient, status, error, lead_id, session_id, opportunity_id, dedupe_key)
-       VALUES ($1, 'email', $2, $3, $4, $5, $6, $7, $8)`,
-      [kind, recipient, status, error || null, ctx.leadId || null, ctx.sessionId || null, ctx.opportunityId || null, ctx.dedupeKey || null]
+      `INSERT INTO message_deliveries (kind, channel, recipient, status, error, lead_id, session_id, opportunity_id, dedupe_key, generation_id)
+       VALUES ($1, 'email', $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [kind, recipient, status, error ? redactLogText(error).slice(0,500) : null, ctx.leadId || null, ctx.sessionId || null, ctx.opportunityId || null, ctx.dedupeKey || null, ctx.generationId || null]
     );
   } catch (err) {
     logger.error('Could not record message delivery (non-fatal):', err);
@@ -73,19 +77,7 @@ export async function deliverEmail(args: {
   return { status, sent: status === 'sent' };
 }
 
-// What HubSpot's md_dossier_status should say, from the real delivery record of the dossier e-mail.
-export async function dossierStatusFor(sessionId: string | null | undefined, opportunityId: string | null | undefined): Promise<'requested' | 'available' | 'error' | null> {
-  if (!sessionId || !opportunityId) return null;
-  try {
-    const r = await db.query(
-      `SELECT status FROM message_deliveries WHERE kind = 'dossier' AND session_id = $1 AND opportunity_id = $2
-       ORDER BY created_at DESC LIMIT 1`,
-      [sessionId, opportunityId]
-    );
-    const s: DeliveryStatus | undefined = r.rows[0]?.status;
-    if (!s) return null;
-    return s === 'sent' ? 'available' : 'error';
-  } catch {
-    return null;
-  }
+// Compatibility wrapper; e-mail acceptance no longer defines PDF generation.
+export async function dossierStatusFor(sessionId: string | null | undefined, opportunityId: string | null | undefined) {
+  return (await dossierStatesFor({ sessionId, opportunityId })).dossierStatus;
 }

@@ -1,3 +1,4 @@
+import { JOURNEY_IDENTITY_DDL } from '../services/journeyIdentitySchema';
 import { Pool, QueryResult, PoolClient } from 'pg';
 import dotenv from 'dotenv';
 import path from 'path';
@@ -1033,6 +1034,16 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   await step(`CREATE INDEX IF NOT EXISTS message_deliveries_lead ON message_deliveries(lead_id)`);
   await step(`CREATE INDEX IF NOT EXISTS message_deliveries_dossier ON message_deliveries(kind, session_id, opportunity_id)`);
   await step(`CREATE INDEX IF NOT EXISTS message_deliveries_dedupe ON message_deliveries(dedupe_key) WHERE dedupe_key IS NOT NULL`);
+  // Prerequisite A: separate PDF generation from acceptance of its e-mail.
+  await step(`CREATE TABLE IF NOT EXISTS dossier_generations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    lead_id UUID REFERENCES crm_leads(id) ON DELETE SET NULL,
+    session_id VARCHAR(100), opportunity_id UUID, siret VARCHAR(14),
+    status VARCHAR(20) NOT NULL CHECK (status IN ('generated','failed')),
+    error_code VARCHAR(80), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await step(`CREATE INDEX IF NOT EXISTS dossier_generations_scope ON dossier_generations(session_id, opportunity_id, siret, created_at DESC)`);
+  await step(`ALTER TABLE message_deliveries ADD COLUMN IF NOT EXISTS generation_id UUID REFERENCES dossier_generations(id)`);
   // Real result of an appointment, recorded by staff: scheduled | attended | no_show | reschedule | cancelled.
   await step(`ALTER TABLE appointment_bookings ADD COLUMN IF NOT EXISTS outcome VARCHAR(20)`);
   // Part D: real calendar, contact preferences, reminder sequence.
@@ -1129,6 +1140,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     )
   `);
   await step(`CREATE INDEX IF NOT EXISTS siret_lookups_session ON siret_lookups(session_id)`);
+  for (const ddl of JOURNEY_IDENTITY_DDL) await step(ddl);
 
   // Client's explicit priority (WhatsApp): integrate the public tender
   // databases as real content before finalizing UX, because testing against

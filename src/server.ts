@@ -178,7 +178,8 @@ app.use('/api/auth/password-reset/request', emailSendLimiter);
 app.use('/api/auth/magic-link', emailSendLimiter);
 
 // Logging
-app.use(morgan('combined', { stream: { write: msg => logger.info(msg.trim()) } }));
+morgan.token('safe-route', req => (req as any).route?.path || 'unmatched');
+app.use(morgan(':method :safe-route :status :response-time ms', { stream: { write: msg => logger.info(msg.trim()) } }));
 
 // Body parsing
 // IMPORTANT: the Stripe webhook route needs the raw, unparsed request body to

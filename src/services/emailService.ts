@@ -1,78 +1,43 @@
 import { logger } from '../utils/logger';
-
-// No email provider was configured anywhere in this codebase (confirmed:
-// grepped for RESEND/SENDGRID/POSTMARK/SMTP - nothing, and
-// requestPasswordReset's own comment already says "In production, send
-// email with reset link" and just logs). This is deliberately pluggable so
-// the magic-link flow works end-to-end today (logged, retrievable from
-// Render logs for testing) and switches to real delivery the moment
-// RESEND_API_KEY is set - no code change needed later, just the env var.
-//
-// Resend picked as the default target: simple REST API (no SDK needed, one
-// fetch call), generous free tier, sender domain verification is the only
-// setup step. Swap this file's sendEmail() body for a different provider
-// (SendGrid/Postmark/SMTP) if the client already has one of those instead.
-
-interface EmailAttachment {
-  filename: string;
-  // Raw file bytes - base64-encoded before being sent to Resend below.
-  content: Buffer;
-}
-
 interface EmailPayload {
-  to: string;
-  subject: string;
-  html: string;
-  attachments?: EmailAttachment[];
+  to: string; subject: string; html: string;
+  attachments?: { filename: string; content: Buffer }[];
 }
-
-// Passage concordance -> dossier, point 5 (27 Sep audit): "Un message
-// 'Dossier envoyé' affiché sur le site ne suffit pas à valider ce
-// fonctionnement." This was more than a testing gap - it was a real bug:
-// sendEmail used to return void, so a caller telling the frontend
-// "dossierEmailed: true" only meant "no exception was thrown", which is
-// also true of the no-API-key branch above that never actually calls
-// Resend. A visitor with a correctly-processed request could see "Votre
-// dossier vient d'être envoyé" while nothing was sent to their inbox,
-// silently, whenever RESEND_API_KEY isn't set in this environment.
-// Returning a real boolean - true only once Resend's API has accepted the
-// request - lets prefilledDossierService (and any future caller) report
-// delivery honestly instead of conflating "didn't throw" with "was sent".
-export const sendEmail = async ({ to, subject, html, attachments }: EmailPayload): Promise<boolean> => {
-  const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.EMAIL_FROM || 'Marchés Direct <onboarding@resend.dev>';
-
-  if (!apiKey) {
-    // Not configured - log the content so the link is still usable for
-    // testing (grep Render logs for "EMAIL (not sent" ) rather than the
-    // magic-link feature silently doing nothing.
-    const attachmentNote = attachments?.length ? ` [${attachments.length} attachment(s): ${attachments.map(a => a.filename).join(', ')}]` : '';
-    logger.warn(`EMAIL (not sent - no RESEND_API_KEY configured) to=${to} subject="${subject}"${attachmentNote}\n${html}`);
+export class EmailDeliveryError extends Error {
+  constructor(public readonly code: string, public readonly status?: number) {
+    super(code); this.name = 'EmailDeliveryError';
+  }
+}
+// true = accepted by Resend, not proof of delivery to the inbox.
+export async function sendEmail({ to, subject, html, attachments }: EmailPayload): Promise<boolean> {
+  const apiKey = process.env.RESEND_API_KEY?.trim();
+  const from = process.env.EMAIL_FROM?.trim();
+  if (!apiKey || !from) {
+    logger.warn('Email not sent: provider configuration missing', { code: !apiKey ? 'resend_key_missing' : 'email_from_missing' });
     return false;
   }
-
+  if (process.env.NODE_ENV === 'production' && /@resend\.dev\b/i.test(from)) {
+    logger.warn('Email not sent: verified sender required', { code: 'sender_not_verified' });
+    return false;
+  }
   try {
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from,
-        to,
-        subject,
-        html,
-        attachments: attachments?.map(a => ({ filename: a.filename, content: a.content.toString('base64') })),
-      }),
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to, subject, html,
+        attachments: attachments?.map(a => ({ filename: a.filename, content: a.content.toString('base64') })) }),
+      signal: AbortSignal.timeout(20_000),
     });
+    // Provider bodies may contain addresses or the rejected payload. Discard them.
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Resend API ${res.status}: ${body}`);
+      await res.body?.cancel();
+      throw new EmailDeliveryError(`resend_http_${res.status}`, res.status);
     }
+    await res.body?.cancel();
     return true;
   } catch (err) {
-    logger.error(`Failed to send email to ${to}:`, err);
-    throw err;
+    const failure = err instanceof EmailDeliveryError ? err : new EmailDeliveryError('resend_transport_error');
+    logger.error('Email delivery failed', { code: failure.code, httpStatus: failure.status });
+    throw failure;
   }
-};
+}

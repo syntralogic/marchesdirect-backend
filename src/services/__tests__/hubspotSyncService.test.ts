@@ -14,10 +14,10 @@ const journey: JourneySummary = {
   lastTrade: 'isolation', lastArea: 'Lyon', lastStep: 'view_opportunity',
   lastActivity: new Date('2026-10-30T10:00:00Z'), offerViews: 3, analyses: 1,
 };
-const lead = { id: 'l1', first_name: 'Ali', last_name: 'K', email: ' Ali@Example.fr ', phone: '0601020304', company_name: 'ACME', session_id: 's1' };
+const lead = { id: 'l1', first_name: 'Ali', last_name: 'K', email: ' Ali@Example.fr ', phone: '0601020304', company_name: 'ACME', session_id: 's1', created_at: '2026-10-30T10:05:00Z' };
 
 beforeEach(() => {
-  jest.clearAllMocks();
+  jest.resetAllMocks();
   q.mockResolvedValue({ rows: [] });
   req.mockResolvedValue({ data: {} });
   process.env.HUBSPOT_ACCESS_TOKEN = 'secret-token';

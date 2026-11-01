@@ -4,7 +4,7 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { computeMatchScore } from './matchScoreService';
 import { RULES_VERSION } from './matchEngine';
-import { dossierStatusFor } from './deliveryLogService';
+import { dossierStatesFor, DossierEmailStatus } from './dossierStateService';
 
 // ============================================================================
 // HUBSPOT DEALS (client brief 31 Oct, part C)
@@ -48,6 +48,7 @@ export const APPOINTMENT_OUTCOMES = ['scheduled', 'attended', 'no_show', 'resche
 export type AppointmentOutcome = typeof APPOINTMENT_OUTCOMES[number];
 
 export type DealLead = {
+  siret?: string | null;
   id: string;
   first_name?: string | null; last_name?: string | null; email?: string | null;
   company_name?: string | null;
@@ -168,14 +169,16 @@ async function gatherDealFacts(lead: DealLead) {
     [lead.id]
   );
   const booking = b.rows[0] || null;
-  const dossierStatus = await dossierStatusFor(lead.session_id, lead.opportunity_id);
-  return { market, answers, score, booking, dossierStatus };
+  const states = await dossierStatesFor({ sessionId: lead.session_id, opportunityId: lead.opportunity_id, siret: lead.siret });
+  return { market, answers, score, booking, ...states };
 }
 
 export function buildDealProperties(args: {
   lead: DealLead; type: RequestType; market: any; answers: Record<string, unknown> | null; score: number | null;
   booking: { status: string; outcome: string | null } | null; forCreate: boolean; contactLabel: string; now?: Date;
   dossierStatus?: 'requested' | 'available' | 'error' | null;
+  emailStatus?: DossierEmailStatus | null;
+  errorAt?: string; errorCode?: string;
 }): Record<string, unknown> {
   const { lead, type, market, answers, score, booking, forCreate } = args;
   const now = args.now || new Date();
@@ -198,9 +201,12 @@ export function buildDealProperties(args: {
     md_score_version: score !== null ? RULES_VERSION : null,
     md_score_date: score !== null ? now.toISOString().slice(0, 10) : null,
     ...(answers ? answerProperties(answers) : {}),
-    // From the real delivery record of the dossier e-mail (sent -> available, failed/not sent -> error);
-    // without any record, a brand-new dossier request is simply 'requested'.
+    // PDF generation and e-mail acceptance are independent facts.
     ...(args.dossierStatus ? { md_dossier_status: args.dossierStatus } : forCreate && type === 'dossier' ? { md_dossier_status: 'requested' } : {}),
+    ...(process.env.HUBSPOT_DELIVERY_STATUSES_ENABLED === 'true' && args.emailStatus ? { md_email_status: args.emailStatus } : {}),
+    ...(process.env.HUBSPOT_DELIVERY_STATUSES_ENABLED === 'true' && args.errorAt ? {
+      md_last_delivery_error_at: args.errorAt, md_delivery_error_code: args.errorCode,
+    } : {}),
     md_appointment_outcome: outcome,
   });
 }
@@ -226,7 +232,7 @@ export async function syncDealForLead(lead: DealLead, contactId: string, company
       dealId = found.results?.[0]?.id ? String(found.results[0].id) : null;
     }
 
-    const common = { lead, market: facts.market, answers: facts.answers, score: facts.score, booking: facts.booking, contactLabel, dossierStatus: facts.dossierStatus };
+    const common = { lead, market: facts.market, answers: facts.answers, score: facts.score, booking: facts.booking, contactLabel, dossierStatus: facts.dossierStatus, emailStatus: facts.emailStatus, errorAt: facts.errorAt, errorCode: facts.errorCode };
 
     if (!dealId) {
       const created = await hs<{ id: string }>({

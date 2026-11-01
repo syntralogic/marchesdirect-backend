@@ -1,3 +1,4 @@
+import { selectJourneyCompany } from '../services/journeyStorageService';
 import { recordJourneyEvent, refreshJourneyForSession } from '../services/journeyEventService';
 import { Router, Response } from 'express';
 import { body, validationResult } from 'express-validator';
@@ -694,8 +695,8 @@ async function handleLeadCapture(
     }
 
     await db.query(
-      `UPDATE siret_lookups SET phone = $1, email = $2, lead_captured_at = NOW() WHERE session_id = $3`,
-      [phone, email, sessionId]
+      `UPDATE siret_lookups SET phone = $1, email = $2, lead_captured_at = NOW() WHERE session_id = $3 AND siret=$4`,
+      [phone, email, sessionId,existing.rows[0].siret]
     );
 
     const companyName = existing.rows[0].company_data?.name || null;
@@ -732,7 +733,7 @@ async function handleLeadCapture(
             estimatedValue: o.estimated_value ? Number(o.estimated_value) : null,
             currency: o.currency,
             isClosed: isOpportunityClosed({ status: o.status, deadline: o.deadline }),
-          }, { sessionId, opportunityId });
+          }, { sessionId, opportunityId, siret: companySiret });
         }
       } catch (err) {
         // Non-fatal, same reasoning as the CRM linking block below.
@@ -755,23 +756,23 @@ async function handleLeadCapture(
             brandId = brandResult.rows[0]?.id;
           }
           const dup = await db.query(
-            `SELECT id FROM crm_leads WHERE opportunity_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
-            [opportunityId, email]
+            `SELECT id FROM crm_leads WHERE opportunity_id = $1 AND LOWER(email) = LOWER($2) AND siret=$3 LIMIT 1`,
+            [opportunityId, email, companySiret]
           );
           if (dup.rows.length === 0 && brandId) {
             const insertResult = await db.query(
               `INSERT INTO crm_leads
-                (brand_id, email, phone, company_name, lead_source, opportunity_id, session_id, crm_sync_status, lot_label)
-               VALUES ($1, $2, $3, $4, 'analysis_gate', $5, $6, 'pending', $7)
+                (brand_id, email, phone, company_name, lead_source, opportunity_id, session_id, crm_sync_status, lot_label, siret)
+               VALUES ($1, $2, $3, $4, 'analysis_gate', $5, $6, 'pending', $7, $8)
                RETURNING id`,
-              [brandId, email, phone, companyName, opportunityId, sessionId, lotLabel || null]
+              [brandId, email, phone, companyName, opportunityId, sessionId, lotLabel || null, companySiret]
             );
-            await recordJourneyEvent({ sessionId, opportunityId, eventType: 'dossier_requested', eventId: `dossier:${insertResult.rows[0].id}` });
+            await recordJourneyEvent({ sessionId, opportunityId, siret: companySiret, eventType: 'dossier_requested', eventId: `dossier:${insertResult.rows[0].id}` });
             syncLeadToCrm(insertResult.rows[0].id).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
             scheduleFollowUps(insertResult.rows[0].id).catch(() => {});
           } else if (dup.rows[0]) {
             await db.query("UPDATE crm_leads SET phone = $2, lot_label = COALESCE($3, lot_label), crm_sync_status = 'pending' WHERE id = $1", [dup.rows[0].id, phone, lotLabel || null]);
-            await recordJourneyEvent({ sessionId, opportunityId, eventType: 'dossier_requested', eventId: `dossier:${dup.rows[0].id}:${Date.now()}` });
+            await recordJourneyEvent({ sessionId, opportunityId, siret: companySiret, eventType: 'dossier_requested', eventId: `dossier:${dup.rows[0].id}:${Date.now()}` });
             void syncLeadToCrm(dup.rows[0].id);
           }
         }
@@ -889,10 +890,10 @@ router.post(
       if ('error' in result) {
         return res.status(409).json({ error: result.error, message: "Confirmez d'abord vos coordonnées pour recevoir ce document." });
       }
-      const sent = await sendPrefilledDossierEmail(result.email, result.input, { sessionId, opportunityId });
+      const sent = await sendPrefilledDossierEmail(result.email, result.input, { sessionId, opportunityId, siret: result.input.siret });
       res.json({ sent });
       // The delivery result changes the dossier status shown in the CRM deal: refresh that request's record.
-      db.query(`SELECT id FROM crm_leads WHERE opportunity_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`, [opportunityId, result.email])
+      db.query(`SELECT id FROM crm_leads WHERE opportunity_id = $1 AND LOWER(email) = LOWER($2) AND siret=$3 LIMIT 1`, [opportunityId, result.email, result.input.siret])
         .then((r) => { if (r.rows[0]) return syncLeadToCrm(r.rows[0].id); })
         .catch((err) => logger.error('Dossier resend CRM refresh error (non-fatal):', err));
     } catch (err) {
@@ -986,13 +987,7 @@ router.post(
       // treating the query as a name-search, so it works identically whether
       // or not PAPPERS_API_KEY/INSEE_API_KEY are set.
       if (query.trim() === DEMO_SIRET) {
-        await db.query(
-          `INSERT INTO siret_lookups (session_id, siret, company_data)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
-          [sessionId, DEMO_SIRET, JSON.stringify(DEMO_COMPANY)]
-        );
-        await recordJourneyEvent({ sessionId, siret: DEMO_SIRET, eventType: 'company_selected', eventId: `company:${DEMO_SIRET}:${Date.now()}` });
+        await selectJourneyCompany(sessionId, DEMO_SIRET, DEMO_COMPANY);
         void refreshJourneyForSession(sessionId);
         return res.json({ companyKnown: true, siret: DEMO_SIRET, company: DEMO_COMPANY });
       }
@@ -1048,14 +1043,7 @@ router.post(
         return res.status(502).json({ error: 'siret_lookup_failed', message: "La vérification du SIRET a échoué. Réessayez." });
       }
 
-      await db.query(
-        `INSERT INTO siret_lookups (session_id, siret, company_data)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
-        [sessionId, query, JSON.stringify(result.company)]
-      );
-
-      await recordJourneyEvent({ sessionId, siret: query, eventType: 'company_selected', eventId: `company:${query}:${Date.now()}` });
+      await selectJourneyCompany(sessionId, query, result.company);
       void refreshJourneyForSession(sessionId);
       res.json({ companyKnown: true, siret: query, company: result.company });
     } catch (err) {
@@ -1090,13 +1078,7 @@ router.post(
     // handler and hang the request instead of returning a clean error.
     try {
       if (siret === DEMO_SIRET) {
-        await db.query(
-          `INSERT INTO siret_lookups (session_id, siret, company_data)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
-          [sessionId, DEMO_SIRET, JSON.stringify(DEMO_COMPANY)]
-        );
-        await recordJourneyEvent({ sessionId, siret: DEMO_SIRET, eventType: 'company_selected', eventId: `company:${DEMO_SIRET}:${Date.now()}` });
+        await selectJourneyCompany(sessionId, DEMO_SIRET, DEMO_COMPANY);
         void refreshJourneyForSession(sessionId);
         return res.json({ companyKnown: true, siret: DEMO_SIRET, company: DEMO_COMPANY });
       }
@@ -1126,14 +1108,7 @@ router.post(
         return res.status(502).json({ error: 'siret_lookup_failed', message: "La vérification du SIRET a échoué. Réessayez." });
       }
 
-      await db.query(
-        `INSERT INTO siret_lookups (session_id, siret, company_data)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (session_id) DO UPDATE SET siret = $2, company_data = $3, created_at = NOW()`,
-        [sessionId, siret, JSON.stringify(result.company)]
-      );
-
-      await recordJourneyEvent({ sessionId, siret: siret, eventType: 'company_selected', eventId: `company:${siret}:${Date.now()}` });
+      await selectJourneyCompany(sessionId, siret, result.company);
       void refreshJourneyForSession(sessionId);
       res.json({ companyKnown: true, siret, company: result.company });
     } catch (err) {

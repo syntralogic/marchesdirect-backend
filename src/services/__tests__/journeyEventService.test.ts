@@ -1,8 +1,10 @@
+jest.mock('../journeyStorageService', () => ({ storeJourneyEvent: jest.fn() }));
 jest.mock('../../config/database', () => ({ db: { query: jest.fn() } }));
 jest.mock('../crmSyncService', () => ({ syncLeadToCrm: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../hubspotSyncService', () => ({ syncCompanyJourneyForSession: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../crmSystem', () => ({ activeCrmSystem: () => 'hubspot' }));
 jest.mock('../../utils/logger', () => ({ logger: { error: jest.fn() } }));
+import { storeJourneyEvent } from '../journeyStorageService';
 import { db } from '../../config/database';
 import { syncLeadToCrm } from '../crmSyncService';
 import { syncCompanyJourneyForSession } from '../hubspotSyncService';
@@ -14,13 +16,11 @@ afterEach(() => { jest.useRealTimers(); });
 it('stores server evidence with a stable conflict key, not fabricated phone or search facts', async () => {
   q.mockResolvedValue({ rows: [] });
   await recordJourneyEvent({ sessionId: 'session-123', eventType: 'analysis_completed', eventId: 'analysis-1', opportunityId: 'market-1' });
-  expect(q.mock.calls[0][0]).toContain('ON CONFLICT');
-  expect(q.mock.calls[0][1]).toEqual(['session-123', 'analysis_completed', 'analysis-1', null, 'market-1', null,
-    JSON.stringify({ source: 'server', opportunityId: 'market-1' })]);
+  expect(storeJourneyEvent).toHaveBeenCalledWith(expect.objectContaining({ sessionId:'session-123', eventType:'analysis_completed', eventId:'analysis-1', trackingVersion:1, eventData:{source:'server',opportunityId:'market-1'} }));
 });
 
 it('keeps capture non-fatal when the journal is unavailable', async () => {
-  q.mockRejectedValueOnce(new Error('database unavailable'));
+  (storeJourneyEvent as jest.Mock).mockRejectedValueOnce(new Error('database unavailable'));
   await expect(recordJourneyEvent({ sessionId: 'session-123', eventType: 'dossier_requested', eventId: 'lead-1' })).resolves.toBeUndefined();
 });
 
