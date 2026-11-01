@@ -4,6 +4,7 @@ import { body, validationResult } from 'express-validator';
 import { logger } from '../utils/logger';
 import { AuthRequest } from '../middleware/auth';
 import { getAdvisorAdvice } from '../services/advisorAdviceService';
+import { db } from '../config/database';
 import type { RefineAnswers } from '../services/matchEngine';
 
 const router = Router();
@@ -36,6 +37,10 @@ router.post('/advice', adviceLimiter, [
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ error: 'Requête invalide.' });
   try {
+    const sessionId=String(req.body.sessionId||'');
+    const bot=/bot|crawler|spider|headless|slurp/i.test(req.get('user-agent')||'');
+    const identified=await db.query('SELECT 1 FROM siret_lookups WHERE session_id=$1 AND siret ~ $2 LIMIT 1',[sessionId,'^[0-9]{14}$']);
+    if(bot||!identified.rows.length) return res.json({advice:null});
     const advice = await getAdvisorAdvice({
       kind: req.body.kind,
       opportunityId: req.body.opportunityId,

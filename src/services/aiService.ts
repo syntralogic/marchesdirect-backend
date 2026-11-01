@@ -1,3 +1,4 @@
+import { paidClaudeRequest } from './aiBudgetService';
 import axios from 'axios';
 import { findTradeByName, resolveTradeFromText, extractLotTradeSlugs, findTradesBySlugs } from './tradeResolver';
 import { db } from '../config/database';
@@ -199,12 +200,13 @@ const noteBillingErrorIfAny = (err: unknown): boolean => {
 const callClaudeAPI = async (
   messages: ClaudeMessage[],
   systemPrompt: string,
-  maxTokens: number = MAX_TOKENS
+  maxTokens: number = MAX_TOKENS,
+  functionName = 'legacy_text'
 ): Promise<string> => {
   assertAiAvailable();
   try {
     const payload: any = {
-      model: MODEL,
+      model: process.env.AI_HAIKU_VALIDATED === 'true' && ['summary','facts','advisor'].includes(functionName) ? 'claude-haiku-5-5' : MODEL,
       max_tokens: maxTokens,
       system: systemPrompt,
       messages: messages,
@@ -221,18 +223,9 @@ const callClaudeAPI = async (
       payload.temperature = TEMPERATURE;
     }
 
-    const response = await axios.post(
-      ANTHROPIC_API_URL,
-      payload,
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': API_KEY,
-          'anthropic-version': '2023-06-01',
-        },
-        timeout: 30000,
-      }
-    );
+    payload.cache_control = { type: 'ephemeral' };
+    if (payload.model === 'claude-haiku-5-5') delete payload.temperature;
+    const response = await paidClaudeRequest(payload, functionName);
 
     // Previously assumed content[0] was always the text block and returned
     // content[0].text unconditionally - if content[0] is any other block
@@ -310,14 +303,8 @@ const callClaudeAPIWithTool = async (
       payload.temperature = TEMPERATURE;
     }
 
-    const response = await axios.post(ANTHROPIC_API_URL, payload, {
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      timeout: 30000,
-    });
+    payload.cache_control = { type: 'ephemeral' };
+    const response = await paidClaudeRequest(payload, 'analysis_sections');
 
     const toolBlock = response.data.content?.find(
       (block: any) => block.type === 'tool_use' && block.name === toolName
@@ -421,7 +408,7 @@ ${documentsBlock}`;
     const response = await callClaudeAPI(
       [{ role: 'user', content: userMessage }],
       systemPrompt,
-      hasParsedDocs ? 2500 : 1500
+      hasParsedDocs ? 2500 : 1500, 'dce_analysis'
     );
 
     // Clean and parse response
@@ -709,7 +696,7 @@ Réponds UNIQUEMENT en JSON valide, sans markdown:
     const response = await callClaudeAPI(
       [{ role: 'user', content: `PLAN STANDARD:\n${JSON.stringify(BASE_MEMO_CHAPTERS)}\n\n${tenderContext}\n\n${companyContext}` }],
       systemPrompt,
-      2000
+      2000, 'memo_plan'
     );
     const parsed = JSON.parse(cleanJsonResponse(response));
     const chapters: MemoChapter[] = (parsed.chapters || [])
@@ -764,7 +751,7 @@ ${tenderContext}
 
 ${companyContext}`;
 
-  return callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 2000);
+  return callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 2000, 'memo_chapter');
 }
 
 // Deterministic, no-AI text covering the same 6 sections from real profile data only.
@@ -1029,7 +1016,7 @@ ${parsedDocumentsText ? `\nREAL PARSED DCE DOCUMENTS (use these for requirements
   // without headroom risked truncating the JSON mid-object on notices with
   // a long key_risks/selection_criteria list, which would fail JSON.parse
   // below rather than just omitting a field.
-  const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 2200);
+  const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 2200, 'facts');
 
   // Clean and parse response
   const cleanedResponse = cleanJsonResponse(response);
@@ -1138,7 +1125,7 @@ Estimated Value: ${opp.estimated_value || 'Not specified'}`;
     const response = await callClaudeAPI(
       [{ role: 'user', content: userMessage }],
       systemPrompt,
-      1500
+      1500, 'classification'
     );
 
     // Clean and parse response
@@ -1424,7 +1411,7 @@ Location: ${opp.location_city}, ${opp.location_region}`;
     const summary = await callClaudeAPI(
       [{ role: 'user', content: userMessage }],
       systemPrompt,
-      220
+      220, 'summary'
     );
 
     await db.query(
@@ -1801,7 +1788,7 @@ ${journeyGuidance}${context}`;
       { role: 'user' as const, content: userMessage },
     ];
 
-    let response = await callClaudeAPI(messages, systemPrompt, 1000);
+    let response = await callClaudeAPI(messages, systemPrompt, 1000, 'chatbot');
 
     // Parse and strip the internal lead-capture tag, creating a real
     // crm_leads row (same table/sync path as every other lead source in the
@@ -1947,6 +1934,6 @@ export const generateSummariesForOpportunities = async (limit: number = 50) => {
 // Plain text out (no JSON): the caller validates length/content and falls back to
 // deterministic text on any error, so a failure here is never user-visible.
 export const generateAdvisorText = async (systemPrompt: string, userMessage: string): Promise<string> => {
-  const raw = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 300);
+  const raw = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 300, 'advisor');
   return raw.trim().replace(/^["«\s]+|["»\s]+$/g, '');
 };
