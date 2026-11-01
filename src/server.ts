@@ -349,6 +349,7 @@ app.use(errorHandler);
 // session-pool cap; chaining them keeps it to one extra pool at a time.
 let bootScriptChain: Promise<void> = Promise.resolve();
 const queueBootScript = (scriptPath: string, cb: (err: any, stdout: string, stderr: string) => void) => {
+  if(process.env.BOOT_MAINTENANCE_ENABLED!=='true'){logger.info('[Maintenance] Boot scripts paused; existing data preserved');return;}
   bootScriptChain = bootScriptChain.then(
     () =>
       new Promise<void>(resolve => {
@@ -609,6 +610,10 @@ const startServer = async () => {
         ['seoGeneration', 'startSEOGeneration', 'SEO generation'],
       ];
       startups.forEach(([mod, fn, label], i) => {
+        const heavyJobs=['searchIndexRefresh','locationRegionBackfillJob','geocodingBackfillJob','natureBackfillJob','legacyRepairJob','documentIngestion','dataCollection','seoGeneration'];
+        if(heavyJobs.includes(mod)&&process.env.BOOT_MAINTENANCE_ENABLED!=='true'){
+          logger.info(`[Jobs] Heavy maintenance paused: ${mod}`);return;
+        }
         // Paid enrichment is opt-in. Keep CRM retries, collection and the
         // visitor's rule-based scoring alive while unattended AI is paused.
         const aiEnrichmentJobs = ['factsBackfillJob', 'aiProcessing', 'analysisSectionsBackfillJob', 'staleSummaryBackfillJob'];
