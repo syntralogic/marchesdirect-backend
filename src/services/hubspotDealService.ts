@@ -1,3 +1,4 @@
+import {isTestCompany} from './companyProfileService';
 import { journeyLinkProperties } from './journeyLinkService';
 import axios, { AxiosRequestConfig } from 'axios';
 import { db } from '../config/database';
@@ -197,6 +198,7 @@ export function buildDealProperties(args: {
     ...journeyLinkProperties(lead.id),
     // pipeline/stage/name are written by the caller on creation only (see syncDealForLead)
     ...(forCreate ? { dealname: `${args.contactLabel} - ${title || 'Demande commerciale'}`.slice(0, 250) } : {}),
+    ...(isTestCompany(lead.siret||'',lead.company_name)?{md_is_test:'true'}:{}),
     md_request_id: lead.id,
     md_request_type: type,
     md_request_date: iso(lead.created_at),

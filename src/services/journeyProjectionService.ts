@@ -1,8 +1,8 @@
 import { db } from '../config/database';
-import { buildCompanyProfile,buildCompanyScore } from './companyProfileService';
+import { buildCompanyProfile,buildCompanyScore,isTestCompany } from './companyProfileService';
 import { hubspotRequest,journeySchemaReady } from './hubspotJourneySchema';
 export const STEP_LABELS:Record<string,string>={arrival:'Arrivée',search:'Recherche',offer_view:'Annonce consultée',view_opportunity:'Annonce consultée',company_selected:'SIRET saisi',company_identified:'Entreprise identifiée',analysis_started:'Analyse commencée',analysis_completed:'Analyse réalisée',retour_arriere:'Retour arrière',coordonnees_saisies:'Coordonnées laissées',contact_details:'Coordonnées laissées',demande_info:'Simple renseignement demandé',dossier_preview:'Aperçu du dossier',dossier_requested:'Dossier demandé',callback_requested:'Rappel demandé',appointment_booked:'Rendez-vous réservé'};
-export const isTestCompany=(siret:string,name?:string|null)=>['10945324100019','92939307200012'].includes(siret)||['ZIENTLABS','VERIFRANCEHABITAT','4060INVEST'].includes(String(name||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/[^A-Z0-9]/g,''));
+export {isTestCompany} from './companyProfileService';
 const stamp=(d:any)=>new Date(d).toLocaleString('fr-FR',{timeZone:'Europe/Paris',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}).replace(',','').replace(':','h');
 const clean=(v:any,max=250)=>typeof v==='string'?v.trim().slice(0,max):'';
 const escape=(s:string)=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
