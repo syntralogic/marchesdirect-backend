@@ -1,3 +1,5 @@
+import { offerDepartment } from './journeyOfferDepartment';
+
 // Keep links and public references aligned with the existing opportunity page.
 export function offerUrl(id: unknown): string | undefined {
   return typeof id === 'string' && id.trim()
@@ -13,7 +15,7 @@ const parisDate = (date: Date) => new Intl.DateTimeFormat('en-CA', {
 export function describeOffer(offer: any, now: Date): string {
   const id = offer.offer_id || offer.opportunity_id;
   const title = text(offer.offer_title || offer.title) || 'Annonce';
-  const department = text(offer.location_department);
+  const department = offerDepartment(offer);
   const reference = text(offer.source_reference);
   const publicReference = reference && !/^(editorial-|demo-)/i.test(reference)
     ? reference : id ? `MD-${String(id).replace(/[^a-zA-Z0-9]/g, '').slice(0, 8).toUpperCase()}` : '';
@@ -27,7 +29,7 @@ export function describeOffer(offer: any, now: Date): string {
     }
   }
   return [
-    `${title} (${department || 'département non renseigné'})`,
+    `${title}${department ? ` (${department})` : ''}`,
     publicReference ? `réf. ${publicReference}` : 'Référence non renseignée',
     deadline, offerUrl(id),
   ].filter(Boolean).join(' · ');
