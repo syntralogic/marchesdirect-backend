@@ -10,6 +10,12 @@ export class EmailDeliveryError extends Error {
 }
 // true = accepted by Resend, not proof of delivery to the inbox.
 export async function sendEmail({ to, subject, html, attachments }: EmailPayload): Promise<boolean> {
+  // Outbound email stays paused until the owner explicitly enables delivery
+  // after domain verification. Existing credentials alone cannot send mail.
+  if (process.env.EMAIL_DELIVERY_ENABLED !== 'true') {
+    logger.warn('Email not sent: delivery paused', { code: 'email_delivery_paused' });
+    return false;
+  }
   const apiKey = process.env.RESEND_API_KEY?.trim();
   const from = process.env.EMAIL_FROM?.trim();
   if (!apiKey || !from) {

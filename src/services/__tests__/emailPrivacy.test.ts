@@ -3,7 +3,13 @@ import { logger } from '../../utils/logger';
 import { sendEmail } from '../emailService';
 import { sanitizeLogValue,redactLogText } from '../../utils/logPrivacy';
 const payload={to:'private@example.com',subject:'SECRET-SUBJECT',html:'<p>SECRET-BODY <a href="https://site/login?token=SECRET-MAGIC">Sign in</a></p>'};
-beforeEach(()=>{jest.clearAllMocks();delete process.env.RESEND_API_KEY;delete process.env.EMAIL_FROM;global.fetch=jest.fn();});
+beforeEach(()=>{jest.clearAllMocks();delete process.env.RESEND_API_KEY;delete process.env.EMAIL_FROM;delete process.env.EMAIL_DELIVERY_ENABLED;global.fetch=jest.fn();});
+afterEach(()=>{delete process.env.EMAIL_DELIVERY_ENABLED;});
+it('keeps delivery paused even when provider credentials exist',async()=>{
+  process.env.RESEND_API_KEY='test-only';process.env.EMAIL_FROM='Dossiers <dossiers@example.com>';
+  expect(await sendEmail(payload)).toBe(false);
+  expect(fetch).not.toHaveBeenCalled();
+});
 it('missing provider never prints or sends the message',async()=>{
   expect(await sendEmail(payload)).toBe(false);
   expect(fetch).not.toHaveBeenCalled();
@@ -11,6 +17,7 @@ it('missing provider never prints or sends the message',async()=>{
   expect(logs).not.toMatch(/private@|SECRET/);
 });
 it('provider failure never includes its body in errors or logs',async()=>{
+  process.env.EMAIL_DELIVERY_ENABLED='true';
   process.env.RESEND_API_KEY='test-only';process.env.EMAIL_FROM='Dossiers <dossiers@example.com>';
   const json=jest.fn().mockResolvedValue(payload);
   (fetch as jest.Mock).mockResolvedValue({ok:false,status:422,json,body:{cancel:jest.fn()}});
