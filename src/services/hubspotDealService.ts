@@ -97,20 +97,14 @@ export function answerProperties(answers: Record<string, unknown> | null | undef
 // Target stage for the CURRENT facts of the request, or null when the request alone justifies no stage change.
 export function targetStage(type: RequestType, bookingConfirmed: boolean, outcome: AppointmentOutcome | null): string {
   if (type === 'appointment' && bookingConfirmed) return outcome === 'attended' ? STAGES.held : STAGES.confirmed;
-  if(type==='dossier'){
-    const stage=process.env.HUBSPOT_DOSSIER_STAGE_ID;
-    if(!stage)throw new Error('hubspot_dossier_stage_not_ready');
-    return stage;
-  }
   return STAGES.callback;
 }
 
 // Forward-only: never regress, never override the team's own moves, never leave "Sans suite".
 export function shouldWriteStage(current: string | null | undefined, target: string): boolean {
   if (!current) return true;
-  const ranks={...STAGE_RANK,...(process.env.HUBSPOT_DOSSIER_STAGE_ID?{[process.env.HUBSPOT_DOSSIER_STAGE_ID]:-1}:{}),...(process.env.HUBSPOT_CALLED_STAGE_ID?{[process.env.HUBSPOT_CALLED_STAGE_ID]:1}:{})};
-  if (!(current in ranks) || !(target in ranks)) return false;
-  return ranks[target] > ranks[current];
+  if (!(current in STAGE_RANK) || !(target in STAGE_RANK)) return false;
+  return STAGE_RANK[target] > STAGE_RANK[current];
 }
 
 const compact = (o: Record<string, unknown>): Record<string, unknown> => {
@@ -154,19 +148,19 @@ async function gatherDealFacts(lead: DealLead) {
   // The analysis the visitor really ran on this market (answers + the index computed from them).
   let answers: Record<string, unknown> | null = null;
   let score: number | null = null;
-  let scoreDate:string|null=null;
   if (lead.opportunity_id && lead.session_id) {
     const s = await db.query(
-      `SELECT answers, lot_id, compatibility_score,score_computed_at FROM analysis_snapshots WHERE session_id = $1 AND opportunity_id = $2 AND ($3::text IS NULL OR siret=$3) ORDER BY updated_at DESC LIMIT 1`,
-      [lead.session_id, lead.opportunity_id,lead.siret||null]
+      `SELECT answers, lot_id FROM analysis_snapshots WHERE session_id = $1 AND opportunity_id = $2 ORDER BY updated_at DESC LIMIT 1`,
+      [lead.session_id, lead.opportunity_id]
     );
     if (s.rows[0]) {
       answers = s.rows[0].answers;
-      if(typeof s.rows[0].compatibility_score==='number'&&s.rows[0].score_computed_at){
-        score=s.rows[0].compatibility_score;scoreDate=new Date(s.rows[0].score_computed_at).toISOString();
+      try {
+        const m = await computeMatchScore(lead.opportunity_id, null, { sessionId: lead.session_id, answers: s.rows[0].answers, lot: s.rows[0].lot_id || null });
+        score = typeof m.score === 'number' ? m.score : null; // null = not really computable: nothing is invented
+      } catch (err) {
+        logger.warn(`[HubSpot] score not computed for lead ${lead.id}: ${(err as Error).message}`);
       }
-      // A CRM retry never recalculates or changes the original score timestamp.
-
     }
   }
 
@@ -176,13 +170,12 @@ async function gatherDealFacts(lead: DealLead) {
   );
   const booking = b.rows[0] || null;
   const states = await dossierStatesFor({ sessionId: lead.session_id, opportunityId: lead.opportunity_id, siret: lead.siret });
-  return { market, answers, score, scoreDate, booking, ...states };
+  return { market, answers, score, booking, ...states };
 }
 
 export function buildDealProperties(args: {
   lead: DealLead; type: RequestType; market: any; answers: Record<string, unknown> | null; score: number | null;
   booking: { status: string; outcome: string | null } | null; forCreate: boolean; contactLabel: string; now?: Date;
-  scoreDate?:string|null;
   dossierStatus?: 'requested' | 'available' | 'error' | null;
   emailStatus?: DossierEmailStatus | null;
   errorAt?: string; errorCode?: string;
@@ -206,7 +199,7 @@ export function buildDealProperties(args: {
     md_market_url: market?.official_url || null,
     md_compatibility_score: score,
     md_score_version: score !== null ? RULES_VERSION : null,
-    md_score_date: score !== null ? (args.scoreDate || now.toISOString()) : null,
+    md_score_date: score !== null ? now.toISOString().slice(0, 10) : null,
     ...(answers ? answerProperties(answers) : {}),
     // PDF generation and e-mail acceptance are independent facts.
     ...(args.dossierStatus ? { md_dossier_status: args.dossierStatus } : forCreate && type === 'dossier' ? { md_dossier_status: 'requested' } : {}),
@@ -239,7 +232,7 @@ export async function syncDealForLead(lead: DealLead, contactId: string, company
       dealId = found.results?.[0]?.id ? String(found.results[0].id) : null;
     }
 
-    const common = { lead, market: facts.market, answers: facts.answers, score: facts.score, scoreDate:facts.scoreDate, booking: facts.booking, contactLabel, dossierStatus: facts.dossierStatus, emailStatus: facts.emailStatus, errorAt: facts.errorAt, errorCode: facts.errorCode };
+    const common = { lead, market: facts.market, answers: facts.answers, score: facts.score, booking: facts.booking, contactLabel, dossierStatus: facts.dossierStatus, emailStatus: facts.emailStatus, errorAt: facts.errorAt, errorCode: facts.errorCode };
 
     if (!dealId) {
       const created = await hs<{ id: string }>({

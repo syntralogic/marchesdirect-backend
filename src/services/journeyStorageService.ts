@@ -67,8 +67,7 @@ export async function selectJourneyCompany(sessionId: string, siret: string, com
       VALUES($1,$2,$3::jsonb) RETURNING id,selected_at`, [sessionId,siret,JSON.stringify(company)]);
     const at = selected.rows[0].selected_at;
     await client.query(`INSERT INTO siret_lookups(session_id,siret,company_data) VALUES($1,$2,$3::jsonb)
-      ON CONFLICT(session_id) DO UPDATE SET siret=EXCLUDED.siret,company_data=EXCLUDED.company_data,
-      created_at=(SELECT MIN(selected_at) AT TIME ZONE 'UTC' FROM journey_company_selections WHERE session_id=$1 AND siret=$2),
+      ON CONFLICT(session_id) DO UPDATE SET siret=EXCLUDED.siret,company_data=EXCLUDED.company_data,created_at=NOW(),
       email=CASE WHEN siret_lookups.siret=EXCLUDED.siret THEN siret_lookups.email ELSE NULL END,
       phone=CASE WHEN siret_lookups.siret=EXCLUDED.siret THEN siret_lookups.phone ELSE NULL END,
       lead_captured_at=CASE WHEN siret_lookups.siret=EXCLUDED.siret THEN siret_lookups.lead_captured_at ELSE NULL END`,

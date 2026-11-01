@@ -12,7 +12,6 @@ import { naturePrestationLateral, NATURE_VALUES } from '../utils/naturePrestatio
 import { buildSourceAnalysisSections } from '../utils/sourceAnalysisSections';
 import { tokenizeQuery, tsqueryAlternatives, isTradeWord, matchTermsOf, domainMismatchExclusionSqlPattern, lotMatchSqlPattern, canMatchInsideTitle } from '../utils/searchQuery';
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts, generateOpportunityAnalysisSections } from '../services/aiService';
-import { recordComputedScore } from '../services/journeyScoreService';
 import { ingestOpportunityDocuments } from '../services/documentIngestionService';
 import { computeMatchScore } from '../services/matchScoreService';
 import { recordJourneyEvent, refreshJourneyForSession } from '../services/journeyEventService';
@@ -1923,7 +1922,6 @@ router.post(
       }
 
       if (bookingId) await db.query(`UPDATE appointment_bookings SET lead_id = $1 WHERE id = $2`, [leadId, bookingId]);
-      if(sessionId)await recordJourneyEvent({sessionId,opportunityId:req.params.id,eventType:'coordonnees_saisies',eventId:`coordinates:${leadId}`});
       if (sessionId) await recordJourneyEvent({ sessionId, opportunityId: req.params.id,
         eventType: bookingId ? 'appointment_booked' : 'callback_requested',
         eventId: `access:${leadId}:${bookingId || Date.now()}` });
@@ -2050,7 +2048,6 @@ router.get('/:id/match-score', optionalAuth, async (req: AuthRequest, res: Respo
     });
     const journeySession = typeof req.query.sessionId === 'string' ? req.query.sessionId : '';
     if (journeySession.length >= 8 && journeySession.length <= 100) {
-      await recordComputedScore({sessionId:journeySession,opportunityId:req.params.id,score:result.score,answers:parseRefineAnswers(req.query.answers),lot:typeof req.query.lot==='string'?req.query.lot:null});
       await recordJourneyEvent({ sessionId: journeySession, opportunityId: req.params.id,
         eventType: 'analysis_completed', eventId: `match:${req.params.id}:${String(req.query.lot || '').slice(0, 30)}` });
       void refreshJourneyForSession(journeySession);

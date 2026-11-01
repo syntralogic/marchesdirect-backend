@@ -8,20 +8,6 @@ export type CockpitFacts = {
   booking?: { status: string; outcome: string | null; slot_at: Date | string } | null;
 };
 
-// Progress is historical. Urgency is the maximum over ALL known requests,
-// including an older unanswered callback even when a newer request is closed.
-export function buildCompanyCockpitForRequests(
-  base: Pick<CockpitFacts, 'events' | 'hasCoordinates'>,
-  requests: Omit<CockpitFacts, 'events' | 'hasCoordinates'>[], now = new Date()
-): Record<string,string> {
-  const candidates = (requests.length ? requests : [{}]).map(r => buildCompanyCockpit({ ...base, ...r }, now));
-  const urgency: Record<string,number> = { monitor:0, scheduled:1, high:2, urgent:3 };
-  const stages = ['company_selected','analysis_completed','contact_details','dossier_requested','callback_requested','appointment_booked'];
-  const priority = candidates.reduce((a,b) => urgency[b.md_followup_priority] > urgency[a.md_followup_priority] ? b : a);
-  const progress = candidates.reduce((a,b) => stages.indexOf(b.md_progress_stage) > stages.indexOf(a.md_progress_stage) ? b : a);
-  return { ...priority, md_progress_stage: progress.md_progress_stage };
-}
-
 // Progress is historical; urgency concerns the latest commercial request and
 // respects the team's disposition in HubSpot. Neither means an email was sent.
 export function buildCompanyCockpit(f: CockpitFacts, now = new Date()): Record<string, string> {
@@ -47,7 +33,7 @@ export function buildCompanyCockpit(f: CockpitFacts, now = new Date()): Record<s
       priority = 'scheduled';
       action = `Préparer le rendez-vous du ${new Date(b.slot_at).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })}.`;
     }
-  } else if (f.dealStage && f.dealStage !== STAGES.callback && f.dealStage !== process.env.HUBSPOT_DOSSIER_STAGE_ID) {
+  } else if (f.dealStage && f.dealStage !== STAGES.callback) {
     action = 'Demande déjà prise en charge ; consulter la prochaine étape commerciale.';
   } else if (f.requestType === 'callback') {
     priority = 'urgent'; action = 'Traiter la demande explicite de rappel et consigner le résultat.';
