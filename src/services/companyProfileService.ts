@@ -26,4 +26,4 @@ export function buildCompanyScore(score: any): Record<string, string | number> {
   };
 }
 
-export const isTestCompany=(siret:string,name?:string|null)=>['10945324100019','92939307200012'].includes(siret)||['ZIENTLABS','VERIFRANCEHABITAT','4060INVEST'].includes(String(name||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/[^A-Z0-9]/g,''));
+export const isTestCompany=(siret:string,name?:string|null)=>['10945324100019','92939307200012','71202415700018','39112811300019','12345678900012'].includes(siret)||['ZIENTLABS','VERIFRANCEHABITAT','4060INVEST'].includes(String(name||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/[^A-Z0-9]/g,''));

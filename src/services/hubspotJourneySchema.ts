@@ -13,6 +13,7 @@ export async function hubspotRequest(cfg:any):Promise<any>{
 const fields:any[]=[
  ['md_naf_code','Code NAF','string','text'],['md_trade','Métier','string','text'],['md_department','Département','string','text'],
  ['md_compatibility_score','Dernier indice de correspondance','number','number'],['md_score_date','Date et heure du calcul','datetime','date'],
+ ['md_last_analyzed_offer_url','Lien de la dernière annonce analysée','string','text'],
  ['md_score_version','Version du calcul','string','text'],['md_siret_entered_at','Première saisie du SIRET','datetime','date'],
  ['md_viewed_offers','Annonces consultées (titre et date)','string','textarea'],['md_origin_offer','Annonce d’origine','string','text'],
  ['md_distinct_offers_count','Nombre d’annonces distinctes','number','number'],['md_scores_by_offer','Scores par annonce','string','textarea'],

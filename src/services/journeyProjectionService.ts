@@ -1,4 +1,5 @@
 import { db } from '../config/database';
+import {describeOffer,distinctTimelineEvents,offerUrl} from './journeyOfferPresentation';
 import { buildCompanyProfile,buildCompanyScore,isTestCompany } from './companyProfileService';
 import { hubspotRequest,journeySchemaReady } from './hubspotJourneySchema';
 export const STEP_LABELS:Record<string,string>={arrival:'Arrivée',search:'Recherche',offer_view:'Annonce consultée',view_opportunity:'Annonce consultée',company_selected:'SIRET saisi',company_identified:'Entreprise identifiée',analysis_started:'Analyse commencée',analysis_completed:'Analyse réalisée',retour_arriere:'Retour arrière',coordonnees_saisies:'Coordonnées laissées',contact_details:'Coordonnées laissées',demande_info:'Simple renseignement demandé',dossier_preview:'Aperçu du dossier',dossier_requested:'Dossier demandé',callback_requested:'Rappel demandé',appointment_booked:'Rendez-vous réservé'};
@@ -7,27 +8,28 @@ const stamp=(d:any)=>new Date(d).toLocaleString('fr-FR',{timeZone:'Europe/Paris'
 const clean=(v:any,max=250)=>typeof v==='string'?v.trim().slice(0,max):'';
 const escape=(s:string)=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 export function projectJourney(events:any[],scores:any[],firstSelectedAt:any,now=new Date()) {
- const offers=new Map<string,{title:string;at:any}>();
- for(const e of events)if(['offer_view','view_opportunity'].includes(e.event_type)&&e.offer_id&&!offers.has(e.offer_id))offers.set(e.offer_id,{title:e.offer_title||'Annonce',at:e.at});
+ const offers=new Map<string,any>();
+ for(const e of events)if(['offer_view','view_opportunity'].includes(e.event_type)&&e.offer_id&&!offers.has(e.offer_id))offers.set(e.offer_id,e);
  const arrival=events.find(e=>e.event_data?.utm_source||e.event_data?.utm_campaign);
  const source=clean(arrival?.event_data?.utm_source),campaign=clean(arrival?.event_data?.utm_campaign);
  const choices:Record<string,string>={dossier_requested:'dossier',callback_requested:'callback',appointment_booked:'appointment',demande_info:'info'};
  const lastRequest=[...events].reverse().find(e=>choices[e.event_type]);
  const last=events[events.length-1];
  const abandoned=!!last&&now.getTime()-new Date(last.at).getTime()>=30*60*1000&&(!lastRequest||new Date(last.at).getTime()>new Date(lastRequest.at).getTime());
- const timeline=events.slice(-100).map(e=>{
-  const title=e.offer_title?` : ${clean(e.offer_title,110)}`:'';
+ const timeline=distinctTimelineEvents(events).slice(-100).map(e=>{
+  const title=` : ${describeOffer(e,now)}`;
   const attribution=e.event_type==='arrival'?(source?` via ${source}${campaign?' · '+campaign:''}`:' (source non renseignée)'):'';
-  return {at:e.at,text:`${stamp(e.at)} – ${STEP_LABELS[e.event_type]||'Étape enregistrée'}${['offer_view','view_opportunity'].includes(e.event_type)?title:''}${attribution}.`};
+  return {at:e.at,text:`${stamp(e.at)} – ${STEP_LABELS[e.event_type]||'Étape enregistrée'}${['offer_view','view_opportunity'].includes(e.event_type)?title:''}${attribution}`};
  });
- for(const s of scores.slice(-20))if(typeof s.compatibility_score==='number'&&s.score_computed_at)timeline.push({at:s.score_computed_at,text:`${stamp(s.score_computed_at)} – Score ${s.compatibility_score} % sur ${clean(s.title||'l’annonce',110)}.`});
+ for(const s of scores.slice(-20))if(typeof s.compatibility_score==='number'&&s.score_computed_at)timeline.push({at:s.score_computed_at,text:`${stamp(s.score_computed_at)} – Score ${s.compatibility_score} % sur ${describeOffer(s,now)}`});
  const lines=timeline.sort((a,b)=>new Date(a.at).getTime()-new Date(b.at).getTime()).map(x=>x.text);
  if(abandoned)lines.push(`Inactif depuis le ${stamp(last.at)} ; dernière étape : ${STEP_LABELS[last.event_type]||'étape enregistrée'}.`);
  const values:Record<string,any>={
-  md_viewed_offers:[...offers.values()].map(o=>`${stamp(o.at)} — ${o.title}`).join('\n').slice(0,60000),
-  md_origin_offer:[...offers.values()][0]?.title,
+  md_viewed_offers:[...offers.values()].map(o=>`${stamp(o.at)} — ${describeOffer(o,now)}`).join('\n').slice(0,60000),
+  md_origin_offer:offers.size?`${stamp([...offers.values()][0].at)} — ${describeOffer([...offers.values()][0],now)}`:undefined,
   md_distinct_offers_count:offers.size,
-  md_scores_by_offer:scores.filter(s=>s.score_computed_at&&typeof s.compatibility_score==='number').map(s=>`${stamp(s.score_computed_at)} — ${s.title||s.opportunity_id} : ${s.compatibility_score} %`).join('\n').slice(0,60000),
+  md_scores_by_offer:scores.filter(s=>s.score_computed_at&&typeof s.compatibility_score==='number').map(s=>`${stamp(s.score_computed_at)} — Score ${s.compatibility_score} % : ${describeOffer(s,now)}`).join('\n').slice(0,60000),
+  md_last_analyzed_offer_url:offerUrl([...scores].filter(s=>s.score_computed_at&&typeof s.compatibility_score==='number').sort((a,b)=>new Date(b.score_computed_at).getTime()-new Date(a.score_computed_at).getTime())[0]?.opportunity_id),
   md_siret_entered_at:firstSelectedAt?new Date(firstSelectedAt).toISOString():undefined,
   md_source:source||undefined,md_campaign:campaign||undefined,
   md_visitor_choice:lastRequest?choices[lastRequest.event_type]:'none',
@@ -40,18 +42,18 @@ export async function syncJourneyProjection(companyId:string,siret:string):Promi
  if(!journeySchemaReady)return;
  const [ev,selected,score,bookings]=await Promise.all([
   db.query(`SELECT e.id,e.event_type,e.event_data,COALESCE(e.occurred_at,e.created_at) AS at,
-    COALESCE(e.opportunity_id,e.event_data->>'opportunityId') AS offer_id,o.title AS offer_title
+    COALESCE(e.opportunity_id,e.event_data->>'opportunityId') AS offer_id,o.title AS offer_title,o.location_department,o.source_reference,o.deadline
     FROM visitor_events e LEFT JOIN opportunities o ON o.id::text=COALESCE(e.opportunity_id,e.event_data->>'opportunityId')
     WHERE COALESCE(e.attribution_siret,e.siret)=$1 ORDER BY COALESCE(e.occurred_at,e.created_at),e.created_at,e.id`,[siret]),
   db.query('SELECT company_data,selected_at FROM journey_company_selections WHERE siret=$1 ORDER BY selected_at',[siret]),
-  db.query(`SELECT a.*,o.title FROM journey_scores a JOIN opportunities o ON o.id=a.opportunity_id
+  db.query(`SELECT a.*,o.title,o.location_department,o.source_reference,o.deadline FROM journey_scores a JOIN opportunities o ON o.id=a.opportunity_id
     WHERE a.siret=$1 ORDER BY a.score_computed_at`,[siret]),
   db.query(`SELECT b.slot_at FROM appointment_bookings b JOIN crm_leads l ON l.id=b.lead_id WHERE l.siret=$1 AND b.status='booked'
     AND b.slot_at>=NOW() ORDER BY b.slot_at LIMIT 1`,[siret]),
  ]);
  const company=[...selected.rows].reverse().find(s=>s.company_data)?.company_data;
  const properties:Record<string,any>={...buildCompanyProfile(company,selected.rows[0]?.selected_at),...buildCompanyScore(score.rows[score.rows.length-1]),
-  ...projectJourney(ev.rows,score.rows,selected.rows[0]?.selected_at),md_is_test:isTestCompany(siret,company?.name)?'true':'false',
+  ...projectJourney(ev.rows,score.rows,selected.rows[0]?.selected_at),...(isTestCompany(siret,company?.name)?{md_is_test:'true'}:{}),
   ...(bookings.rows[0]?{md_appointment_date:new Date(bookings.rows[0].slot_at).toISOString()}:{})};
  await hubspotRequest({method:'PATCH',url:`/crm/v3/objects/companies/${companyId}`,data:{properties}});
  const deals=await db.query(`SELECT DISTINCT d.hubspot_deal_id FROM crm_deals d JOIN crm_leads l ON l.id=d.lead_id
