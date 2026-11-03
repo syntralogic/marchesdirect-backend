@@ -1,3 +1,4 @@
+import { cleanUtm } from '../utils/utm';
 import { Router, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import axios from 'axios';
@@ -760,10 +761,10 @@ async function handleLeadCapture(
           if (dup.rows.length === 0 && brandId) {
             const insertResult = await db.query(
               `INSERT INTO crm_leads
-                (brand_id, email, phone, company_name, lead_source, opportunity_id, session_id, crm_sync_status, lot_label)
-               VALUES ($1, $2, $3, $4, 'analysis_gate', $5, $6, 'pending', $7)
+                (brand_id, email, phone, company_name, lead_source, opportunity_id, session_id, crm_sync_status, lot_label, utm_source, utm_campaign)
+               VALUES ($1, $2, $3, $4, 'analysis_gate', $5, $6, 'pending', $7, $8, $9)
                RETURNING id`,
-              [brandId, email, phone, companyName, opportunityId, sessionId, lotLabel || null]
+              [brandId, email, phone, companyName, opportunityId, sessionId, lotLabel || null, cleanUtm(req.body?.utmSource, 100), cleanUtm(req.body?.utmCampaign, 150)]
             );
             syncLeadToCrm(insertResult.rows[0].id).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
             scheduleFollowUps(insertResult.rows[0].id).catch(() => {});

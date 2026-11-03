@@ -50,6 +50,8 @@ export type SyncLead = DealLead & {
   session_id: string | null;
   crm_system?: string | null;
   crm_contact_id?: string | null;
+  utm_source?: string | null;
+  utm_campaign?: string | null;
 };
 
 const clean = (v: unknown, max = 255): string | null => {
@@ -79,6 +81,9 @@ export function buildContactProperties(lead: SyncLead, j: JourneySummary): Recor
     md_last_site_activity: j.lastActivity ? j.lastActivity.toISOString() : null,
     md_offer_views_count: j.offerViews,
     md_analyses_count: j.analyses,
+    // Written only once Hedi has confirmed the two properties exist in HubSpot (an unknown property would reject the whole
+    // contact update): set HUBSPOT_UTM_PROPERTIES=1 then. Until then the values are kept on the lead, nothing is lost.
+    ...(process.env.HUBSPOT_UTM_PROPERTIES === '1' ? { md_source: clean(lead.utm_source, 100), md_campaign: clean(lead.utm_campaign, 150) } : {}),
   });
 }
 
