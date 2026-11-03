@@ -114,4 +114,26 @@ router.get('/consultations/:opportunityId', async (req: Request, res: Response) 
   }
 });
 
+// Fiche marché 3.9: "N dossiers préremplis demandés pour ce marché ces 7 derniers jours". REAL figure only: distinct
+// sessions with a dossier_requested event on this announcement over a rolling 7 days. Never invented; the page hides it below 2.
+router.get('/dossier-requests/:opportunityId', async (req: Request, res: Response) => {
+  try {
+    const { opportunityId } = req.params;
+    if (!isUuid(opportunityId)) return res.json({ count: 0 });
+    const count = await cachedStats(`dossier|${opportunityId}`, 60_000, async () => {
+      const r = await db.query(
+        `SELECT COUNT(DISTINCT session_id)::int AS n FROM visitor_events
+         WHERE event_type = 'dossier_requested' AND created_at >= NOW() - INTERVAL '7 days'
+           AND (opportunity_id = $1 OR event_data->>'opportunityId' = $1)`,
+        [opportunityId]
+      );
+      return r.rows[0]?.n || 0;
+    });
+    res.json({ count });
+  } catch (err: any) {
+    logger.error('Dossier requests count error:', err);
+    res.status(500).json({ error: 'Failed to fetch dossier requests count' });
+  }
+});
+
 export default router;
