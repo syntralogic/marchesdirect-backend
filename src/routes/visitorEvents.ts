@@ -12,6 +12,8 @@ const router = Router();
 export const HUBSPOT_EVENT_CODES = [
   'offer_view', 'company_selected', 'analysis_started', 'analysis_completed',
   'dossier_preview', 'dossier_requested', 'callback_requested', 'appointment_booked',
+  // v26 refonte (3 Nov): ranked list shown, alert request, the "30 minutes offertes" invitation
+  'ranked_list_shown', 'alert_requested', 'invitation_30min_shown', 'invitation_30min_closed', 'invitation_30min_clicked',
 ];
 const cachedStats = createBoundedCache(2000);
 
@@ -108,6 +110,27 @@ router.get('/consultations/:opportunityId', async (req: Request, res: Response) 
   } catch (err: any) {
     logger.error('Consultations count error:', err);
     res.status(500).json({ error: 'Failed to fetch consultations count' });
+  }
+});
+
+// Real counter behind "N dossiers préremplis demandés pour ce marché ces 7 derniers jours": distinct visitors who
+// requested the dossier of THIS market (event dossier_requested). The caller hides anything under 2.
+router.get('/dossier-requests/:opportunityId', async (req: Request, res: Response) => {
+  try {
+    const { opportunityId } = req.params;
+    if (!isUuid(opportunityId)) return res.json({ count: 0 });
+    const stats = await cachedStats(`dossiers|${opportunityId}`, 60_000, async () => {
+      const r = await db.query(
+        `SELECT COUNT(DISTINCT session_id)::int AS n FROM visitor_events
+         WHERE event_type = 'dossier_requested' AND opportunity_id = $1 AND created_at >= NOW() - INTERVAL '7 days'`,
+        [opportunityId]
+      );
+      return { n: r.rows[0]?.n || 0 } as any;
+    });
+    res.json({ count: (stats as any).n || 0 });
+  } catch (err: any) {
+    logger.error('Dossier requests count error:', err);
+    res.status(500).json({ error: 'Failed to fetch dossier requests count' });
   }
 });
 
