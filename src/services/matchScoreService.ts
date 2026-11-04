@@ -244,7 +244,7 @@ const toNumber = (v: any): number | null => (v == null || v === '' || Number.isN
 // client's own test path) uses what the SIRET lookup returned. Before this,
 // the SIRET-only visitor fell into a branch that never read the company at
 // all.
-async function loadCompanyProfile(companyId: string | null | undefined, sessionId?: string | null, siret?: string | null): Promise<CompanyProfile | null> {
+export async function loadCompanyProfile(companyId: string | null | undefined, sessionId?: string | null, siret?: string | null): Promise<CompanyProfile | null> {
   if (companyId) {
     const r = await db.query('SELECT * FROM companies WHERE id = $1 AND deleted_at IS NULL', [companyId]);
     const c = r.rows[0];

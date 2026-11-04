@@ -1,3 +1,4 @@
+import { cleanUtm } from '../utils/utm';
 import { selectJourneyCompany } from '../services/journeyStorageService';
 import { recordJourneyEvent, refreshJourneyForSession } from '../services/journeyEventService';
 import { Router, Response } from 'express';
@@ -12,6 +13,9 @@ import { sendPrefilledDossierEmail, generatePrefilledDossierPdf } from '../servi
 import { scheduleFollowUps } from '../services/followUpService';
 import { applyContactChoice, parseContactMode } from '../services/contactPreferenceService';
 import { AuthRequest } from '../middleware/auth';
+import { tradeSlugsForCompany } from '../services/matchEngine';
+import { notifyTeamOfNewLead } from '../services/leadNotificationService';
+import { dossierPdfFilename, isTestRequest } from '../utils/requestFacts';
 import {
   requestVerificationCode,
   confirmVerificationCode,
@@ -485,6 +489,89 @@ async function getCompanyWithProtection(
 // once identified on any fiche, a visitor is recognized everywhere without
 // re-entering their SIRET. This is what the frontend calls on load to
 // restore that state.
+// POST /api/siret/alert - refonte v26 (4.5): "Être prévenu des prochains marchés". Phone only, no e-mail, no account.
+// Stored in market_alerts (one active alert per SIRET + phone) and as a crm_leads row (lead_source 'alert_request') so the
+// existing contact/company sync, the team e-mail and the visit note all apply. No automatic message is ever sent: Elena
+// calls when a matching market appears. The HubSpot company gets md_alert_active (HUBSPOT_V26_PROPERTIES=1).
+router.post(
+  '/alert',
+  [
+    body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
+    body('phone').matches(/^0[1-9]\d{8}$/).withMessage('Le téléphone doit contenir 10 chiffres.'),
+  ],
+  async (req: AuthRequest, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
+    try {
+      const { sessionId, phone } = req.body as { sessionId: string; phone: string };
+      const look = await db.query('SELECT siret, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
+      if (look.rows.length === 0 || !/^\d{14}$/.test(look.rows[0].siret || '')) {
+        return res.status(409).json({ error: 'company_not_identified', message: "Identifiez d'abord votre entreprise." });
+      }
+      const siret: string = look.rows[0].siret;
+      const c = look.rows[0].company_data || {};
+      const postal = String(c.postal || '');
+      const dept = /^97|^98/.test(postal) ? postal.slice(0, 3) : /^20/.test(postal) ? (Number(postal) < 20200 ? '2A' : '2B') : /^\d{5}$/.test(postal) ? postal.slice(0, 2) : null;
+      const trade = tradeSlugsForCompany(c.ape, c.activity)[0] || null;
+      const test = isTestRequest(req.body?.isTest);
+      await db.query(
+        `INSERT INTO market_alerts (session_id, siret, phone, trade_slug, department, city, is_test)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (siret, phone) DO UPDATE SET active = TRUE, session_id = EXCLUDED.session_id, trade_slug = EXCLUDED.trade_slug,
+           department = EXCLUDED.department, city = EXCLUDED.city, updated_at = NOW()`,
+        [sessionId, siret, phone, trade, dept, c.city || null, test]
+      );
+      const zone = [c.city, dept ? `(${dept})` : null].filter(Boolean).join(' ');
+      const message = `Être prévenu des prochains marchés : ${[c.activity, zone && `${zone} et alentours`].filter(Boolean).join(' · ') || 'activité de l’entreprise'}.`;
+      // Same request twice in the same visit = the same lead.
+      let leadId: string | null = (await db.query(
+        `SELECT id FROM crm_leads WHERE session_id = $1 AND lead_source = 'alert_request' AND phone = $2 LIMIT 1`, [sessionId, phone])).rows[0]?.id || null;
+      if (!leadId) {
+        const brandId = (await db.query('SELECT id FROM brands ORDER BY created_at ASC LIMIT 1')).rows[0]?.id;
+        if (brandId) {
+          const ins = await db.query(
+            `INSERT INTO crm_leads (brand_id, first_name, phone, company_name, lead_source, message, session_id, utm_source, utm_campaign, is_test, crm_sync_status)
+             VALUES ($1, $2, $3, $4, 'alert_request', $5, $6, $7, $8, $9, 'pending') RETURNING id`,
+            [brandId, c.name || 'Alerte nouveaux marchés', phone, c.name || null, message, sessionId,
+             cleanUtm(req.body?.utmSource, 100), cleanUtm(req.body?.utmCampaign, 150), test]
+          );
+          leadId = ins.rows[0].id as string;
+          notifyTeamOfNewLead({ id: leadId, firstName: c.name || null, phone, companyName: c.name || null, leadSource: 'alert_request', message })
+            .catch((e) => logger.error('Alert notification error:', e));
+        }
+      }
+      res.status(201).json({ success: true, id: leadId, recordedAt: new Date().toISOString(), timezone: 'Europe/Paris' });
+      if (leadId) syncLeadToCrm(leadId).catch((e) => logger.error('Alert CRM sync error:', e));
+    } catch (err: any) {
+      logger.error('POST /siret/alert failed:', err);
+      res.status(500).json({ error: "L'enregistrement de votre alerte a échoué. Réessayez dans un instant." });
+    }
+  }
+);
+// GET /api/siret/profile?sessionId=... - accueil v26 (1.2): the métier is deduced from the recognised company (code APE +
+// activity wording), never asked. Returns the matching trades (same APE mapping the match engine uses), most specific first.
+// An unknown session or an APE with no mapping returns an empty list: the caller then searches by zone only.
+router.get('/profile', async (req: AuthRequest, res: Response) => {
+  try {
+    const sessionId = String(req.query.sessionId || '');
+    if (sessionId.length < 8) return res.json({ companyKnown: false, trades: [] });
+    const row = await db.query('SELECT siret, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
+    if (row.rows.length === 0) return res.json({ companyKnown: false, trades: [] });
+    const c = row.rows[0].company_data || {};
+    const slugs = tradeSlugsForCompany(c.ape, c.activity);
+    let trades: { slug: string; name: string }[] = [];
+    if (slugs.length > 0) {
+      const t = await db.query('SELECT slug, name FROM trades WHERE slug = ANY($1::text[])', [slugs]);
+      const bySlug = new Map(t.rows.map((r: any) => [r.slug, r.name]));
+      trades = slugs.filter((x) => bySlug.has(x)).map((x) => ({ slug: x, name: bySlug.get(x) as string }));
+    }
+    res.json({ companyKnown: true, siret: row.rows[0].siret, ape: c.ape || null, activity: c.activity || null, trades });
+  } catch (err: any) {
+    logger.error('SIRET profile error:', err);
+    res.status(500).json({ error: 'Failed to read company profile' });
+  }
+});
+
 router.get('/status', async (req: AuthRequest, res: Response) => {
   try {
     const sessionId = req.query.sessionId as string;
@@ -633,7 +720,8 @@ router.post(
     // (client's 15 Sep audit) - require a real French line: leading 0
     // then 1-9, never a second 0.
     body('phone').matches(/^0[1-9]\d{8}$/).withMessage('Le téléphone doit contenir 10 chiffres.'),
-    body('email').isEmail().withMessage("L'e-mail n'est pas valide.").normalizeEmail(),
+    // v26 "coordonnées" form: the e-mail is optional (only the phone is required). When given it is validated as before.
+    body('email').optional({ checkFalsy: true }).isEmail().withMessage("L'e-mail n'est pas valide.").normalizeEmail(),
     body('opportunityId').optional({ checkFalsy: true }).isUUID(),
   ],
   async (req: AuthRequest, res: Response) => {
@@ -673,7 +761,7 @@ router.post(
 async function handleLeadCapture(
   req: AuthRequest,
   res: Response,
-  { sessionId, phone, email, opportunityId, lotLabel }: { sessionId: string; phone: string; email: string; opportunityId?: string; lotLabel?: string | null }
+  { sessionId, phone, email, opportunityId, lotLabel }: { sessionId: string; phone: string; email?: string | null; opportunityId?: string; lotLabel?: string | null }
 ) {
 
     const existing = await db.query('SELECT id, siret, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
@@ -696,7 +784,7 @@ async function handleLeadCapture(
 
     await db.query(
       `UPDATE siret_lookups SET phone = $1, email = $2, lead_captured_at = NOW() WHERE session_id = $3 AND siret=$4`,
-      [phone, email, sessionId,existing.rows[0].siret]
+      [phone, email || null, sessionId, existing.rows[0].siret]
     );
 
     const companyName = existing.rows[0].company_data?.name || null;
@@ -720,7 +808,8 @@ async function handleLeadCapture(
            FROM opportunities WHERE id = $1 AND deleted_at IS NULL`,
           [opportunityId]
         );
-        if (oppFactsResult.rows.length > 0 && companyName) {
+        // Without an e-mail address nothing is sent: the visitor downloads the PDF on the confirmation screen instead.
+        if (oppFactsResult.rows.length > 0 && companyName && email) {
           const o = oppFactsResult.rows[0];
           dossierEmailed = await sendPrefilledDossierEmail(email, {
             companyName,
@@ -756,17 +845,17 @@ async function handleLeadCapture(
             const brandResult = await db.query('SELECT id FROM brands ORDER BY created_at ASC LIMIT 1');
             brandId = brandResult.rows[0]?.id;
           }
-          const dup = await db.query(
-            `SELECT id FROM crm_leads WHERE opportunity_id = $1 AND LOWER(email) = LOWER($2) AND siret=$3 LIMIT 1`,
-            [opportunityId, email, companySiret]
-          );
+          // A request is one lead per market + person: by e-mail (same company) when there is one, otherwise by this visitor's session.
+          const dup = email
+            ? await db.query(`SELECT id FROM crm_leads WHERE opportunity_id = $1 AND LOWER(email) = LOWER($2) AND siret=$3 LIMIT 1`, [opportunityId, email, companySiret])
+            : await db.query(`SELECT id FROM crm_leads WHERE opportunity_id = $1 AND session_id = $2 AND lead_source = 'analysis_gate' LIMIT 1`, [opportunityId, sessionId]);
           if (dup.rows.length === 0 && brandId) {
             const insertResult = await db.query(
               `INSERT INTO crm_leads
-                (brand_id, email, phone, company_name, lead_source, opportunity_id, session_id, crm_sync_status, lot_label, siret)
-               VALUES ($1, $2, $3, $4, 'analysis_gate', $5, $6, 'pending', $7, $8)
+                (brand_id, email, phone, company_name, lead_source, opportunity_id, session_id, crm_sync_status, lot_label, siret, utm_source, utm_campaign)
+               VALUES ($1, $2, $3, $4, 'analysis_gate', $5, $6, 'pending', $7, $8, $9, $10)
                RETURNING id`,
-              [brandId, email, phone, companyName, opportunityId, sessionId, lotLabel || null, companySiret]
+              [brandId, email || null, phone, companyName, opportunityId, sessionId, lotLabel || null, companySiret, cleanUtm(req.body?.utmSource, 100), cleanUtm(req.body?.utmCampaign, 150)]
             );
             await recordJourneyEvent({ sessionId, opportunityId, siret: companySiret, eventType: 'dossier_requested', eventId: `dossier:${insertResult.rows[0].id}` });
             syncLeadToCrm(insertResult.rows[0].id).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
@@ -805,7 +894,7 @@ async function loadPrefilledDossierInput(sessionId: string, opportunityId: strin
   }
   const { siret, company_data, email } = lookup.rows[0];
   const companyName = company_data?.name || null;
-  if (!companyName || !email) {
+  if (!companyName) {
     return { error: 'lead_not_captured' as const };
   }
 
@@ -860,7 +949,8 @@ router.get('/lead/dossier-pdf', async (req: AuthRequest, res: Response) => {
     }
     const pdf = await generatePrefilledDossierPdf(result.input);
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'attachment; filename="dossier-pre-rempli.pdf"');
+    // v26 (5.1): the file is named after the company ("dossier-<entreprise>.pdf").
+    res.setHeader('Content-Disposition', `attachment; filename="${dossierPdfFilename(result.input.companyName)}"`);
     res.send(pdf);
   } catch (err) {
     logger.error('Prefilled dossier PDF generation error:', err);
@@ -891,6 +981,8 @@ router.post(
       if ('error' in result) {
         return res.status(409).json({ error: result.error, message: "Confirmez d'abord vos coordonnées pour recevoir ce document." });
       }
+      // No e-mail was given (it is optional): there is nothing to send to, the PDF is downloaded instead.
+      if (!result.email) return res.json({ sent: false });
       const sent = await sendPrefilledDossierEmail(result.email, result.input, { sessionId, opportunityId, siret: result.input.siret });
       res.json({ sent });
       // The delivery result changes the dossier status shown in the CRM deal: refresh that request's record.

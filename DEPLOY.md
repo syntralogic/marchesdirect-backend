@@ -150,3 +150,17 @@ On the server (Render → Environment) add only:
 
 `CRM_SYSTEM` no longer needs to be set: with a token present and no explicit `CRM_SYSTEM`, HubSpot is used.
 Then open `GET /api/admin/hubspot/status` (admin login) — its `verdict` says exactly what is still wrong.
+
+## Refonte v26 - backend (item 5)
+
+New environment variables (all optional, safe defaults):
+- `HUBSPOT_V26_PROPERTIES=1` - turn on only AFTER these custom properties exist in HubSpot (an unknown property rejects the whole update):
+  `md_is_test` (single checkbox, contact + deal), `md_callback_moment` (single-line text, deal), `md_alert_active` (single checkbox, company).
+  Notes and tasks use standard HubSpot properties and need nothing created.
+- `SOCIAL_PROOF_MODE=demo` - preview/staging only: random consultation (2-9) and dossier (1-5) figures. Unset = real figures from `visitor_events`, hidden under 2. Never set `demo` in production.
+- `MARK_LEADS_AS_TEST=1` - every lead and alert created by this server is marked as test data (`is_test`, `md_is_test`). Use it on the preview/staging backend.
+- `HUBSPOT_UTM_PROPERTIES=1` - `md_source` / `md_campaign` (already documented above).
+
+New tables (created at boot): `market_alerts`, `crm_visit_notes` (one HubSpot note per visit), `crm_tasks` (one task per appointment request).
+New endpoints: `POST /api/siret/alert` (phone only, session must have a recognised company). `POST /api/crm/leads` accepts `callbackMoment` (`maintenant` | `apres_midi` | `demain_matin`) and `isTest`.
+`GET /api/siret/lead/dossier-pdf` now serves `dossier-<company>.pdf`.

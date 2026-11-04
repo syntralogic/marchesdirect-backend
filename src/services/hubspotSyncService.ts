@@ -7,6 +7,7 @@ import { isVerificationRequired } from './phoneVerificationService';
 import { buildCompanyCockpitForRequests } from './companyCockpitService';
 import { syncJourneyProjection, STEP_LABELS } from './journeyProjectionService';
 import { journeySchemaReady } from './hubspotJourneySchema';
+import { syncVisitExtras, v26PropertiesEnabled } from './hubspotVisitNoteService';
 
 // ============================================================================
 // HUBSPOT SYNC - companies and contacts (client brief 31 Oct, part B)
@@ -55,6 +56,12 @@ export type SyncLead = DealLead & {
   session_id: string | null;
   crm_system?: string | null;
   crm_contact_id?: string | null;
+  utm_source?: string | null;
+  utm_campaign?: string | null;
+  message?: string | null;
+  callback_moment?: string | null;
+  is_test?: boolean | null;
+  appointment_slot_at?: Date | string | null;
 };
 
 const clean = (v: unknown, max = 255): string | null => {
@@ -84,12 +91,17 @@ export function buildContactProperties(lead: SyncLead, j: JourneySummary): Recor
     md_last_site_activity: j.lastActivity ? j.lastActivity.toISOString() : null,
     md_offer_views_count: j.offerViews,
     md_analyses_count: j.analyses,
+    // Written only once Hedi has confirmed the two properties exist in HubSpot (an unknown property would reject the whole
+    // contact update): set HUBSPOT_UTM_PROPERTIES=1 then. Until then the values are kept on the lead, nothing is lost.
+    // md_is_test is only ever written as true (a test marker is never blanked): same gate as the other custom properties (HUBSPOT_V26_PROPERTIES=1).
+    ...(v26PropertiesEnabled() && lead.is_test ? { md_is_test: 'true' } : {}),
+    ...(process.env.HUBSPOT_UTM_PROPERTIES === '1' ? { md_source: clean(lead.utm_source, 100), md_campaign: clean(lead.utm_campaign, 150) } : {}),
   });
 }
 
 export function buildCompanyProperties(
   siret: string, name: string | null,
-  agg: { visitors: number; offerViews: number; analyses: number; lastActivity: Date | null },
+  agg: { visitors: number; offerViews: number; analyses: number; lastActivity: Date | null; alertActive?: boolean },
   forCreate: boolean
 ): Record<string, unknown> {
   return compact({
@@ -100,6 +112,8 @@ export function buildCompanyProperties(
     md_visitors_count: agg.visitors,
     md_offer_views_count: agg.offerViews,
     md_analyses_count: agg.analyses,
+    // Set once an alert was requested for this company (item 5); never written as false here, never blanked.
+    ...(v26PropertiesEnabled() && agg.alertActive ? { md_alert_active: 'true' } : {}),
   });
 }
 
@@ -315,18 +329,28 @@ export async function syncLeadToHubspot(lead: SyncLead): Promise<{ contactId: st
       : { rows: [] };
   const siret = lead.siret || lookup.rows[0]?.siret || null;
   if (!siret || !/^\d{14}$/.test(siret)) {
-    await syncDealForLead(lead,contactId,null);
+    const dealIdNoCompany = await syncDealForLead(lead, contactId, null);
+    await syncVisitExtras(lead as any, { contactId, companyId: null, dealId: dealIdNoCompany });
     return {contactId,companyId:null};
   }
   const companySessions = await companySessionsFor(siret);
   const cj = await journeyForSessions(companySessions,siret);
   const companyId = await upsertCompany(siret,clean(lookup.rows[0]?.company_data?.name) || clean(lead.company_name),
-    {visitors:companySessions.length,offerViews:cj.offerViews,analyses:cj.analyses,lastActivity:cj.lastActivity});
+    {visitors:companySessions.length,offerViews:cj.offerViews,analyses:cj.analyses,lastActivity:cj.lastActivity,alertActive:await companyHasActiveAlert(siret)});
   await associateContactWithCompany(contactId, companyId);
-  await syncDealForLead({ ...lead, siret }, contactId, companyId);
+  const dealId = await syncDealForLead({ ...lead, siret }, contactId, companyId);
+  await syncVisitExtras(lead as any, { contactId, companyId, dealId });
   await syncCompanyCockpit(companyId, companySessions, siret);
   await syncJourneyProjection(companyId,siret);
   return { contactId, companyId };
+}
+
+// True when someone asked to be warned of new markets for this company (market_alerts, item 5).
+async function companyHasActiveAlert(siret: string): Promise<boolean> {
+  try {
+    const r = await db.query(`SELECT 1 FROM market_alerts WHERE siret = $1 AND active = TRUE LIMIT 1`, [siret]);
+    return r.rows.length > 0;
+  } catch { return false; }
 }
 
 // Short, secret-free description of a failure for crm_leads.crm_last_error (the error journal of the brief).

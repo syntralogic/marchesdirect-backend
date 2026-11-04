@@ -458,6 +458,11 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // 18 Oct client brief: the lot the artisan is looking at travels with the request (dossier e-mail, CRM note), so
   // whoever calls back already knows which lot is concerned. Optional, free text, shown only when known.
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS lot_label TEXT`);
+  // Acquisition source of the visit (utm_source / utm_campaign), first touch of the session. Additive only.
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS utm_source VARCHAR(100)`);
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS utm_campaign VARCHAR(150)`);
+  // When the visitor wants to be called back (maintenant / apres_midi / demain_matin). Additive only.
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS callback_moment VARCHAR(20)`);
 
   // Regenerate search_vector to match the exact accent-insensitive
   // expression the search route needs (was to_tsvector('french',
@@ -1019,6 +1024,33 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     request_type VARCHAR(20) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  // Refonte v26 (item 5): callback moment, test marker, alerts, one HubSpot note per visit, one task per appointment request.
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS callback_moment VARCHAR(20)`);
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE`);
+  await step(`CREATE TABLE IF NOT EXISTS market_alerts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    session_id VARCHAR(100),
+    siret VARCHAR(14) NOT NULL,
+    phone VARCHAR(40) NOT NULL,
+    trade_slug TEXT,
+    department VARCHAR(5),
+    city TEXT,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    is_test BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (siret, phone)
+  )`);
+  await step(`CREATE TABLE IF NOT EXISTS crm_visit_notes (
+    session_id VARCHAR(100) PRIMARY KEY,
+    hubspot_note_id VARCHAR(50) NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await step(`CREATE TABLE IF NOT EXISTS crm_tasks (
+    lead_id UUID PRIMARY KEY REFERENCES crm_leads(id) ON DELETE CASCADE,
+    hubspot_task_id VARCHAR(50) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`);
   // Outgoing message log (part D): request saved, CRM sync and message delivery each have their own status.
   await step(`CREATE TABLE IF NOT EXISTS message_deliveries (
