@@ -21,6 +21,8 @@ export function buildCandidatesQuery(opts: { tradeSlugs: string[]; department: s
     `o.status = 'active'`,
     `(o.deadline IS NULL OR o.deadline >= NOW())`,
     `t.slug = ANY($1::text[])`,
+    // 4 Nov (mandat client : « aucun faux résultat ») : pas d'annonce de démonstration dans la liste classée.
+    `COALESCE(ds.code, '') <> 'editorial_catalog'`,
   ];
   if (opts.department) {
     params.push(opts.department);
@@ -29,6 +31,7 @@ export function buildCandidatesQuery(opts: { tradeSlugs: string[]; department: s
   const base = `FROM opportunities o
      LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
      JOIN trades t ON o.trade_id = t.id
+     LEFT JOIN data_sources ds ON o.source_id = ds.id
      WHERE ${where.join(' AND ')}`;
   return {
     listSql: `SELECT o.id, o.title, ot.code AS journey, o.buyer_name, o.location_city, o.location_department, o.deadline

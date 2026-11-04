@@ -346,7 +346,11 @@ const INLINE_SEARCH_VECTOR_EXPR = `(
 // Expects aliases `o` (opportunities) and `ds` (data_sources).
 const LIST_SCOPE_SQL = `o.deleted_at IS NULL
   AND COALESCE(o.status, '') != 'merged'
-  AND (ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))`;
+  AND (ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))
+  -- 4 Nov (mandat client : « aucun faux résultat ») : les annonces de
+  -- démonstration du catalogue éditorial ne sortent plus dans les listes
+  -- ni dans les compteurs qui y mènent.
+  AND COALESCE(ds.code, '') <> 'editorial_catalog'`;
 
 // The list handler is a named function so the counters (Secteurs badges, see
 // countOpportunitiesFor below) run EXACTLY the same predicate as the list they
@@ -448,6 +452,8 @@ async function searchOpportunities(req: Request, res: Response) {
     // than assumed French, the same "don't guess, exclude the unconfirmed
     // one" call already made for the geocoding score check.
     conditions.push("(ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))");
+    // 4 Nov: no demonstration rows in search results (see LIST_SCOPE_SQL).
+    conditions.push("COALESCE(ds.code, '') <> 'editorial_catalog'");
     const params: any[] = [];
     let idx = 1;
     // Captured when the q filter below builds its tsvector/tsquery match,
@@ -1336,6 +1342,7 @@ async function loadOpportunityCounts(status?: string) {
     "o.deleted_at IS NULL",
     "COALESCE(o.status, '') != 'merged'",
     "(ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))",
+    "COALESCE(ds.code, '') <> 'editorial_catalog'",
   ];
   const params: any[] = [];
   if (status) {
