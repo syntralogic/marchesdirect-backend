@@ -13,8 +13,10 @@ import { naturePrestationLateral, NATURE_VALUES } from '../utils/naturePrestatio
 import { buildSourceAnalysisSections } from '../utils/sourceAnalysisSections';
 import { tokenizeQuery, tsqueryAlternatives, isTradeWord, matchTermsOf, domainMismatchExclusionSqlPattern, lotMatchSqlPattern, canMatchInsideTitle } from '../utils/searchQuery';
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts, generateOpportunityAnalysisSections } from '../services/aiService';
+import { recordComputedScore } from '../services/journeyScoreService';
 import { ingestOpportunityDocuments } from '../services/documentIngestionService';
 import { computeMatchScore, loadCompanyProfile } from '../services/matchScoreService';
+import { recordJourneyEvent, refreshJourneyForSession } from '../services/journeyEventService';
 import { resolveTradeFromText, keywordsForSlugs } from '../services/tradeResolver';
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { sendAppointmentConfirmation } from '../services/appointmentConfirmationService';
@@ -1721,14 +1723,9 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     // the platform's own gateway timeout before the response ever went out
     // - which reads to the visitor as "the fiche just didn't update",
     // indistinguishable from generation never having run at all.
-    const [extractedFacts, analysisSections] = await Promise.all([
-      ensureFactsExtracted(opportunity.id, opportunity.ai_extracted_facts),
-      ensureAnalysisSectionsGenerated(opportunity.id, opportunity.ai_analysis_sections, opportunity.ai_analysis_sections_status),
-      ensureClassified(opportunity),
-      ensureSummaryGenerated(opportunity),
-    ]);
-    opportunity.ai_extracted_facts = extractedFacts;
-    opportunity.ai_analysis_sections = analysisSections;
+    // A public GET (including crawlers and refreshes) never initiates a paid AI call.
+    const extractedFacts = opportunity.ai_extracted_facts;
+    const analysisSections = opportunity.ai_analysis_sections;
     // 30 Sep audit, point 1: when the AI sections are missing/empty/failed, the
     // fiche shows the source's own information in the same 3 accordions instead
     // of staying on "Analyse en cours". Built from stored fields only.
@@ -1977,6 +1974,10 @@ router.post(
       }
 
       if (bookingId) await db.query(`UPDATE appointment_bookings SET lead_id = $1 WHERE id = $2`, [leadId, bookingId]);
+      if(sessionId)await recordJourneyEvent({sessionId,opportunityId:req.params.id,eventType:'coordonnees_saisies',eventId:`coordinates:${leadId}`});
+      if (sessionId) await recordJourneyEvent({ sessionId, opportunityId: req.params.id,
+        eventType: bookingId ? 'appointment_booked' : 'callback_requested',
+        eventId: `access:${leadId}:${bookingId || Date.now()}` });
       if (bookingId) stopFollowUpsForEmail(email, 'appointment_booked').catch(() => {}); else scheduleFollowUps(leadId).catch(() => {});
       // Fired only once the booking is attached to the lead, so the CRM sees a CONFIRMED appointment, not a bare
       // request. Also covers an existing lead whose request evolved (callback -> appointment): same deal, new stage.
@@ -2098,6 +2099,13 @@ router.get('/:id/match-score', optionalAuth, async (req: AuthRequest, res: Respo
       answers: parseRefineAnswers(req.query.answers),
       lot: typeof req.query.lot === 'string' ? req.query.lot : null,
     });
+    const journeySession = typeof req.query.sessionId === 'string' ? req.query.sessionId : '';
+    if (journeySession.length >= 8 && journeySession.length <= 100) {
+      await recordComputedScore({sessionId:journeySession,opportunityId:req.params.id,score:result.score,answers:parseRefineAnswers(req.query.answers),lot:typeof req.query.lot==='string'?req.query.lot:null});
+      await recordJourneyEvent({ sessionId: journeySession, opportunityId: req.params.id,
+        eventType: 'analysis_completed', eventId: `match:${req.params.id}:${String(req.query.lot || '').slice(0, 30)}` });
+      void refreshJourneyForSession(journeySession);
+    }
     res.json(result);
   } catch (err: any) {
     if (err.message === 'Opportunity not found') {
@@ -2109,7 +2117,7 @@ router.get('/:id/match-score', optionalAuth, async (req: AuthRequest, res: Respo
 });
 
 // POST /api/opportunities/:id/classify - trigger AI classification (Milestone 6)
-router.post('/:id/classify', async (req: Request, res: Response) => {
+router.post('/:id/classify', authenticate, requireRole(['admin', 'super_admin']), async (req: Request, res: Response) => {
   try {
     const success = await classifyOpportunity(req.params.id);
     if (!success) {

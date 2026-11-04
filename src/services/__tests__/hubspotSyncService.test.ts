@@ -14,10 +14,12 @@ const journey: JourneySummary = {
   lastTrade: 'isolation', lastArea: 'Lyon', lastStep: 'view_opportunity',
   lastActivity: new Date('2026-10-30T10:00:00Z'), offerViews: 3, analyses: 1,
 };
-const lead = { id: 'l1', first_name: 'Ali', last_name: 'K', email: ' Ali@Example.fr ', phone: '0601020304', company_name: 'ACME', session_id: 's1' };
+const lead = { id: 'l1', first_name: 'Ali', last_name: 'K', email: ' Ali@Example.fr ', phone: '0601020304', company_name: 'ACME', session_id: 's1', created_at: '2026-10-30T10:05:00Z' };
 
 beforeEach(() => {
-  jest.clearAllMocks();
+  jest.resetAllMocks();
+  q.mockResolvedValue({ rows: [] });
+  req.mockResolvedValue({ data: {} });
   process.env.HUBSPOT_ACCESS_TOKEN = 'secret-token';
 });
 
@@ -25,7 +27,7 @@ describe('property builders', () => {
   it('maps the journal summary onto the agreed contact property names', () => {
     expect(buildContactProperties(lead, journey)).toEqual({
       firstname: 'Ali', lastname: 'K', email: 'ali@example.fr', phone: '0601020304',
-      md_search_trade: 'isolation', md_search_area: 'Lyon', md_last_journey_step: 'offer_view',
+      md_search_trade: 'isolation', md_search_area: 'Lyon', md_last_journey_step: 'Annonce consultée',
       md_last_site_activity: '2026-10-30T10:00:00.000Z', md_offer_views_count: 3, md_analyses_count: 1,
     });
   });
@@ -85,7 +87,7 @@ describe('syncLeadToHubspot', () => {
        .mockResolvedValueOnce({ data: {} });
     expect(await syncLeadToHubspot(lead)).toEqual({ contactId: 'c9', companyId: 'co9' });
     const methods = req.mock.calls.map(c => c[0].method);
-    expect(methods).toEqual(['POST', 'PATCH', 'POST', 'PATCH', 'PUT']);
+    expect(methods).toEqual(['POST', 'PATCH', 'POST', 'PATCH', 'PUT', 'PATCH']);
     expect(req.mock.calls[3][0].data.properties).not.toHaveProperty('name');
   });
 

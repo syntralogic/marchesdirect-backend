@@ -1,3 +1,4 @@
+import { recordDossierGeneration } from './dossierStateService';
 import PDFDocument from 'pdfkit';
 import { logger } from '../utils/logger';
 import { deliverEmail, recordDelivery, DeliveryContext } from './deliveryLogService';
@@ -136,10 +137,12 @@ export async function sendPrefilledDossierEmail(
     pdf = await generatePrefilledDossierPdf(input);
   } catch (err) {
     logger.error('Prefilled dossier PDF failed (non-fatal):', err);
-    await recordDelivery('dossier', to, 'failed', ctx, 'pdf generation failed');
+    await recordDossierGeneration(ctx, 'failed', 'pdf_generation_failed');
     return false;
   }
   try {
+    // Persist proof before attempting delivery; failure here must never start an untracked send.
+    const generationId = await recordDossierGeneration(ctx, 'generated');
     const html = `
       <p>Bonjour,</p>
       <p>Voici votre dossier pré-rempli (aperçu préparatoire, pas un dossier prêt au dépôt) pour <strong>${escapeHtml(input.opportunityTitle)}</strong>${input.lotLabel ? ` (lot : <strong>${escapeHtml(input.lotLabel)}</strong>)` : ''}, préparé à partir des informations de votre entreprise et de cette opportunité.</p>
@@ -159,7 +162,7 @@ export async function sendPrefilledDossierEmail(
       subject: `Votre dossier pré-rempli - ${input.opportunityTitle}${input.lotLabel ? ` (lot : ${input.lotLabel})` : ''}`,
       html,
       attachments: [{ filename: 'dossier-pre-rempli.pdf', content: pdf }],
-      ctx,
+      ctx: { ...ctx, generationId },
     })).sent;
   } catch (err) {
     logger.error('Prefilled dossier email failed (non-fatal):', err);

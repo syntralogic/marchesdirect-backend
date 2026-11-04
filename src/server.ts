@@ -178,7 +178,8 @@ app.use('/api/auth/password-reset/request', emailSendLimiter);
 app.use('/api/auth/magic-link', emailSendLimiter);
 
 // Logging
-app.use(morgan('combined', { stream: { write: msg => logger.info(msg.trim()) } }));
+morgan.token('safe-route', req => (req as any).route?.path || 'unmatched');
+app.use(morgan(':method :safe-route :status :response-time ms', { stream: { write: msg => logger.info(msg.trim()) } }));
 
 // Body parsing
 // IMPORTANT: the Stripe webhook route needs the raw, unparsed request body to
@@ -205,6 +206,12 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // Health check
 app.get('/health', (req: Request, res: Response) => {
   res.json({ status: 'ok', timestamp: new Date() });
+});
+
+// Liveness alone is insufficient during schema initialization. Operators and
+// HTTP health checks can use /ready without declaring the API ready too soon.
+app.get('/ready', (_req: Request, res: Response) => {
+  res.status(dbReady ? 200 : 503).json({ status: dbReady ? 'ready' : 'starting' });
 });
 
 // Client audit (found while fixing Site Name/Support Email persistence):
@@ -342,6 +349,7 @@ app.use(errorHandler);
 // session-pool cap; chaining them keeps it to one extra pool at a time.
 let bootScriptChain: Promise<void> = Promise.resolve();
 const queueBootScript = (scriptPath: string, cb: (err: any, stdout: string, stderr: string) => void) => {
+  if(process.env.BOOT_MAINTENANCE_ENABLED!=='true'){logger.info('[Maintenance] Boot scripts paused; existing data preserved');return;}
   bootScriptChain = bootScriptChain.then(
     () =>
       new Promise<void>(resolve => {
@@ -428,6 +436,10 @@ const startServer = async () => {
     // Supabase project) — no manual psql step required.
     await ensureSchema();
     dbReady = true;
+    await import('./services/hubspotJourneySchema').then(m=>m.ensureJourneySchema());
+    setInterval(()=>{void import('./services/hubspotSyncService').then(m=>m.refreshInactiveCompanyJourneys()).catch(()=>logger.warn('Inactivity refresh pending'));},60000).unref();
+    // Owner-approved one-off benchmark, protected by a durable unique run ID.
+    void import('./services/aiEnrichmentService').then(async m => { await m.runApprovedHaikuBenchmark(); await m.retryApprovedHaikuFailure(); }).catch(() => logger.error('Approved AI benchmark failed; no automatic retry'));
     // Warm the homepage counts cache (fire-and-forget; never blocks boot).
     setTimeout(() => { require('./routes/opportunities').warmOpportunityCounts().catch(() => {}); }, 3000);
     setTimeout(() => { require('./routes/trades').warmTradeCounts(); }, 20000);
@@ -600,6 +612,17 @@ const startServer = async () => {
         ['seoGeneration', 'startSEOGeneration', 'SEO generation'],
       ];
       startups.forEach(([mod, fn, label], i) => {
+        const heavyJobs=['searchIndexRefresh','locationRegionBackfillJob','geocodingBackfillJob','natureBackfillJob','legacyRepairJob','documentIngestion','dataCollection','seoGeneration'];
+        if(heavyJobs.includes(mod)&&process.env.BOOT_MAINTENANCE_ENABLED!=='true'){
+          logger.info(`[Jobs] Heavy maintenance paused: ${mod}`);return;
+        }
+        // Paid enrichment is opt-in. Keep CRM retries, collection and the
+        // visitor's rule-based scoring alive while unattended AI is paused.
+        const aiEnrichmentJobs = ['factsBackfillJob', 'aiProcessing', 'analysisSectionsBackfillJob', 'staleSummaryBackfillJob'];
+        if (aiEnrichmentJobs.includes(mod) && process.env.AI_BACKGROUND_ENRICHMENT_ENABLED !== 'true') {
+          logger.info(`[Jobs] Automatic AI enrichment paused: ${mod} (AI_BACKGROUND_ENRICHMENT_ENABLED is not true)`);
+          return;
+        }
         const start = () => {
           try {
             require(`./jobs/${mod}`)[fn]();

@@ -1,3 +1,4 @@
+import { sanitizeLogValue, redactLogText } from './logPrivacy';
 import winston, { Logger } from 'winston';
 import path from 'path';
 import fs from 'fs';
@@ -31,41 +32,8 @@ const LOG_FORMAT = process.env.LOG_FORMAT || 'json';
 // useful for debugging; everything else goes through a circular-safe
 // stringify so a stray circular object anywhere else can never crash
 // logging again.
-function toSafeMeta(value: unknown, seen: WeakSet<object> = new WeakSet(), depth = 0): unknown {
-  if (depth > 6) return '[max depth]';
-
-  if (value instanceof Error) {
-    const anyErr = value as any;
-    const safe: Record<string, unknown> = {
-      message: value.message,
-      name: value.name,
-      stack: value.stack,
-    };
-    // Axios error shape: surface the parts worth debugging, skip the
-    // circular request/response objects themselves.
-    if (anyErr.code) safe.code = anyErr.code;
-    if (anyErr.response) {
-      safe.responseStatus = anyErr.response.status;
-      safe.responseData = toSafeMeta(anyErr.response.data, seen, depth + 1);
-    }
-    if (anyErr.config?.url) safe.requestUrl = anyErr.config.url;
-    return safe;
-  }
-  if (Array.isArray(value)) {
-    if (seen.has(value)) return '[Circular]';
-    seen.add(value);
-    return value.map((v) => toSafeMeta(v, seen, depth + 1));
-  }
-  if (value && typeof value === 'object') {
-    if (seen.has(value)) return '[Circular]';
-    seen.add(value);
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) {
-      out[k] = toSafeMeta(v, seen, depth + 1);
-    }
-    return out;
-  }
-  return value;
+function toSafeMeta(value: unknown): unknown {
+  return sanitizeLogValue(value);
 }
 
 function safeMetaString(meta: Record<string, unknown>): string {
@@ -115,6 +83,16 @@ export const logger: Logger = winston.createLogger({
   format: winston.format.combine(
     winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
     winston.format.errors({ stack: true }),
+    winston.format((info) => {
+      info.message = typeof info.message === 'string' ? redactLogText(info.message) : sanitizeLogValue(info.message);
+      for (const key of Object.keys(info)) {
+        if (!['level','message','timestamp','service'].includes(key)) {
+          const safe = sanitizeLogValue({ [key]: (info as any)[key] }) as Record<string, unknown>;
+          (info as any)[key] = safe[key];
+        }
+      }
+      return info;
+    })(),
     logFormat
   ),
   defaultMeta: { service: 'procurement-api' },

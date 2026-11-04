@@ -199,12 +199,22 @@ export async function getAdvisorAdvice(input: AdviceInput): Promise<string | nul
 
   const p = (async () => {
     try {
+      const durableKey=`advisor-v1:${key}`;
+      const claimed=await db.query(`INSERT INTO ai_result_cache(cache_key,function_name,model,result)
+        VALUES($1,'advisor',$2,'{"status":"claimed"}') ON CONFLICT DO NOTHING RETURNING cache_key`,
+        [durableKey,process.env.AI_HAIKU_VALIDATED==='true'?'claude-haiku-5-5':process.env.LLM_MODEL||'claude-haiku-4-5-20251001']);
+      if(!claimed.rows.length) {
+        const saved=await db.query('SELECT result FROM ai_result_cache WHERE cache_key=$1',[durableKey]);
+        return typeof saved.rows[0]?.result?.text==='string'?saved.rows[0].result.text:null;
+      }
       const system = input.kind === 'opportunity' ? OPPORTUNITY_PROMPT : COMPATIBILITY_PROMPT;
       const text = await generateAdvisorText(system, `Informations transmises (JSON) :\n${factsJson}`);
       if (!isAcceptableAdvice(input.kind, text)) {
+        await db.query('UPDATE ai_result_cache SET result=$2::jsonb WHERE cache_key=$1',[durableKey,JSON.stringify({status:'rejected'})]);
         logger.warn(`[advisorAdvice] rejected output for ${input.kind} (${wordCount(text)} words)`);
         return null;
       }
+      await db.query('UPDATE ai_result_cache SET result=$2::jsonb WHERE cache_key=$1',[durableKey,JSON.stringify({status:'completed',text})]);
       cacheSet(key, text);
       return text;
     } catch (err) {

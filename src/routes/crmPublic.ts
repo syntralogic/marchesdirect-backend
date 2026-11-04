@@ -13,6 +13,7 @@ import { toE164French } from '../services/smsService';
 import { notifyTeamOfNewLead } from '../services/leadNotificationService';
 import { isValidLeadPhone } from '../utils/leadValidation';
 import { CALLBACK_MOMENTS, parseCallbackMoment, isTestRequest } from '../utils/requestFacts';
+import { recordJourneyEvent } from '../services/journeyEventService';
 
 // Contre-audit follow-up: crm_leads.phone was stored exactly as typed
 // ("06 00 00 00 00", "0033600000000", "+33 6 00 00 00 00", ...), so the
@@ -210,6 +211,19 @@ router.post(
       if (callbackMoment || isTest) {
         await db.query('UPDATE crm_leads SET callback_moment = $2, is_test = $3 WHERE id = $1', [result.rows[0].id, callbackMoment, isTest])
           .catch((err: any) => logger.error('Lead v26 fields not saved (non-fatal):', err));
+      }
+      // Journey events feed the ONE note per visit (visitNoteService). What Elena must read in clear text
+      // (callback moment, the question, the requested slot) travels in the event data, so no second note exists.
+      if(sessionId){
+        await recordJourneyEvent({sessionId,opportunityId,eventType:'coordonnees_saisies',eventId:`coordinates:${result.rows[0].id}`});
+        if((req.body as any).visitorChoice==='info')await recordJourneyEvent({sessionId,opportunityId,eventType:'demande_info',eventId:`info:${result.rows[0].id}`,
+          extra: message ? { question: String(message).slice(0, 1000) } : undefined});
+      }
+      if (sessionId && (bookingId || leadSource === 'callback_modal')) {
+        await recordJourneyEvent({ sessionId, opportunityId,
+          eventType: bookingId ? 'appointment_booked' : 'callback_requested',
+          eventId: `request:${result.rows[0].id}`,
+          extra: { ...(callbackMoment ? { callbackMoment } : {}), ...(slotDate ? { slotAt: new Date(slotDate).toISOString() } : {}) } });
       }
 
       // Intentionally return only id/created_at, not the full row - this is a

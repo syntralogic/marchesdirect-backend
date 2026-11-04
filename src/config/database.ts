@@ -1,3 +1,7 @@
+import { JOURNEY_PROJECTION_DDL } from '../services/hubspotJourneySchema';
+import { JOURNEY_SCORE_DDL } from '../services/journeyScoreService';
+import { AI_BUDGET_DDL } from '../services/aiBudgetService';
+import { JOURNEY_IDENTITY_DDL } from '../services/journeyIdentitySchema';
 import { Pool, QueryResult, PoolClient } from 'pg';
 import dotenv from 'dotenv';
 import path from 'path';
@@ -540,9 +544,8 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // buildUnlocatedCityIndex): a plain CREATE INDEX over ~100k rows exceeded
   // the DB's statement timeout on boot (Render logs, 28 Sep 15:48) and it
   // would have blocked startup + write traffic while running.
-  void buildUnlocatedCityIndex();
-  void buildUnresolvedRegionIndex();
-  void buildSearchTrigramIndexes();
+  // Background index builds are started only after all schema DDL below has finished.
+  // Running CREATE INDEX CONCURRENTLY here deadlocked with later ALTER TABLE steps.
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS message TEXT`);
 
   // BUG (found live on Render, 2026-09-03): documentExpiry.ts's daily sweep
@@ -1066,6 +1069,18 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   await step(`CREATE INDEX IF NOT EXISTS message_deliveries_lead ON message_deliveries(lead_id)`);
   await step(`CREATE INDEX IF NOT EXISTS message_deliveries_dossier ON message_deliveries(kind, session_id, opportunity_id)`);
   await step(`CREATE INDEX IF NOT EXISTS message_deliveries_dedupe ON message_deliveries(dedupe_key) WHERE dedupe_key IS NOT NULL`);
+  // Prerequisite A: separate PDF generation from acceptance of its e-mail.
+  await step(`ALTER TABLE analysis_snapshots ADD COLUMN IF NOT EXISTS compatibility_score INTEGER`);
+  await step(`ALTER TABLE analysis_snapshots ADD COLUMN IF NOT EXISTS score_computed_at TIMESTAMPTZ`);
+  await step(`CREATE TABLE IF NOT EXISTS dossier_generations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    lead_id UUID REFERENCES crm_leads(id) ON DELETE SET NULL,
+    session_id VARCHAR(100), opportunity_id UUID, siret VARCHAR(14),
+    status VARCHAR(20) NOT NULL CHECK (status IN ('generated','failed')),
+    error_code VARCHAR(80), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await step(`CREATE INDEX IF NOT EXISTS dossier_generations_scope ON dossier_generations(session_id, opportunity_id, siret, created_at DESC)`);
+  await step(`ALTER TABLE message_deliveries ADD COLUMN IF NOT EXISTS generation_id UUID REFERENCES dossier_generations(id)`);
   // Real result of an appointment, recorded by staff: scheduled | attended | no_show | reschedule | cancelled.
   await step(`ALTER TABLE appointment_bookings ADD COLUMN IF NOT EXISTS outcome VARCHAR(20)`);
   // Part D: real calendar, contact preferences, reminder sequence.
@@ -1162,6 +1177,11 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     )
   `);
   await step(`CREATE INDEX IF NOT EXISTS siret_lookups_session ON siret_lookups(session_id)`);
+  for (const ddl of JOURNEY_IDENTITY_DDL) await step(ddl);
+  for (const ddl of AI_BUDGET_DDL) await step(ddl);
+  for (const ddl of JOURNEY_PROJECTION_DDL) await step(ddl);
+  for (const ddl of JOURNEY_SCORE_DDL) await step(ddl);
+  await step(`ALTER TABLE crm_company_sync_queue ADD COLUMN IF NOT EXISTS inactivity_processed_version BIGINT NOT NULL DEFAULT 0`);
 
   // Client's explicit priority (WhatsApp): integrate the public tender
   // databases as real content before finalizing UX, because testing against
@@ -1195,7 +1215,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // BOAMP data collection was wanted again. Removed for good; see the
   // one-time cleanup below for undoing what those lines already left in
   // production databases.
-  await removeDemoSeedData();
+  // Owner policy: preserve all historical and demonstration rows.
 
   // Same no-shell-on-Render reasoning: force these back to active in code
   // rather than relying on someone running `psql ... UPDATE data_sources`
@@ -1753,25 +1773,16 @@ const applyIncrementalMigrations = async (): Promise<void> => {
       END LOOP;
     END $$;
   `);
+  // Yield until ensureSchema resolves and the API readiness gate is opened.
+  // Build one index family at a time: concurrent builders on the same table
+  // can wait on each other and on the schema DDL (observed on Render 31 Oct).
+  setImmediate(() => {
+    void (async () => {
+      await buildUnlocatedCityIndex();
+      await buildUnresolvedRegionIndex();
+      await buildSearchTrigramIndexes();
+    })().catch(err => logger.error('Background index maintenance failed (non-fatal):', err));
+  });
 };
 
-// One-time (but safe-to-repeat) cleanup of the demo data the old
-// seedDemoOpportunities() call above used to insert on every boot - deletes
-// the demo_seed source's opportunities plus the source row itself. Does
-// NOT touch the separate, manually-run scripts/seed.js demo rows
-// (source_reference LIKE 'DEMO-%' under the real 'boamp' source id) -
-// those were an intentional one-off for browsing the app pre-launch and
-// aren't inserted automatically, so removing them is a separate decision.
-async function removeDemoSeedData(): Promise<void> {
-  const source = await pool.query(`SELECT id FROM data_sources WHERE code = 'demo_seed'`);
-  if (source.rows.length === 0) return; // nothing to clean up
-
-  const sourceId = source.rows[0].id;
-  const deleted = await pool.query(`DELETE FROM opportunities WHERE source_id = $1`, [sourceId]);
-  await pool.query(`DELETE FROM data_sources WHERE id = $1`, [sourceId]);
-
-  if (deleted.rowCount && deleted.rowCount > 0) {
-    logger.info(`🧹 Removed ${deleted.rowCount} auto-seeded demo opportunities and the demo_seed source`);
-  }
-}
-
+// Historical demonstration data is deliberately preserved.

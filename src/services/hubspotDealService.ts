@@ -1,3 +1,5 @@
+import {isTestCompany} from './companyProfileService';
+import { isTestCrmCompany } from './hubspotTestPolicy';
 import { journeyLinkProperties } from './journeyLinkService';
 import axios, { AxiosRequestConfig } from 'axios';
 import { db } from '../config/database';
@@ -6,6 +8,7 @@ import { computeMatchScore } from './matchScoreService';
 import { RULES_VERSION } from './matchEngine';
 import { dossierStatusFor } from './deliveryLogService';
 import { callbackMomentLabel } from '../utils/requestFacts';
+import { dossierStatesFor, DossierEmailStatus } from './dossierStateService';
 
 // ============================================================================
 // HUBSPOT DEALS (client brief 31 Oct, part C)
@@ -40,11 +43,16 @@ const STAGE_RANK: Record<string, number> = {
   [STAGES.callback]: 0, [STAGES.contact]: 1, [STAGES.confirmed]: 2, [STAGES.held]: 3, [STAGES.proposal]: 4, [STAGES.signed]: 5,
 };
 
+// Portal-specific default, matching this project's portal and pipeline. An
+// explicit environment value permits another commercial owner on deployment.
+export const defaultCommercialOwner = () => (process.env.HUBSPOT_DEFAULT_OWNER_ID || '102050175').trim();
+
 export type RequestType = 'dossier' | 'callback' | 'appointment';
 export const APPOINTMENT_OUTCOMES = ['scheduled', 'attended', 'no_show', 'reschedule', 'cancelled'] as const;
 export type AppointmentOutcome = typeof APPOINTMENT_OUTCOMES[number];
 
 export type DealLead = {
+  siret?: string | null;
   id: string;
   first_name?: string | null; last_name?: string | null; email?: string | null;
   company_name?: string | null;
@@ -95,14 +103,20 @@ export function answerProperties(answers: Record<string, unknown> | null | undef
 // Target stage for the CURRENT facts of the request, or null when the request alone justifies no stage change.
 export function targetStage(type: RequestType, bookingConfirmed: boolean, outcome: AppointmentOutcome | null): string {
   if (type === 'appointment' && bookingConfirmed) return outcome === 'attended' ? STAGES.held : STAGES.confirmed;
+  if(type==='dossier'){
+    const stage=process.env.HUBSPOT_DOSSIER_STAGE_ID;
+    if(!stage)throw new Error('hubspot_dossier_stage_not_ready');
+    return stage;
+  }
   return STAGES.callback;
 }
 
 // Forward-only: never regress, never override the team's own moves, never leave "Sans suite".
 export function shouldWriteStage(current: string | null | undefined, target: string): boolean {
   if (!current) return true;
-  if (!(current in STAGE_RANK) || !(target in STAGE_RANK)) return false;
-  return STAGE_RANK[target] > STAGE_RANK[current];
+  const ranks={...STAGE_RANK,...(process.env.HUBSPOT_DOSSIER_STAGE_ID?{[process.env.HUBSPOT_DOSSIER_STAGE_ID]:-1}:{}),...(process.env.HUBSPOT_CALLED_STAGE_ID?{[process.env.HUBSPOT_CALLED_STAGE_ID]:1}:{})};
+  if (!(current in ranks) || !(target in ranks)) return false;
+  return ranks[target] > ranks[current];
 }
 
 const compact = (o: Record<string, unknown>): Record<string, unknown> => {
@@ -146,19 +160,19 @@ async function gatherDealFacts(lead: DealLead) {
   // The analysis the visitor really ran on this market (answers + the index computed from them).
   let answers: Record<string, unknown> | null = null;
   let score: number | null = null;
+  let scoreDate:string|null=null;
   if (lead.opportunity_id && lead.session_id) {
     const s = await db.query(
-      `SELECT answers, lot_id FROM analysis_snapshots WHERE session_id = $1 AND opportunity_id = $2 ORDER BY updated_at DESC LIMIT 1`,
-      [lead.session_id, lead.opportunity_id]
+      `SELECT answers, lot_id, compatibility_score,score_computed_at FROM analysis_snapshots WHERE session_id = $1 AND opportunity_id = $2 AND ($3::text IS NULL OR siret=$3) ORDER BY updated_at DESC LIMIT 1`,
+      [lead.session_id, lead.opportunity_id,lead.siret||null]
     );
     if (s.rows[0]) {
       answers = s.rows[0].answers;
-      try {
-        const m = await computeMatchScore(lead.opportunity_id, null, { sessionId: lead.session_id, answers: s.rows[0].answers, lot: s.rows[0].lot_id || null });
-        score = typeof m.score === 'number' ? m.score : null; // null = not really computable: nothing is invented
-      } catch (err) {
-        logger.warn(`[HubSpot] score not computed for lead ${lead.id}: ${(err as Error).message}`);
+      if(typeof s.rows[0].compatibility_score==='number'&&s.rows[0].score_computed_at){
+        score=s.rows[0].compatibility_score;scoreDate=new Date(s.rows[0].score_computed_at).toISOString();
       }
+      // A CRM retry never recalculates or changes the original score timestamp.
+
     }
   }
 
@@ -167,14 +181,17 @@ async function gatherDealFacts(lead: DealLead) {
     [lead.id]
   );
   const booking = b.rows[0] || null;
-  const dossierStatus = await dossierStatusFor(lead.session_id, lead.opportunity_id);
-  return { market, answers, score, booking, dossierStatus };
+  const states = await dossierStatesFor({ sessionId: lead.session_id, opportunityId: lead.opportunity_id, siret: lead.siret });
+  return { market, answers, score, scoreDate, booking, ...states };
 }
 
 export function buildDealProperties(args: {
   lead: DealLead; type: RequestType; market: any; answers: Record<string, unknown> | null; score: number | null;
   booking: { status: string; outcome: string | null } | null; forCreate: boolean; contactLabel: string; now?: Date;
+  scoreDate?:string|null;
   dossierStatus?: 'requested' | 'available' | 'error' | null;
+  emailStatus?: DossierEmailStatus | null;
+  errorAt?: string; errorCode?: string;
 }): Record<string, unknown> {
   const { lead, type, market, answers, score, booking, forCreate } = args;
   const now = args.now || new Date();
@@ -186,6 +203,7 @@ export function buildDealProperties(args: {
     ...journeyLinkProperties(lead.id),
     // pipeline/stage/name are written by the caller on creation only (see syncDealForLead)
     ...(forCreate ? { dealname: `${args.contactLabel} - ${title || 'Demande commerciale'}`.slice(0, 250) } : {}),
+    ...(isTestCompany(lead.siret||'',lead.company_name)?{md_is_test:'true'}:{}),
     md_request_id: lead.id,
     md_request_type: type,
     md_request_date: iso(lead.created_at),
@@ -195,11 +213,14 @@ export function buildDealProperties(args: {
     md_market_url: market?.official_url || null,
     md_compatibility_score: score,
     md_score_version: score !== null ? RULES_VERSION : null,
-    md_score_date: score !== null ? now.toISOString().slice(0, 10) : null,
+    md_score_date: score !== null ? (args.scoreDate || now.toISOString()) : null,
     ...(answers ? answerProperties(answers) : {}),
-    // From the real delivery record of the dossier e-mail (sent -> available, failed/not sent -> error);
-    // without any record, a brand-new dossier request is simply 'requested'.
+    // PDF generation and e-mail acceptance are independent facts.
     ...(args.dossierStatus ? { md_dossier_status: args.dossierStatus } : forCreate && type === 'dossier' ? { md_dossier_status: 'requested' } : {}),
+    ...(process.env.HUBSPOT_DELIVERY_STATUSES_ENABLED === 'true' && args.emailStatus ? { md_email_status: args.emailStatus } : {}),
+    ...(process.env.HUBSPOT_DELIVERY_STATUSES_ENABLED === 'true' && args.errorAt ? {
+      md_last_delivery_error_at: args.errorAt, md_delivery_error_code: args.errorCode,
+    } : {}),
     md_appointment_outcome: outcome,
     // Custom properties of the v26 refonte: written only once they exist in HubSpot (HUBSPOT_V26_PROPERTIES=1).
     ...(process.env.HUBSPOT_V26_PROPERTIES === '1' ? { md_callback_moment: callbackMomentLabel(lead.callback_moment), md_is_test: lead.is_test ? 'true' : null } : {}),
@@ -212,6 +233,7 @@ export async function syncDealForLead(lead: DealLead, contactId: string, company
   if (!type) return null;
 
   return withLock(`deal:${lead.id}`, async () => {
+    if (await isTestCrmCompany(companyId, lead.siret || '', lead.company_name, hs)) return null;
     const facts = await gatherDealFacts(lead);
     const confirmed = type === 'appointment' && facts.booking?.status === 'booked';
     const outcome = (facts.booking?.outcome as AppointmentOutcome | null) || null;
@@ -227,22 +249,23 @@ export async function syncDealForLead(lead: DealLead, contactId: string, company
       dealId = found.results?.[0]?.id ? String(found.results[0].id) : null;
     }
 
-    const common = { lead, market: facts.market, answers: facts.answers, score: facts.score, booking: facts.booking, contactLabel, dossierStatus: facts.dossierStatus };
+    const common = { lead, market: facts.market, answers: facts.answers, score: facts.score, scoreDate:facts.scoreDate, booking: facts.booking, contactLabel, dossierStatus: facts.dossierStatus, emailStatus: facts.emailStatus, errorAt: facts.errorAt, errorCode: facts.errorCode };
 
     if (!dealId) {
       const created = await hs<{ id: string }>({
         method: 'POST', url: '/crm/v3/objects/deals',
-        data: { properties: { ...buildDealProperties({ ...common, type, forCreate: true }), pipeline: PIPELINE_ID, dealstage: targetStage(type, confirmed, outcome) } },
+        data: { properties: { ...buildDealProperties({ ...common, type, forCreate: true }), pipeline: PIPELINE_ID, dealstage: targetStage(type, confirmed, outcome), hubspot_owner_id: defaultCommercialOwner() } },
       });
       dealId = String(created.id);
     } else {
       const cur = await hs<{ properties?: Record<string, string | null> }>({
-        method: 'GET', url: `/crm/v3/objects/deals/${dealId}`, params: { properties: 'dealstage,md_request_type' },
+        method: 'GET', url: `/crm/v3/objects/deals/${dealId}`, params: { properties: 'dealstage,md_request_type,hubspot_owner_id' },
       });
       const merged = strongestType((cur.properties?.md_request_type as RequestType) || null, type);
       const stage = targetStage(merged, confirmed, outcome);
       const props: Record<string, unknown> = buildDealProperties({ ...common, type: merged, forCreate: false });
       if (shouldWriteStage(cur.properties?.dealstage, stage)) props.dealstage = stage;
+      if (!cur.properties?.hubspot_owner_id) props.hubspot_owner_id = defaultCommercialOwner();
       await hs({ method: 'PATCH', url: `/crm/v3/objects/deals/${dealId}`, data: { properties: props } });
     }
 

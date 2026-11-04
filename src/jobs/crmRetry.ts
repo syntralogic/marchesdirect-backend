@@ -3,6 +3,7 @@ import { logger } from '../utils/logger';
 import { retryPendingCrmSyncs } from '../services/crmSyncService';
 import { retryFailedLeadNotifications } from '../services/leadNotificationService';
 import { trackJob } from '../utils/jobTracker';
+import { refreshExistingCompanyCockpits, retryPendingCompanySyncs } from '../services/hubspotSyncService';
 
 export const startCrmRetrySchedule = () => {
   // Every 30 minutes - frequent enough that a lead isn't stuck for long, without
@@ -13,6 +14,7 @@ export const startCrmRetrySchedule = () => {
     await trackJob('crmRetry:cron', async () => {
       try {
         const count = await retryPendingCrmSyncs(50);
+        await retryPendingCompanySyncs(50);
         if (count > 0) {
           logger.info(`[Job] CRM retry sweep: attempted ${count} pending/failed lead(s)`);
         }
@@ -35,6 +37,10 @@ export const startCrmRetrySchedule = () => {
   // one sweep immediately so a lead isn't stuck waiting on a cron tick that
   // might not happen for a while on a host that spins down between requests.
   logger.info('[Job] Running an immediate CRM retry sweep on boot...');
+  void retryPendingCompanySyncs(50).catch(err => logger.error('Company retry failed:',err));
+  trackJob('companyCockpit:boot', refreshExistingCompanyCockpits)
+    .then(count => logger.info(`[Job] Company cockpit initialization: ${count} company selections refreshed`))
+    .catch(err => logger.error('[Job] Company cockpit initialization failed (non-fatal):', err));
   trackJob('crmRetry:boot', () => retryPendingCrmSyncs(50))
     .then((count) => {
       if (count > 0) logger.info(`[Job] Boot-time CRM retry sweep: attempted ${count} pending/failed lead(s)`);

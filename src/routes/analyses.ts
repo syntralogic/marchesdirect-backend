@@ -6,6 +6,9 @@ import { logger } from '../utils/logger';
 import { computeMatchScore } from '../services/matchScoreService';
 import { RULES_VERSION } from '../services/matchEngine';
 import { buildFacts } from '../services/analysisFacts';
+import { recordJourneyEvent, refreshJourneyForSession } from '../services/journeyEventService';
+import { recordComputedScore } from '../services/journeyScoreService';
+import { enrichSelectedNotice } from '../services/aiEnrichmentService';
 
 // Server-side analysis snapshot (guide v24 s.4): ONE record binds company + establishment +
 // market + lot + versions + answers, so homepage, fiche, animation, concordance and dossier all
@@ -57,7 +60,10 @@ router.put('/', [
          VALUES ($1, $2, $2, $3, $4, $5, $6, $7::jsonb, 1, $8) RETURNING *`,
         [sessionId, siret, companyName, opportunityId, lotId, marketVersion, JSON.stringify(answers), RULES_VERSION])).rows[0];
     }
+    await recordJourneyEvent({ sessionId, eventType: 'analysis_started', eventId: `analysis-start:${row.id}`, siret, opportunityId, analysisId: row.id });
+    if(!/bot|crawler|spider|headless|slurp/i.test(req.get('user-agent')||''))void enrichSelectedNotice(opportunityId).catch(()=>logger.warn('AI enrichment remains pending'));
     res.json(publicShape(row));
+    void refreshJourneyForSession(sessionId);
   } catch (err: any) {
     logger.error('analysis snapshot upsert error:', err);
     res.status(500).json({ error: 'Impossible d\'enregistrer l\'analyse.' });
@@ -71,15 +77,22 @@ router.get('/:id', async (req: Request, res: Response) => {
     const r = await db.query('SELECT * FROM analysis_snapshots WHERE id = $1', [req.params.id]).catch(() => ({ rows: [] as any[] }));
     if (!r.rows.length || r.rows[0].session_id !== sessionId) return res.status(404).json({ error: 'Analyse introuvable.' });
     const s = r.rows[0];
-    const match = await computeMatchScore(s.opportunity_id, null, { sessionId, answers: s.answers, lot: s.lot_id || null });
+    const match = await computeMatchScore(s.opportunity_id, null, { sessionId, siret:s.siret, answers: s.answers, lot: s.lot_id || null });
+    // Exact server computation time, separate from snapshot creation and CRM retry.
+    await db.query(`UPDATE analysis_snapshots SET compatibility_score=$2, score_computed_at=NOW() WHERE id=$1`, [s.id, match.score]);
+    await recordComputedScore({sessionId,siret:s.siret,opportunityId:s.opportunity_id,score:match.score,answers:s.answers,lot:s.lot_id});
     const [lk, op] = await Promise.all([
-      db.query('SELECT company_data, created_at FROM siret_lookups WHERE session_id = $1', [sessionId]),
+      db.query('SELECT company_data,selected_at AS created_at FROM journey_company_selections WHERE session_id=$1 AND siret=$2 ORDER BY selected_at DESC LIMIT 1', [sessionId,s.siret]),
       db.query(`SELECT o.title, o.buyer_name, o.official_url, o.publication_date, o.updated_at, o.location_city, o.location_department, o.deadline,
                        o.estimated_value, o.currency, o.ai_extracted_facts, ds.name AS source_name
                 FROM opportunities o LEFT JOIN data_sources ds ON ds.id = o.source_id WHERE o.id = $1`, [s.opportunity_id]),
     ]);
     const facts = op.rows[0] ? buildFacts({ siret: s.siret, company: lk.rows[0]?.company_data, companyLookedUpAt: lk.rows[0]?.created_at, opp: op.rows[0], sourceName: op.rows[0].source_name, answers: s.answers }) : [];
+    // A stored questionnaire is not a completed computation. Record completion
+    // only after the match and facts have actually been produced successfully.
+    await recordJourneyEvent({ sessionId, eventType: 'analysis_completed', eventId: `analysis-done:${s.id}:${s.answers_version}`, siret: s.siret, opportunityId: s.opportunity_id, analysisId: s.id });
     res.json({ ...publicShape(s), match, facts });
+    void refreshJourneyForSession(sessionId);
   } catch (err: any) {
     logger.error('analysis snapshot read error:', err);
     res.status(500).json({ error: "Impossible de charger l'analyse." });

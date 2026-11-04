@@ -114,8 +114,10 @@ export async function syncAppointmentTask(lead: NoteLead, ids: { contactId: stri
 }
 
 // Never lets a note/task problem fail (and re-queue) the contact/deal sync that already succeeded.
+// The visit NOTE is owned by visitNoteService (one short note per visit, built from the journey events, which now carry
+// the callback moment, the question and the slot). syncVisitNote above is kept for reference but no longer called, so a
+// visit can never get two notes. Only the appointment TASK is created here.
 export async function syncVisitExtras(lead: NoteLead, ids: { contactId: string; companyId: string | null; dealId: string | null }): Promise<void> {
-  try { await syncVisitNote(lead, ids); } catch (err) { logger.warn(`[HubSpot] visit note not synced for lead ${lead.id}: ${(err as Error).message}`); }
   try { await syncAppointmentTask(lead, ids); } catch (err) { logger.warn(`[HubSpot] appointment task not created for lead ${lead.id}: ${(err as Error).message}`); }
 }
 
