@@ -457,6 +457,8 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // Acquisition source of the visit (utm_source / utm_campaign), first touch of the session. Additive only.
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS utm_source VARCHAR(100)`);
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS utm_campaign VARCHAR(150)`);
+  // When the visitor wants to be called back (maintenant / apres_midi / demain_matin). Additive only.
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS callback_moment VARCHAR(20)`);
 
   // Regenerate search_vector to match the exact accent-insensitive
   // expression the search route needs (was to_tsvector('french',
