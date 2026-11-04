@@ -660,73 +660,132 @@ export const resetPassword = async (userId: string, newPassword: string) => {
 // user_sessions, since a magic link isn't a session/refresh token - it's a
 // one-time credential that gets exchanged FOR a session.
 
-export const requestMagicLink = async (email: string, purpose: 'login' | 'welcome' = 'login') => {
+export type MagicLinkRequestResult = {
+  success: true;
+  // 4 Nov: the caller must know whether an e-mail really left. Before, this
+  // always answered { success: true } - even with delivery paused - and the
+  // login page then told visitors "un lien vient d'être envoyé" for a mail
+  // that never existed. `sent` is the truth; `reason` says why when false.
+  sent: boolean;
+  reason?: 'delivery_paused' | 'delivery_failed';
+};
+
+export const requestMagicLink = async (
+  email: string,
+  purpose: 'login' | 'welcome' = 'login'
+): Promise<MagicLinkRequestResult> => {
   const normalizedEmail = email.toLowerCase().trim();
 
-  // For 'login', don't reveal whether the email exists - same reasoning as
-  // requestPasswordReset. For 'welcome' this is always a real, just-created
-  // account (called right after registerCompanyAndUser), so no such check
-  // is needed there, but the same non-existent-user guard is harmless.
-  const userResult = await db.query('SELECT id, first_name FROM users WHERE LOWER(email) = LOWER($1)', [normalizedEmail]);
-  if (userResult.rows.length === 0) {
-    logger.info(`Magic link requested for non-existent email: ${normalizedEmail}`);
-    return { success: true };
-  }
+  // Unknown address: the account is created when the link is validated (see
+  // verifyMagicLink), so the token is issued either way. The response is
+  // identical for known and unknown addresses - nothing is revealed.
+  const userResult = await db.query('SELECT id, first_name FROM users WHERE LOWER(email) = LOWER($1) AND deleted_at IS NULL', [normalizedEmail]);
+  const isNew = userResult.rows.length === 0;
+  const tokenPurpose = isNew ? 'signup' : purpose;
 
   const token = uuid();
   const tokenHash = await bcrypt.hash(token, 5);
 
-  await db.query(
+  const inserted = await db.query(
     `INSERT INTO magic_link_tokens (email, token_hash, purpose, expires_at)
-     VALUES ($1, $2, $3, NOW() + INTERVAL '1 hour')`,
-    [normalizedEmail, tokenHash, purpose]
+     VALUES ($1, $2, $3, NOW() + INTERVAL '1 hour') RETURNING id`,
+    [normalizedEmail, tokenHash, tokenPurpose]
   );
+  const tokenId: string = inserted.rows[0].id;
 
-  const appUrl = process.env.APP_URL || 'https://direct.vercel.app';
+  const appUrl = process.env.APP_URL || 'https://www.marchesdirect.fr';
   const link = `${appUrl}/connexion/lien?token=${encodeURIComponent(token)}&email=${encodeURIComponent(normalizedEmail)}`;
-  const firstName = userResult.rows[0].first_name || '';
+  const firstName = isNew ? '' : (userResult.rows[0].first_name || '');
+  const greeting = firstName ? `Bonjour ${escapeHtml(firstName)},` : 'Bonjour,';
 
-  const { subject, html } = purpose === 'welcome'
+  const { subject, html } = purpose === 'welcome' && !isNew
     ? {
         subject: 'Votre espace Marchés Direct est prêt',
-        html: `<p>Bonjour ${escapeHtml(firstName)},</p><p>Votre espace Marchés Direct est prêt. Confirmez votre adresse e-mail et retrouvez votre espace à tout moment avec ce lien :</p><p><a href="${link}">${link}</a></p><p>Ce lien est valable 1 heure.</p>`,
+        html: `<p>${greeting}</p><p>Votre espace Marchés Direct est prêt. Confirmez votre adresse e-mail et retrouvez votre espace à tout moment avec ce lien :</p><p><a href="${link}">${link}</a></p><p>Ce lien est valable 1 heure.</p>`,
       }
     : {
         subject: 'Votre lien de connexion Marchés Direct',
-        html: `<p>Bonjour ${escapeHtml(firstName)},</p><p>Cliquez sur ce lien pour accéder à votre espace Marchés Direct :</p><p><a href="${link}">${link}</a></p><p>Ce lien est valable 1 heure. Si vous n'avez pas demandé cette connexion, ignorez cet e-mail.</p>`,
+        html: `<p>${greeting}</p><p>Cliquez sur ce lien pour accéder à votre espace Marchés Direct :</p><p><a href="${link}">${link}</a></p><p>Ce lien est valable 1 heure et ne peut servir qu'une fois. Si vous n'avez pas demandé cette connexion, ignorez cet e-mail.</p>`,
       };
 
-  await sendEmail({ to: normalizedEmail, subject, html });
-
-  return { success: true };
+  let sent = false;
+  let reason: MagicLinkRequestResult['reason'];
+  try {
+    sent = await sendEmail({ to: normalizedEmail, subject, html });
+    if (!sent) reason = 'delivery_paused';
+  } catch {
+    reason = 'delivery_failed';
+  }
+  if (!sent) {
+    // No mail, no usable link: drop the token so nothing dangles.
+    await db.query('DELETE FROM magic_link_tokens WHERE id = $1', [tokenId]).catch(() => undefined);
+    logger.warn(`Magic link not sent (${reason}) for ${normalizedEmail}`);
+    return { success: true, sent: false, reason };
+  }
+  return { success: true, sent: true };
 };
 
-export const verifyMagicLink = async (token: string, email: string) => {
+export class MagicLinkError extends Error {
+  constructor(public readonly code: 'invalid' | 'expired' | 'used', message: string) {
+    super(message); this.name = 'MagicLinkError';
+  }
+}
+
+const issueSession = async (userId: string, email: string) => {
+  const { accessToken, refreshToken } = generateTokens(userId, email);
+  const tokenHash = await bcrypt.hash(refreshToken, 5);
+  await db.query(
+    `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
+     VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
+    [userId, tokenHash]
+  );
+  await db.query('UPDATE users SET last_login = NOW() WHERE id = $1', [userId]);
+  return { accessToken, refreshToken };
+};
+
+export const verifyMagicLink = async (token: string, email: string, brandId?: string | null) => {
   const normalizedEmail = email.toLowerCase().trim();
 
+  // Recent tokens for this address, used/expired included, so the visitor
+  // gets the right message ("déjà utilisé", "expiré") instead of one vague
+  // "invalide ou expiré" for every case.
   const candidates = await db.query(
-    `SELECT id, token_hash FROM magic_link_tokens
-     WHERE email = $1 AND used_at IS NULL AND expires_at > NOW()
-     ORDER BY created_at DESC LIMIT 5`,
+    `SELECT id, token_hash, used_at, (expires_at > NOW()) AS live FROM magic_link_tokens
+     WHERE email = $1
+     ORDER BY created_at DESC LIMIT 8`,
     [normalizedEmail]
   );
 
-  // token_hash comparisons are bcrypt (not indexable), so check the
-  // handful of this email's recent unused/unexpired tokens rather than a
-  // single row lookup - matches requestPasswordReset's own token model.
-  let matchedId: string | null = null;
+  let matched: { id: string; used_at: string | null; live: boolean } | null = null;
   for (const row of candidates.rows) {
-    if (await bcrypt.compare(token, row.token_hash)) { matchedId = row.id; break; }
+    if (await bcrypt.compare(token, row.token_hash)) { matched = row; break; }
   }
-  if (!matchedId) {
-    throw new Error('Ce lien de connexion est invalide ou a expiré.');
-  }
+  if (!matched) throw new MagicLinkError('invalid', 'Ce lien de connexion est invalide.');
+  if (matched.used_at) throw new MagicLinkError('used', 'Ce lien a déjà été utilisé. Demandez-en un nouveau.');
+  if (!matched.live) throw new MagicLinkError('expired', 'Ce lien a expiré (il est valable 1 heure). Demandez-en un nouveau.');
 
-  await db.query('UPDATE magic_link_tokens SET used_at = NOW() WHERE id = $1', [matchedId]);
+  // Single use: only the first verification wins the row.
+  const claimed = await db.query('UPDATE magic_link_tokens SET used_at = NOW() WHERE id = $1 AND used_at IS NULL RETURNING id', [matched.id]);
+  if (claimed.rows.length === 0) throw new MagicLinkError('used', 'Ce lien a déjà été utilisé. Demandez-en un nouveau.');
 
-  const userResult = await db.query('SELECT id, email, mfa_enabled FROM users WHERE LOWER(email) = LOWER($1)', [normalizedEmail]);
+  let userResult = await db.query('SELECT id, email, mfa_enabled FROM users WHERE LOWER(email) = LOWER($1) AND deleted_at IS NULL', [normalizedEmail]);
+  let isNewUser = false;
   if (userResult.rows.length === 0) {
-    throw new Error('Aucun compte associé à cette adresse e-mail.');
+    // The link proves the address: create the account now (no password, same
+    // as the Google flow). "Email already registered" can only mean a
+    // concurrent creation - re-read instead of duplicating.
+    try {
+      await registerCompanyAndUser(
+        { companyName: 'Mon entreprise', firstName: '', lastName: '', email: normalizedEmail },
+        brandId
+      );
+      isNewUser = true;
+      logger.info(`✅ New account via magic link: ${normalizedEmail}`);
+    } catch (err) {
+      if (!(err instanceof Error && /already registered/i.test(err.message))) throw err;
+    }
+    userResult = await db.query('SELECT id, email, mfa_enabled FROM users WHERE LOWER(email) = LOWER($1) AND deleted_at IS NULL', [normalizedEmail]);
+    if (userResult.rows.length === 0) throw new Error('La création du compte a échoué. Réessayez.');
   }
 
   const user = userResult.rows[0];
@@ -734,8 +793,9 @@ export const verifyMagicLink = async (token: string, email: string) => {
   if (user.mfa_enabled) {
     return { mfaRequired: true, mfaToken: signMfaChallenge(user.id), userId: user.id };
   }
-  const { accessToken, refreshToken } = generateTokens(user.id, user.email);
-  return { accessToken, refreshToken, userId: user.id, email: user.email };
+  const { accessToken, refreshToken } = await issueSession(user.id, user.email);
+  await db.query('INSERT INTO login_attempts (email, success) VALUES ($1, $2)', [normalizedEmail, true]).catch(() => undefined);
+  return { accessToken, refreshToken, userId: user.id, email: user.email, isNewUser };
 };
 
 // ============================================================================
