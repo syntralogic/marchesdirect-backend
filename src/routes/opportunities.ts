@@ -1399,6 +1399,20 @@ router.get('/stats/counts', async (req: Request, res: Response) => {
   }
 });
 
+// GET /api/opportunities/stats/open-today - refonte v26 (accueil, 1.5): the single real figure behind
+// "N marchés ouverts aujourd'hui en France". Same scope as the active counts (status 'active'), cached 24 h.
+// On failure: 503, and the home page hides the whole line. Never a fixed value.
+router.get('/stats/open-today', async (_req: Request, res: Response) => {
+  try {
+    const day = new Date().toISOString().slice(0, 10);
+    const total = await cached(`open-today:${day}`, 24 * 60 * 60 * 1000, async () => (await loadOpportunityCounts('active')).total);
+    res.set('Cache-Control', 'public, max-age=3600').json({ total: Number(total) || 0, date: day });
+  } catch (err: any) {
+    logger.error('Open-today count error:', err);
+    res.set('Retry-After', '60').status(503).json({ error: 'Failed to load open markets count' });
+  }
+});
+
 // GET /api/opportunities/stats/regions - opportunity count per French region,
 // for the interactive map on /zones.
 //

@@ -546,6 +546,29 @@ router.post(
     }
   }
 );
+// GET /api/siret/profile?sessionId=... - accueil v26 (1.2): the métier is deduced from the recognised company (code APE +
+// activity wording), never asked. Returns the matching trades (same APE mapping the match engine uses), most specific first.
+// An unknown session or an APE with no mapping returns an empty list: the caller then searches by zone only.
+router.get('/profile', async (req: AuthRequest, res: Response) => {
+  try {
+    const sessionId = String(req.query.sessionId || '');
+    if (sessionId.length < 8) return res.json({ companyKnown: false, trades: [] });
+    const row = await db.query('SELECT siret, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
+    if (row.rows.length === 0) return res.json({ companyKnown: false, trades: [] });
+    const c = row.rows[0].company_data || {};
+    const slugs = tradeSlugsForCompany(c.ape, c.activity);
+    let trades: { slug: string; name: string }[] = [];
+    if (slugs.length > 0) {
+      const t = await db.query('SELECT slug, name FROM trades WHERE slug = ANY($1::text[])', [slugs]);
+      const bySlug = new Map(t.rows.map((r: any) => [r.slug, r.name]));
+      trades = slugs.filter((x) => bySlug.has(x)).map((x) => ({ slug: x, name: bySlug.get(x) as string }));
+    }
+    res.json({ companyKnown: true, siret: row.rows[0].siret, ape: c.ape || null, activity: c.activity || null, trades });
+  } catch (err: any) {
+    logger.error('SIRET profile error:', err);
+    res.status(500).json({ error: 'Failed to read company profile' });
+  }
+});
 
 router.get('/status', async (req: AuthRequest, res: Response) => {
   try {
