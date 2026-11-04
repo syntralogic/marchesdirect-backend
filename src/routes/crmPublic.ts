@@ -1,3 +1,4 @@
+import { parseCallbackMoment, withCallbackMoment } from '../utils/callbackMoment';
 import { reserveSlot, releaseBooking, attachBooking, upcomingBookingFor, slotInfo } from '../services/appointmentService';
 import { createHash } from 'crypto';
 import { Router, Request, Response } from 'express';
@@ -69,6 +70,7 @@ router.post(
     body('slotAt').optional({ checkFalsy: true }).isISO8601().withMessage('Créneau invalide.'),
     // The market (and optional lot) the request was made from, so the HubSpot deal carries md_market_* / md_lot_reference.
     body('opportunityId').optional({ checkFalsy: true }).isUUID().withMessage('Marché invalide.'),
+    body('callbackMoment').optional({ checkFalsy: true }).isIn(['maintenant', 'apres_midi', 'demain_matin']).withMessage('Moment invalide.'),
     body('lotLabel').optional({ checkFalsy: true }).isString().trim().isLength({ max: 200 }),
     body('idempotencyKey').optional({ checkFalsy: true }).isString().trim().isLength({ min: 8, max: 100 }).withMessage('Clé de requête invalide.'),
   ],
@@ -98,6 +100,7 @@ router.post(
         const o = await db.query('SELECT id FROM opportunities WHERE id = $1 AND deleted_at IS NULL', [req.body.opportunityId]);
         opportunityId = o.rows[0]?.id || null;
       }
+      const callbackMoment = parseCallbackMoment(req.body.callbackMoment);
       const lotLabel = opportunityId && typeof req.body.lotLabel === 'string' ? req.body.lotLabel.replace(/\s+/g, ' ').trim().slice(0, 200) || null : null;
       // Idempotency (guide v24 s.12): the same key = the same request. A retry after a
       // timeout / double-click returns the request that was already recorded.
@@ -163,20 +166,22 @@ router.post(
         bookingId = r.bookingId; slotDate = r.slotDate;
       }
       const slotNote = slotDate ? `Rendez-vous confirmé : ${slotInfo(slotDate).slotLabel}` : null;
-      const finalMessage = slotNote ? [message, slotNote].filter(Boolean).join('\n') : message;
+      // The callback moment is written into the message the team reads (e-mail, CRM note, HubSpot note) and kept as its own column.
+      const messageWithMoment = withCallbackMoment(message, callbackMoment);
+      const finalMessage = slotNote ? [messageWithMoment, slotNote].filter(Boolean).join('\n') : messageWithMoment;
       let result: any;
       try {
       result = await db.query(
         `INSERT INTO crm_leads
           (brand_id, first_name, last_name, email, phone, company_name, industry_trade,
-           location_city, location_region, lead_source, message, session_id, idempotency_key, appointment_mode, appointment_slot_at, opportunity_id, lot_label, crm_sync_status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 'pending')
+           location_city, location_region, lead_source, message, session_id, idempotency_key, appointment_mode, appointment_slot_at, opportunity_id, lot_label, callback_moment, crm_sync_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'pending')
          RETURNING id, created_at`,
         [
           brandId, firstName, lastName, email, phone, companyName,
           industryTrade, locationCity, locationRegion, leadSource || 'website_form', finalMessage, sessionId || null, insertKey,
           slotDate ? 'slot' : null, slotDate ? slotDate.toISOString() : null,
-          opportunityId, lotLabel,
+          opportunityId, lotLabel, callbackMoment,
         ]
       ).catch(async (e: any) => {
         // Two concurrent requests with the same key: the unique index lets one win; the other gets that row.
@@ -221,7 +226,7 @@ router.post(
         firstName, lastName, email, phone, companyName,
         industryTrade, locationCity, locationRegion,
         leadSource: leadSource || 'website_form',
-        message,
+        message: messageWithMoment,
       }).catch((err) => {
         logger.error('Unexpected error firing lead notification:', err);
       });
