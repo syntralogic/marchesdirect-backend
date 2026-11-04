@@ -1,4 +1,5 @@
 import { journeyLinkProperties } from './journeyLinkService';
+import { isTestCompany } from './companyProfileService';
 import { activeCrmSystem } from './crmSystem';
 import axios, { AxiosRequestConfig } from 'axios';
 import { db } from '../config/database';
@@ -315,9 +316,6 @@ export async function syncLeadToHubspot(lead: SyncLead): Promise<{ contactId: st
   const sessionIds: string[] = sessions.rows.map((r: any) => r.session_id);
   if (lead.session_id && !sessionIds.includes(lead.session_id)) sessionIds.push(lead.session_id);
 
-  const contactJourney = await journeyForSessions(sessionIds);
-  const contactId = await upsertContact(lead, contactJourney);
-
   // A lead keeps its original company. Historical records may only use a
   // dated selection at/before creation, never the latest company in the browser.
   const lookup = lead.siret
@@ -328,6 +326,12 @@ export async function syncLeadToHubspot(lead: SyncLead): Promise<{ contactId: st
           AND selected_at<=$2 ORDER BY selected_at DESC,id DESC LIMIT 1`, [lead.session_id,lead.created_at])
       : { rows: [] };
   const siret = lead.siret || lookup.rows[0]?.siret || null;
+  // 5 Nov : un contact rattaché à une entreprise de test (ZIENT LABS, VERIFRANCE HABITAT, 4060 INVEST, ENTREPRISE DEMO…)
+  // est lui-même marqué test, même si le formulaire n'a pas envoyé le drapeau : il sort des listes commerciales.
+  if (!lead.is_test && siret && isTestCompany(siret, clean(lookup.rows[0]?.company_data?.name) || lead.company_name)) lead = { ...lead, is_test: true };
+
+  const contactJourney = await journeyForSessions(sessionIds);
+  const contactId = await upsertContact(lead, contactJourney);
   if (!siret || !/^\d{14}$/.test(siret)) {
     const dealIdNoCompany = await syncDealForLead(lead, contactId, null);
     await syncVisitExtras(lead as any, { contactId, companyId: null, dealId: dealIdNoCompany });
