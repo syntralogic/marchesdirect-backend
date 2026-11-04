@@ -1,6 +1,8 @@
 import { Router, Response } from 'express';
 import { body, validationResult } from 'express-validator';
+import rateLimit from 'express-rate-limit';
 import axios from 'axios';
+import { suggestCompanies } from '../services/companySuggestService';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { lookupCompanyPresence, isPresenceConfigured } from '../services/companyPresenceService';
@@ -478,6 +480,31 @@ async function getCompanyWithProtection(
   return company;
 }
 
+
+// GET /api/siret/suggest?q= - Accueil "Par entreprise" autocomplete: up to 3
+// real companies from 3 typed characters (name) or a full SIREN/SIRET.
+// Free official API (see companySuggestService), nothing is saved and no paid
+// call is made: the visitor's CHOICE then goes through POST /confirm below,
+// unchanged (cache + per-IP throttle + session storage).
+const suggestLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: Number(process.env.SUGGEST_RATE_LIMIT_PER_MIN) || 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'suggest_rate_limited', suggestions: [] },
+});
+
+router.get('/suggest', suggestLimiter, async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await suggestCompanies(req.query.q);
+    res.set('Cache-Control', 'private, max-age=60');
+    res.json(result);
+  } catch (err: any) {
+    logger.error('SIRET suggest error:', err?.message || err);
+    // The UI falls back to "indiquez le SIRET (14 chiffres)": a hiccup here must never block the visitor.
+    res.status(502).json({ error: 'suggest_unavailable', suggestions: [] });
+  }
+});
 
 // flag per browser session (prototype V17, section 2.3), not per-opportunity:
 // once identified on any fiche, a visitor is recognized everywhere without
