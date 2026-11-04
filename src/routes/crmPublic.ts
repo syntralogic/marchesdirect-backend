@@ -57,7 +57,9 @@ router.post(
   [
     body('brandId').notEmpty().withMessage('brandId manquant'),
     // DEV-08: server-side validation of the same fields the forms mark as required.
-    body('firstName').isString().trim().notEmpty().withMessage('Le nom est requis.').bail()
+    // v26: the "coordonnées" forms (rappel, question) ask for a phone number only, so the name is optional;
+    // when it is given it is still validated. Email OR phone stays required below.
+    body('firstName').optional({ checkFalsy: true }).isString().trim()
       .isLength({ max: 100 }).withMessage('Le nom est trop long (100 caractères maximum).'),
     body('message').optional({ checkFalsy: true }).isString().isLength({ max: 5000 }).withMessage('Le message est trop long (5000 caractères maximum).'),
     body('email').optional({ checkFalsy: true }).trim().isEmail().withMessage("L'adresse e-mail n'est pas valide.").normalizeEmail(),
