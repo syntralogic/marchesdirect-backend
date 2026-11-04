@@ -1,5 +1,6 @@
 jest.mock('../../config/database', () => ({ db: { query: jest.fn() } }));
 jest.mock('axios', () => ({ __esModule: true, default: { request: jest.fn() } }));
+jest.mock('../hubspotVisitNoteService', () => ({ syncVisitExtras: jest.fn().mockResolvedValue(undefined), v26PropertiesEnabled: () => false })); // the visit note/task have their own tests
 
 import axios from 'axios';
 import { db } from '../../config/database';
