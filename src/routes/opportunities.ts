@@ -1,3 +1,4 @@
+import { buildCandidatesQuery, normaliseZone } from '../services/rankedListService';
 import { generateSlots, freeSlotDays, isOfferedSlot, formatSlotFr, APPOINTMENT_TZ } from '../utils/appointmentSlots';
 import { cached, createBoundedCache } from '../utils/ttlCache';
 import { createHash } from 'crypto';
@@ -13,7 +14,7 @@ import { buildSourceAnalysisSections } from '../utils/sourceAnalysisSections';
 import { tokenizeQuery, tsqueryAlternatives, isTradeWord, matchTermsOf, domainMismatchExclusionSqlPattern, lotMatchSqlPattern, canMatchInsideTitle } from '../utils/searchQuery';
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts, generateOpportunityAnalysisSections } from '../services/aiService';
 import { ingestOpportunityDocuments } from '../services/documentIngestionService';
-import { computeMatchScore } from '../services/matchScoreService';
+import { computeMatchScore, loadCompanyProfile } from '../services/matchScoreService';
 import { resolveTradeFromText, keywordsForSlugs } from '../services/tradeResolver';
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { sendAppointmentConfirmation } from '../services/appointmentConfirmationService';
@@ -1646,6 +1647,42 @@ router.get('/appointment-slots', async (_req: Request, res: Response) => {
   } catch (err: any) {
     logger.error('appointment-slots error:', err);
     res.status(500).json({ error: 'Impossible de charger les créneaux.' });
+  }
+});
+
+// GET /api/opportunities/ranked/candidates - écran 2 « Vos marchés »: markets of the identified company's trade and zone,
+// unscored (the page asks match-score for each percentage). Same gate as match-score: the company must be identified.
+router.get('/ranked/candidates', optionalAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    let companyId: string | null = null;
+    if (req.user?.email) {
+      const u = await db.query('SELECT company_id FROM users WHERE email = $1 AND deleted_at IS NULL', [req.user.email]);
+      companyId = u.rows[0]?.company_id || null;
+    }
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : '';
+    if (!companyId) {
+      const known = sessionId ? await db.query('SELECT 1 FROM siret_lookups WHERE session_id = $1', [sessionId]) : { rows: [] };
+      if (known.rows.length === 0) {
+        return res.status(403).json({ error: 'company_not_identified', message: 'Identifiez votre entreprise (SIRET) pour voir vos marchés.' });
+      }
+    }
+    const profile = await loadCompanyProfile(companyId, sessionId);
+    // "zone" = a department code, or "france" to widen; by default the company's own department.
+    const wantsFrance = typeof req.query.zone === 'string' && req.query.zone.trim().toLowerCase() === 'france';
+    const department = wantsFrance ? null : (normaliseZone(req.query.zone) ?? normaliseZone(profile?.department));
+    const trades = profile?.tradeSlugs || [];
+    if (trades.length === 0) {
+      return res.json({ items: [], total: 0, zone: department || 'france', reason: 'trade_unknown' });
+    }
+    const q = buildCandidatesQuery({ tradeSlugs: trades, department, limit: Number(req.query.limit) || 40 });
+    const [list, count] = await Promise.all([db.query(q.listSql, q.params), db.query(q.countSql, q.params)]);
+    res.json({
+      items: list.rows, total: count.rows[0]?.n || 0, zone: department || 'france',
+      company: { name: profile?.name || null, activity: profile?.activityText || null, city: profile?.city || null, department: profile?.department || null },
+    });
+  } catch (err: any) {
+    logger.error('Ranked candidates error:', err);
+    res.status(500).json({ error: 'Failed to load the ranked list' });
   }
 });
 
