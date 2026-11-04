@@ -718,7 +718,8 @@ router.post(
     // (client's 15 Sep audit) - require a real French line: leading 0
     // then 1-9, never a second 0.
     body('phone').matches(/^0[1-9]\d{8}$/).withMessage('Le téléphone doit contenir 10 chiffres.'),
-    body('email').isEmail().withMessage("L'e-mail n'est pas valide.").normalizeEmail(),
+    // v26 "coordonnées" form: the e-mail is optional (only the phone is required). When given it is validated as before.
+    body('email').optional({ checkFalsy: true }).isEmail().withMessage("L'e-mail n'est pas valide.").normalizeEmail(),
     body('opportunityId').optional({ checkFalsy: true }).isUUID(),
   ],
   async (req: AuthRequest, res: Response) => {
@@ -758,7 +759,7 @@ router.post(
 async function handleLeadCapture(
   req: AuthRequest,
   res: Response,
-  { sessionId, phone, email, opportunityId, lotLabel }: { sessionId: string; phone: string; email: string; opportunityId?: string; lotLabel?: string | null }
+  { sessionId, phone, email, opportunityId, lotLabel }: { sessionId: string; phone: string; email?: string | null; opportunityId?: string; lotLabel?: string | null }
 ) {
 
     const existing = await db.query('SELECT id, siret, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
@@ -781,7 +782,7 @@ async function handleLeadCapture(
 
     await db.query(
       `UPDATE siret_lookups SET phone = $1, email = $2, lead_captured_at = NOW() WHERE session_id = $3`,
-      [phone, email, sessionId]
+      [phone, email || null, sessionId]
     );
 
     const companyName = existing.rows[0].company_data?.name || null;
@@ -804,7 +805,8 @@ async function handleLeadCapture(
            FROM opportunities WHERE id = $1 AND deleted_at IS NULL`,
           [opportunityId]
         );
-        if (oppFactsResult.rows.length > 0 && companyName) {
+        // Without an e-mail address nothing is sent: the visitor downloads the PDF on the confirmation screen instead.
+        if (oppFactsResult.rows.length > 0 && companyName && email) {
           const o = oppFactsResult.rows[0];
           dossierEmailed = await sendPrefilledDossierEmail(email, {
             companyName,
@@ -840,17 +842,17 @@ async function handleLeadCapture(
             const brandResult = await db.query('SELECT id FROM brands ORDER BY created_at ASC LIMIT 1');
             brandId = brandResult.rows[0]?.id;
           }
-          const dup = await db.query(
-            `SELECT id FROM crm_leads WHERE opportunity_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
-            [opportunityId, email]
-          );
+          // A request is one lead per market + person: by e-mail when there is one, otherwise by this visitor's session.
+          const dup = email
+            ? await db.query(`SELECT id FROM crm_leads WHERE opportunity_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`, [opportunityId, email])
+            : await db.query(`SELECT id FROM crm_leads WHERE opportunity_id = $1 AND session_id = $2 AND lead_source = 'analysis_gate' LIMIT 1`, [opportunityId, sessionId]);
           if (dup.rows.length === 0 && brandId) {
             const insertResult = await db.query(
               `INSERT INTO crm_leads
                 (brand_id, email, phone, company_name, lead_source, opportunity_id, session_id, crm_sync_status, lot_label, utm_source, utm_campaign)
                VALUES ($1, $2, $3, $4, 'analysis_gate', $5, $6, 'pending', $7, $8, $9)
                RETURNING id`,
-              [brandId, email, phone, companyName, opportunityId, sessionId, lotLabel || null, cleanUtm(req.body?.utmSource, 100), cleanUtm(req.body?.utmCampaign, 150)]
+              [brandId, email || null, phone, companyName, opportunityId, sessionId, lotLabel || null, cleanUtm(req.body?.utmSource, 100), cleanUtm(req.body?.utmCampaign, 150)]
             );
             syncLeadToCrm(insertResult.rows[0].id).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
             scheduleFollowUps(insertResult.rows[0].id).catch(() => {});
@@ -884,7 +886,7 @@ async function loadPrefilledDossierInput(sessionId: string, opportunityId: strin
   }
   const { siret, company_data, email } = lookup.rows[0];
   const companyName = company_data?.name || null;
-  if (!companyName || !email) {
+  if (!companyName) {
     return { error: 'lead_not_captured' as const };
   }
 
@@ -971,6 +973,8 @@ router.post(
       if ('error' in result) {
         return res.status(409).json({ error: result.error, message: "Confirmez d'abord vos coordonnées pour recevoir ce document." });
       }
+      // No e-mail was given (it is optional): there is nothing to send to, the PDF is downloaded instead.
+      if (!result.email) return res.json({ sent: false });
       const sent = await sendPrefilledDossierEmail(result.email, result.input, { sessionId, opportunityId });
       res.json({ sent });
       // The delivery result changes the dossier status shown in the CRM deal: refresh that request's record.
