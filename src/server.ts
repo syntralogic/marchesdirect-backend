@@ -85,6 +85,16 @@ const getAllowedBrandDomains = async (): Promise<string[]> => {
   }
   return lastKnownBrandDomains;
 };
+const DEFAULT_PREVIEW_ORIGIN_REGEX = '^https://marche-direct-frontend(-[a-z0-9-]+-marche-direct)?\\.vercel\\.app$';
+let previewOriginRegex: RegExp | null | undefined;
+const isAllowedPreviewOrigin = (origin: string): boolean => {
+  if (previewOriginRegex === undefined) {
+    const raw = process.env.CORS_PREVIEW_ORIGIN_REGEX ?? DEFAULT_PREVIEW_ORIGIN_REGEX;
+    try { previewOriginRegex = raw ? new RegExp(raw) : null; }
+    catch (err) { logger.error(`Invalid CORS_PREVIEW_ORIGIN_REGEX, previews not allowed: ${err instanceof Error ? err.message : err}`); previewOriginRegex = null; }
+  }
+  return !!previewOriginRegex && previewOriginRegex.test(origin);
+};
 app.use(cors({
   origin: async (origin, callback) => {
     // No Origin header at all = same-origin navigation, curl, server-to-
@@ -100,6 +110,14 @@ app.use(cors({
     }
 
     if (allowed.has(origin)) return callback(null, true);
+    // 4 Nov: Vercel preview deployments (branch + PR aperçus) run on
+    // `https://<project>-<hash>-<team>.vercel.app` hostnames that are never
+    // in the brands table, so every preview silently failed on its first
+    // API call ("La liste n'a pas pu être chargée", SIRET lookup KO) and the
+    // client could not test a PR on his phone before merging. Allow the
+    // project's own preview hostnames; the pattern is overridable through
+    // CORS_PREVIEW_ORIGIN_REGEX if the Vercel project/team is ever renamed.
+    if (isAllowedPreviewOrigin(origin)) return callback(null, true);
     logger.warn(`CORS rejected origin: ${origin}`);
     callback(null, false);
   },
