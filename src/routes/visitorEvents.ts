@@ -16,6 +16,8 @@ export const HUBSPOT_EVENT_CODES = [
   'arrival','retour_arriere','coordonnees_saisies','demande_info',
   'offer_view', 'company_selected', 'analysis_started', 'analysis_completed',
   'dossier_preview', 'dossier_requested', 'callback_requested', 'appointment_booked',
+  // Refonte v26 additions (existing codes are never renamed): ranked list shown, new-market alert, 30-minute invitation.
+  'ranked_list_shown', 'alert_requested', 'invitation_30min_shown', 'invitation_30min_closed', 'invitation_30min_clicked',
 ];
 const cachedStats = createBoundedCache(2000);
 
