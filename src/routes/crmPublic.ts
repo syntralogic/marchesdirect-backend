@@ -1,3 +1,4 @@
+import { cleanUtm } from '../utils/utm';
 import { reserveSlot, releaseBooking, attachBooking, upcomingBookingFor, slotInfo } from '../services/appointmentService';
 import { createHash } from 'crypto';
 import { Router, Request, Response } from 'express';
@@ -56,7 +57,9 @@ router.post(
   [
     body('brandId').notEmpty().withMessage('brandId manquant'),
     // DEV-08: server-side validation of the same fields the forms mark as required.
-    body('firstName').isString().trim().notEmpty().withMessage('Le nom est requis.').bail()
+    // v26: the "coordonnées" forms (rappel, question) ask for a phone number only, so the name is optional;
+    // when it is given it is still validated. Email OR phone stays required below.
+    body('firstName').optional({ checkFalsy: true }).isString().trim()
       .isLength({ max: 100 }).withMessage('Le nom est trop long (100 caractères maximum).'),
     body('message').optional({ checkFalsy: true }).isString().isLength({ max: 5000 }).withMessage('Le message est trop long (5000 caractères maximum).'),
     body('email').optional({ checkFalsy: true }).trim().isEmail().withMessage("L'adresse e-mail n'est pas valide.").normalizeEmail(),
@@ -98,6 +101,8 @@ router.post(
         const o = await db.query('SELECT id FROM opportunities WHERE id = $1 AND deleted_at IS NULL', [req.body.opportunityId]);
         opportunityId = o.rows[0]?.id || null;
       }
+      const utmSource = cleanUtm(req.body.utmSource, 100);
+      const utmCampaign = cleanUtm(req.body.utmCampaign, 150);
       const lotLabel = opportunityId && typeof req.body.lotLabel === 'string' ? req.body.lotLabel.replace(/\s+/g, ' ').trim().slice(0, 200) || null : null;
       // Idempotency (guide v24 s.12): the same key = the same request. A retry after a
       // timeout / double-click returns the request that was already recorded.
@@ -169,14 +174,14 @@ router.post(
       result = await db.query(
         `INSERT INTO crm_leads
           (brand_id, first_name, last_name, email, phone, company_name, industry_trade,
-           location_city, location_region, lead_source, message, session_id, idempotency_key, appointment_mode, appointment_slot_at, opportunity_id, lot_label, crm_sync_status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 'pending')
+           location_city, location_region, lead_source, message, session_id, idempotency_key, appointment_mode, appointment_slot_at, opportunity_id, lot_label, utm_source, utm_campaign, crm_sync_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 'pending')
          RETURNING id, created_at`,
         [
           brandId, firstName, lastName, email, phone, companyName,
           industryTrade, locationCity, locationRegion, leadSource || 'website_form', finalMessage, sessionId || null, insertKey,
           slotDate ? 'slot' : null, slotDate ? slotDate.toISOString() : null,
-          opportunityId, lotLabel,
+          opportunityId, lotLabel, utmSource, utmCampaign,
         ]
       ).catch(async (e: any) => {
         // Two concurrent requests with the same key: the unique index lets one win; the other gets that row.

@@ -13,6 +13,9 @@ export const HUBSPOT_EVENT_CODES = [
   'offer_view', 'company_selected', 'analysis_started', 'analysis_completed',
   'dossier_preview', 'dossier_requested', 'callback_requested', 'appointment_booked',
 ];
+// Refonte v26 (écran 3): the "30 minutes offertes" invitation. Journal only; deliberately not in HUBSPOT_EVENT_CODES, so it
+// never feeds the HubSpot counters or the funnel.
+export const INVITATION_EVENT_CODES = ['invitation_30min_shown', 'invitation_30min_closed', 'invitation_30min_clicked'];
 const cachedStats = createBoundedCache(2000);
 
 // POST /api/visitor-events - fire-and-forget analytics ingestion (public,
@@ -29,7 +32,7 @@ router.post(
   '/',
   [
     body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
-    body('eventType').isString().trim().isIn(['search', 'view_opportunity', 'view_seo_page', 'company_identified', 'concordance_shown', 'form_started', 'request_submitted', ...HUBSPOT_EVENT_CODES]),
+    body('eventType').isString().trim().isIn(['search', 'view_opportunity', 'view_seo_page', 'company_identified', 'concordance_shown', 'form_started', 'request_submitted', ...HUBSPOT_EVENT_CODES, ...INVITATION_EVENT_CODES]),
     body('eventId').optional({ checkFalsy: true }).isString().trim().isLength({ min: 8, max: 100 }),
     body('occurredAt').optional({ checkFalsy: true }).isISO8601(),
     body('siret').optional({ checkFalsy: true }).matches(/^\d{14}$/),
@@ -108,6 +111,28 @@ router.get('/consultations/:opportunityId', async (req: Request, res: Response) 
   } catch (err: any) {
     logger.error('Consultations count error:', err);
     res.status(500).json({ error: 'Failed to fetch consultations count' });
+  }
+});
+
+// Fiche marché 3.9: "N dossiers préremplis demandés pour ce marché ces 7 derniers jours". REAL figure only: distinct
+// sessions with a dossier_requested event on this announcement over a rolling 7 days. Never invented; the page hides it below 2.
+router.get('/dossier-requests/:opportunityId', async (req: Request, res: Response) => {
+  try {
+    const { opportunityId } = req.params;
+    if (!isUuid(opportunityId)) return res.json({ count: 0 });
+    const count = await cachedStats(`dossier|${opportunityId}`, 60_000, async () => {
+      const r = await db.query(
+        `SELECT COUNT(DISTINCT session_id)::int AS n FROM visitor_events
+         WHERE event_type = 'dossier_requested' AND created_at >= NOW() - INTERVAL '7 days'
+           AND (opportunity_id = $1 OR event_data->>'opportunityId' = $1)`,
+        [opportunityId]
+      );
+      return r.rows[0]?.n || 0;
+    });
+    res.json({ count });
+  } catch (err: any) {
+    logger.error('Dossier requests count error:', err);
+    res.status(500).json({ error: 'Failed to fetch dossier requests count' });
   }
 });
 
