@@ -61,7 +61,7 @@ describe('toSuggestions', () => {
       siret: '12345678900011', name: 'VERIFRANCE HABITAT', city: 'NEUILLY-SUR-SEINE', department: '92', postal: '92200',
     });
     expect(out[0].activity).toContain('climatisation');
-    expect(out[0].metier).toBe('Plomberie / chauffage / climatisation');
+    expect(out[0].naf).toBe('43.22B');
     expect(out.map(s => s.siren)).toEqual(['123456789', '222222222', '333333333']);
   });
 
@@ -78,7 +78,6 @@ describe('toSuggestions', () => {
     const records = sirene.mapSireneResult(apiResult({ siege: { siret: '12345678900011', activite_principale: '99.99Z', code_postal: '75001', libelle_commune: 'PARIS', departement: '75' } }));
     const [s] = toSuggestions(records);
     expect(s.activity).toBeNull();
-    expect(s.metier).toBeNull();
   });
 });
 

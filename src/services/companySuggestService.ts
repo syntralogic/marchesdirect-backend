@@ -1,5 +1,4 @@
 import { fetchSirenePage, ProspectRecord } from './sireneClient';
-import { PROFESSIONS } from '../utils/prospectNaf';
 import { createBoundedCache } from '../utils/ttlCache';
 
 // Accueil "Par entreprise": as soon as the visitor has typed 3 characters of a company name
@@ -15,8 +14,8 @@ export interface CompanySuggestion {
   name: string;
   /** Official NAF/APE label when we know it, else null (never guessed). */
   activity: string | null;
-  /** Short métier label deduced from the APE code, null when the code is unknown. */
-  metier: string | null;
+  /** APE / NAF code (e.g. "43.22B"), so the page can deduce the métier itself. */
+  naf: string | null;
   city: string | null;
   postal: string | null;
   department: string | null;
@@ -67,7 +66,7 @@ export function toSuggestions(records: ProspectRecord[], wantedSiret?: string): 
     siren: r.siren,
     name: r.company_name,
     activity: r.activity_label,
-    metier: r.profession && r.profession !== 'autre' ? PROFESSIONS[r.profession] || null : null,
+    naf: r.naf_code,
     city: r.city,
     postal: r.postal_code,
     department: r.department,
