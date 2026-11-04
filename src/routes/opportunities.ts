@@ -1,3 +1,4 @@
+import { openCountDayKey } from '../utils/companySearchParams';
 import { generateSlots, freeSlotDays, isOfferedSlot, formatSlotFr, APPOINTMENT_TZ } from '../utils/appointmentSlots';
 import { cached, createBoundedCache } from '../utils/ttlCache';
 import { createHash } from 'crypto';
@@ -1387,6 +1388,20 @@ export async function warmOpportunityCounts(): Promise<void> {
     }
   }
 }
+
+// GET /api/opportunities/stats/open-count - the home page line "[N] marchés ouverts aujourd'hui en France". Same rule as
+// the guided journey (status 'active'), one real query a day (cached 24 h, key = day starting 06:00 Paris time).
+// On failure: 503 and no number - the page hides the whole line, it never shows a made-up value.
+router.get('/stats/open-count', async (_req: Request, res: Response) => {
+  try {
+    const day = openCountDayKey();
+    const count = await cached(`open-count:${day}`, 24 * 60 * 60 * 1000, async () => (await loadOpportunityCounts('active')).total);
+    res.set('Cache-Control', 'public, max-age=3600').json({ count, day });
+  } catch (err: any) {
+    logger.warn(`open-count failed: ${err?.message}`);
+    res.status(503).json({ error: 'open_count_unavailable' });
+  }
+});
 
 router.get('/stats/counts', async (req: Request, res: Response) => {
   try {

@@ -1,3 +1,4 @@
+import { searchParamsForCompany } from '../utils/companySearchParams';
 import { Router, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import axios from 'axios';
@@ -483,6 +484,22 @@ async function getCompanyWithProtection(
 // once identified on any fiche, a visitor is recognized everywhere without
 // re-entering their SIRET. This is what the frontend calls on load to
 // restore that state.
+// GET /api/siret/search-params?sessionId= - métier + zone deduced from the company recognised in this session (APE code
+// + head-office postal code), for the home page "Voir les marchés qui me correspondent" (client brief v26, 1.2).
+router.get('/search-params', async (req: AuthRequest, res: Response) => {
+  try {
+    const sessionId = String(req.query.sessionId || '');
+    if (sessionId.length < 8) return res.status(400).json({ error: 'sessionId required' });
+    const r = await db.query('SELECT siret, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'company_not_recognised' });
+    const c = r.rows[0].company_data || {};
+    res.json({ siret: r.rows[0].siret, ...searchParamsForCompany(c.ape, c.postal) });
+  } catch (err) {
+    logger.error('GET /siret/search-params failed:', err);
+    res.status(500).json({ error: 'search_params_failed' });
+  }
+});
+
 router.get('/status', async (req: AuthRequest, res: Response) => {
   try {
     const sessionId = req.query.sessionId as string;
