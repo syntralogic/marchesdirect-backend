@@ -454,6 +454,8 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // 18 Oct client brief: the lot the artisan is looking at travels with the request (dossier e-mail, CRM note), so
   // whoever calls back already knows which lot is concerned. Optional, free text, shown only when known.
   await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS lot_label TEXT`);
+  // When the visitor wants to be called back (maintenant / apres_midi / demain_matin). Additive only.
+  await step(`ALTER TABLE crm_leads ADD COLUMN IF NOT EXISTS callback_moment VARCHAR(20)`);
 
   // Regenerate search_vector to match the exact accent-insensitive
   // expression the search route needs (was to_tsvector('french',
