@@ -1379,6 +1379,7 @@ export async function warmOpportunityCounts(): Promise<void> {
     try {
       await loadOpportunityCounts();
       await loadOpportunityCounts('active');
+      await loadOpenToday();
       logger.info('✅ Opportunity counts cache warmed');
       return;
     } catch (err: any) {
@@ -1387,6 +1388,45 @@ export async function warmOpportunityCounts(): Promise<void> {
     }
   }
 }
+
+// "[N] marchés ouverts aujourd'hui en France · chiffre mis à jour chaque matin"
+// (Accueil). N is a REAL count, never a constant: open = the very rule the list uses to put a
+// notice before the closed ones (status 'active' AND no deadline, or deadline not yet passed),
+// same base conditions as /stats/counts. One query per Paris calendar day: the cache key carries
+// the date, so the first request of a new day recomputes and every other one is served from memory
+// (24 h TTL as a safety net). If the query fails the route answers 503 and the page hides the line.
+const parisDay = (d: Date = new Date()): string =>
+  new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+
+async function loadOpenToday(): Promise<{ count: number; asOf: string }> {
+  const asOf = parisDay();
+  const count = await cached(`open-today:${asOf}`, 24 * 60 * 60 * 1000, () => db.transaction(async (client) => {
+    await client.query('SET LOCAL statement_timeout = 60000');
+    const r = await client.query(
+      `SELECT COUNT(*)::int AS count
+       FROM opportunities o
+       LEFT JOIN data_sources ds ON o.source_id = ds.id
+       WHERE o.deleted_at IS NULL
+         AND COALESCE(o.status, '') != 'merged'
+         AND (ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))
+         AND o.status = 'active'
+         AND (o.deadline IS NULL OR o.deadline >= NOW())`
+    );
+    return Number(r.rows[0]?.count ?? 0);
+  }));
+  return { count, asOf };
+}
+
+router.get('/stats/open-today', async (_req: Request, res: Response) => {
+  try {
+    res.set('Cache-Control', 'public, max-age=300');
+    res.json(await loadOpenToday());
+  } catch (err: any) {
+    logger.error('Open-today count error:', err);
+    // 503, never a 0: the frontend hides the whole line rather than show a wrong number.
+    res.set('Cache-Control', 'no-store').set('Retry-After', '30').status(503).json({ error: 'Failed to load open count' });
+  }
+});
 
 router.get('/stats/counts', async (req: Request, res: Response) => {
   try {
