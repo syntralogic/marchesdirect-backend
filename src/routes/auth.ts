@@ -11,6 +11,7 @@ import {
   changePassword,
   requestMagicLink,
   verifyMagicLink,
+  MagicLinkError,
   enableMFA,
   verifyMFASetup,
   verifyMFALogin,
@@ -258,9 +259,11 @@ router.post(
 );
 
 // POST /api/auth/magic-link - client's 6 Sep brief: "il saisit son adresse
-// e-mail → il reçoit un lien de connexion sécurisé". Always returns success
-// regardless of whether the email exists (same non-enumeration reasoning as
-// password-reset/request above).
+// e-mail → il reçoit un lien de connexion sécurisé". Same answer whether the
+// address is known or not (no enumeration); an unknown address gets its
+// account created when the link is validated. `sent: false` + `reason`
+// when no e-mail really left (delivery paused / provider error) - the
+// front must never claim a link was sent in that case.
 router.post('/magic-link', [body('email').isEmail()], async (req: Request, res: Response) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
@@ -280,10 +283,15 @@ router.post('/magic-link/verify', [body('token').isString().notEmpty(), body('em
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
   try {
-    const result = await verifyMagicLink(req.body.token, req.body.email);
+    const brandId = await resolveBrandId(req);
+    const result = await verifyMagicLink(req.body.token, req.body.email, brandId);
     res.json(result);
   } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Ce lien de connexion est invalide ou a expiré.' });
+    // `code` ('invalid' | 'expired' | 'used') lets the landing page say the
+    // right thing and offer a new link; other errors stay generic.
+    const code = err instanceof MagicLinkError ? err.code : undefined;
+    logger.warn(`Magic link verify failed (${code || 'error'}) for ${String(req.body.email).toLowerCase()}`);
+    res.status(400).json({ error: err.message || 'Ce lien de connexion est invalide ou a expiré.', code });
   }
 });
 
