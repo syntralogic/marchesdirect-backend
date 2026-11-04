@@ -5,6 +5,7 @@ import { logger } from '../utils/logger';
 import { computeMatchScore } from './matchScoreService';
 import { RULES_VERSION } from './matchEngine';
 import { dossierStatusFor } from './deliveryLogService';
+import { callbackMomentLabel } from '../utils/requestFacts';
 
 // ============================================================================
 // HUBSPOT DEALS (client brief 31 Oct, part C)
@@ -54,6 +55,8 @@ export type DealLead = {
   lot_label?: string | null;
   session_id?: string | null;
   created_at?: Date | string | null;
+  callback_moment?: string | null;
+  is_test?: boolean | null;
 };
 
 // Only these origins are commercial requests; contact-form messages and chatbot leads never become deals.
@@ -198,6 +201,8 @@ export function buildDealProperties(args: {
     // without any record, a brand-new dossier request is simply 'requested'.
     ...(args.dossierStatus ? { md_dossier_status: args.dossierStatus } : forCreate && type === 'dossier' ? { md_dossier_status: 'requested' } : {}),
     md_appointment_outcome: outcome,
+    // Custom properties of the v26 refonte: written only once they exist in HubSpot (HUBSPOT_V26_PROPERTIES=1).
+    ...(process.env.HUBSPOT_V26_PROPERTIES === '1' ? { md_callback_moment: callbackMomentLabel(lead.callback_moment), md_is_test: lead.is_test ? 'true' : null } : {}),
   });
 }
 

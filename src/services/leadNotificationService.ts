@@ -1,6 +1,7 @@
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { sendEmail } from './emailService';
+import { callbackMomentLabel } from '../utils/requestFacts';
 
 // Until now a submitted contact/callback/lead form only landed in crm_leads
 // (and the CRM sync) - nobody on the team was told. This emails the team the
@@ -19,6 +20,7 @@ export interface LeadForNotification {
   locationRegion?: string | null;
   leadSource?: string | null;
   message?: string | null;
+  callbackMoment?: string | null;
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -35,6 +37,9 @@ const SOURCE_LABELS: Record<string, string> = {
   contact_form: 'Formulaire de contact',
   website_form: 'Formulaire du site',
   callback_request: 'Demande de rappel',
+  callback_modal: 'Demande de rappel',
+  appointment_modal: 'Demande de rendez-vous',
+  alert_request: 'Alerte nouveaux marchés',
 };
 
 // Order: LEAD_NOTIFICATION_EMAILS env (comma separated) -> support email
@@ -83,6 +88,7 @@ export const buildLeadEmail = (lead: LeadForNotification) => {
   add('Métier', lead.industryTrade);
   add('Localisation', [lead.locationCity, lead.locationRegion].filter(Boolean).join(', '));
   add('Origine', sourceLabel);
+  add('Rappel souhaité', callbackMomentLabel(lead.callbackMoment));
 
   const table = rows
     .map(
@@ -144,7 +150,7 @@ export const notifyTeamOfNewLead = async (lead: LeadForNotification): Promise<vo
 export const retryFailedLeadNotifications = async (limit = 20): Promise<number> => {
   const result = await db.query(
     `SELECT id, first_name, last_name, email, phone, company_name, industry_trade,
-            location_city, location_region, lead_source, message
+            location_city, location_region, lead_source, message, callback_moment
      FROM crm_leads
      WHERE notification_status IN ('failed', 'no_recipient')
        AND notification_attempts < 5
@@ -166,6 +172,7 @@ export const retryFailedLeadNotifications = async (limit = 20): Promise<number> 
       locationRegion: r.location_region,
       leadSource: r.lead_source,
       message: r.message,
+      callbackMoment: r.callback_moment,
     });
   }
   return result.rows.length;

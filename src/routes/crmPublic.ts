@@ -12,6 +12,7 @@ import { applyContactChoice, parseContactMode } from '../services/contactPrefere
 import { toE164French } from '../services/smsService';
 import { notifyTeamOfNewLead } from '../services/leadNotificationService';
 import { isValidLeadPhone } from '../utils/leadValidation';
+import { CALLBACK_MOMENTS, parseCallbackMoment, isTestRequest } from '../utils/requestFacts';
 
 // Contre-audit follow-up: crm_leads.phone was stored exactly as typed
 // ("06 00 00 00 00", "0033600000000", "+33 6 00 00 00 00", ...), so the
@@ -71,6 +72,9 @@ router.post(
     // The market (and optional lot) the request was made from, so the HubSpot deal carries md_market_* / md_lot_reference.
     body('opportunityId').optional({ checkFalsy: true }).isUUID().withMessage('Marché invalide.'),
     body('lotLabel').optional({ checkFalsy: true }).isString().trim().isLength({ max: 200 }),
+    // v26: the moment chosen in the callback form (shown in the team e-mail and the HubSpot note); isTest marks preview/test data.
+    body('callbackMoment').optional({ checkFalsy: true }).isIn([...CALLBACK_MOMENTS]).withMessage('Moment de rappel invalide.'),
+    body('isTest').optional({ checkFalsy: true }).isBoolean(),
     body('idempotencyKey').optional({ checkFalsy: true }).isString().trim().isLength({ min: 8, max: 100 }).withMessage('Clé de requête invalide.'),
   ],
   async (req: Request, res: Response) => {
@@ -198,6 +202,13 @@ router.post(
         return res.status(200).json({ success: true, id: result.rows[0].id, duplicate: true, ...recordedInfo(result.rows[0].created_at) });
       }
       if (bookingId) await attachBooking(bookingId, result.rows[0].id);
+      // v26: callback moment + test marker, written before the CRM sync below reads the row.
+      const callbackMoment = parseCallbackMoment(req.body.callbackMoment);
+      const isTest = isTestRequest(req.body.isTest);
+      if (callbackMoment || isTest) {
+        await db.query('UPDATE crm_leads SET callback_moment = $2, is_test = $3 WHERE id = $1', [result.rows[0].id, callbackMoment, isTest])
+          .catch((err: any) => logger.error('Lead v26 fields not saved (non-fatal):', err));
+      }
 
       // Intentionally return only id/created_at, not the full row - this is a
       // public endpoint, no need to echo back internal CRM sync fields.
@@ -225,6 +236,7 @@ router.post(
         industryTrade, locationCity, locationRegion,
         leadSource: leadSource || 'website_form',
         message,
+        callbackMoment,
       }).catch((err) => {
         logger.error('Unexpected error firing lead notification:', err);
       });

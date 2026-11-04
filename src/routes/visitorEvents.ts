@@ -15,6 +15,12 @@ export const HUBSPOT_EVENT_CODES = [
   // v26 refonte (3 Nov): ranked list shown, alert request, the "30 minutes offertes" invitation
   'ranked_list_shown', 'alert_requested', 'invitation_30min_shown', 'invitation_30min_closed', 'invitation_30min_clicked',
 ];
+// Social proof (refonte v26, 2.5 / 3.9). SOCIAL_PROOF_MODE=demo returns a RANDOM figure so the wording can be judged in the preview
+// (consultations 2-9, dossiers 1-5). Anything else - including unset - is 'real': figures come from visitor_events only, and
+// a figure under 2 is reported as not visible. Never set 'demo' on the production server.
+const socialProofMode = (): 'demo' | 'real' => (process.env.SOCIAL_PROOF_MODE === 'demo' ? 'demo' : 'real');
+const randomBetween = (min: number, max: number) => min + Math.floor(Math.random() * (max - min + 1));
+const MIN_VISIBLE = 2;
 const cachedStats = createBoundedCache(2000);
 
 // POST /api/visitor-events - fire-and-forget analytics ingestion (public,
@@ -81,6 +87,10 @@ router.get('/consultations/:opportunityId', async (req: Request, res: Response) 
     const lang: ConsultationLang = req.query.lang === 'en' ? 'en' : 'fr';
     const own = typeof req.query.sessionId === 'string' && req.query.sessionId.length >= 8 && req.query.sessionId.length <= 100 ? req.query.sessionId : null;
     if (!isUuid(opportunityId)) return res.json({ count: 0, indicator: null });
+    if (socialProofMode() === 'demo') {
+      const n = randomBetween(2, 9);
+      return res.json({ count: n, mode: 'demo', indicator: { kind: 'today', unit: 'companies', value: n, label: `${n} entreprises ont consulté ce marché aujourd’hui` } });
+    }
     // Real tracking only (view_opportunity events of THIS announcement). The caller's own session is excluded so a
     // visitor never counts himself; sessions with a SIRET lookup are identified companies, the others plain visits.
     const stats = await cachedStats(`${opportunityId}|${own || ''}`, 60_000, async () => {
@@ -118,7 +128,8 @@ router.get('/consultations/:opportunityId', async (req: Request, res: Response) 
 router.get('/dossier-requests/:opportunityId', async (req: Request, res: Response) => {
   try {
     const { opportunityId } = req.params;
-    if (!isUuid(opportunityId)) return res.json({ count: 0 });
+    if (!isUuid(opportunityId)) return res.json({ count: 0, visible: false, mode: socialProofMode() });
+    if (socialProofMode() === 'demo') { const n = randomBetween(1, 5); return res.json({ count: n, visible: n >= MIN_VISIBLE, mode: 'demo' }); }
     const stats = await cachedStats(`dossiers|${opportunityId}`, 60_000, async () => {
       const r = await db.query(
         `SELECT COUNT(DISTINCT session_id)::int AS n FROM visitor_events
@@ -127,7 +138,8 @@ router.get('/dossier-requests/:opportunityId', async (req: Request, res: Respons
       );
       return { n: r.rows[0]?.n || 0 } as any;
     });
-    res.json({ count: (stats as any).n || 0 });
+    const n = (stats as any).n || 0;
+    res.json({ count: n, visible: n >= MIN_VISIBLE, mode: 'real' });
   } catch (err: any) {
     logger.error('Dossier requests count error:', err);
     res.status(500).json({ error: 'Failed to fetch dossier requests count' });
