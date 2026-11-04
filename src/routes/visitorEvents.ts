@@ -13,6 +13,8 @@ export const HUBSPOT_EVENT_CODES = [
   'offer_view', 'company_selected', 'analysis_started', 'analysis_completed',
   'dossier_preview', 'dossier_requested', 'callback_requested', 'appointment_booked',
 ];
+// Refonte v26 (écran 2): the ranked list was shown (SIRET, number of markets, best three percentages). Journal only.
+export const RANKED_LIST_EVENT_CODES = ['ranked_list_shown'];
 const cachedStats = createBoundedCache(2000);
 
 // POST /api/visitor-events - fire-and-forget analytics ingestion (public,
@@ -29,7 +31,7 @@ router.post(
   '/',
   [
     body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
-    body('eventType').isString().trim().isIn(['search', 'view_opportunity', 'view_seo_page', 'company_identified', 'concordance_shown', 'form_started', 'request_submitted', ...HUBSPOT_EVENT_CODES]),
+    body('eventType').isString().trim().isIn(['search', 'view_opportunity', 'view_seo_page', 'company_identified', 'concordance_shown', 'form_started', 'request_submitted', ...HUBSPOT_EVENT_CODES, ...RANKED_LIST_EVENT_CODES]),
     body('eventId').optional({ checkFalsy: true }).isString().trim().isLength({ min: 8, max: 100 }),
     body('occurredAt').optional({ checkFalsy: true }).isISO8601(),
     body('siret').optional({ checkFalsy: true }).matches(/^\d{14}$/),
