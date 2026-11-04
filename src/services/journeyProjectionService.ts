@@ -3,7 +3,12 @@ import {describeOffer,distinctTimelineEvents,hasOfferTitle,offerUrl} from './jou
 import { syncVisitNotes } from './visitNoteService';
 import { buildCompanyProfile,buildCompanyScore,isTestCompany } from './companyProfileService';
 import { hubspotRequest,journeySchemaReady } from './hubspotJourneySchema';
-export const STEP_LABELS:Record<string,string>={arrival:'Arrivée',search:'Recherche',offer_view:'Annonce consultée',view_opportunity:'Annonce consultée',company_selected:'SIRET saisi',company_identified:'Entreprise identifiée',analysis_started:'Analyse commencée',analysis_completed:'Analyse réalisée',retour_arriere:'Retour arrière',coordonnees_saisies:'Coordonnées laissées',contact_details:'Coordonnées laissées',demande_info:'Simple renseignement demandé',dossier_preview:'Aperçu du dossier',dossier_requested:'Dossier demandé',callback_requested:'Rappel demandé',appointment_booked:'Rendez-vous réservé'};
+export const STEP_LABELS:Record<string,string>={arrival:'Arrivée',search:'Recherche',offer_view:'Annonce consultée',view_opportunity:'Annonce consultée',company_selected:'SIRET saisi',company_identified:'Entreprise identifiée',analysis_started:'Analyse commencée',analysis_completed:'Analyse réalisée',retour_arriere:'Retour arrière',coordonnees_saisies:'Coordonnées laissées',contact_details:'Coordonnées laissées',demande_info:'Simple renseignement demandé',dossier_preview:'Aperçu du dossier',dossier_requested:'Dossier demandé',callback_requested:'Rappel demandé',appointment_booked:'Rendez-vous demandé',
+ // 5 Nov (poste de travail HubSpot) : codes v26 jusque-là affichés « Étape enregistrée ».
+ ranked_list_shown:'Liste de marchés affichée',concordance_shown:'Pourcentage affiché',alert_requested:'Alerte nouveaux marchés demandée',invitation_30min_clicked:'Invitation 30 minutes acceptée',view_seo_page:'Page consultée'};
+// Événements techniques sans valeur pour Elena : jamais dans le résumé (ils restent dans la base du site).
+const HIDDEN_FROM_TIMELINE=new Set(['invitation_30min_shown','invitation_30min_closed','request_submitted','form_started']);
+const searchLabel=(e:any)=>{const d=e.event_data||{};const q=clean(d.q||d.query||d.trade,80);const z=clean(d.location||d.department||d.zone,40);return q||z?` : ${[q,z].filter(Boolean).join(' · ')}`:'';};
 export {isTestCompany} from './companyProfileService';
 const stamp=(d:any)=>new Date(d).toLocaleString('fr-FR',{timeZone:'Europe/Paris',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}).replace(',','').replace(':','h');
 const clean=(v:any,max=250)=>typeof v==='string'?v.trim().slice(0,max):'';
@@ -16,10 +21,10 @@ export function projectJourney(events:any[],scores:any[],firstSelectedAt:any,now
  const lastRequest=[...events].reverse().find(e=>choices[e.event_type]);
  const last=events[events.length-1];
  const abandoned=!!last&&now.getTime()-new Date(last.at).getTime()>=30*60*1000&&(!lastRequest||new Date(last.at).getTime()>new Date(lastRequest.at).getTime());
- const timeline=distinctTimelineEvents(events).filter(e=>!['offer_view','view_opportunity'].includes(e.event_type)||hasOfferTitle(e)).slice(-100).map(e=>{
+ const timeline=distinctTimelineEvents(events).filter(e=>!HIDDEN_FROM_TIMELINE.has(e.event_type)&&(!['offer_view','view_opportunity'].includes(e.event_type)||hasOfferTitle(e))).slice(-100).map(e=>{
   const title=` : ${describeOffer(e,now)}`;
   const attribution=e.event_type==='arrival'?(source?` via ${source}${campaign?' · '+campaign:''}`:' (source non renseignée)'):'';
-  return {at:e.at,text:`${stamp(e.at)} – ${STEP_LABELS[e.event_type]||'Étape enregistrée'}${['offer_view','view_opportunity'].includes(e.event_type)?title:''}${attribution}`};
+  return {at:e.at,text:`${stamp(e.at)} – ${STEP_LABELS[e.event_type]||'Étape enregistrée'}${['offer_view','view_opportunity'].includes(e.event_type)?title:e.event_type==='search'?searchLabel(e):''}${attribution}`};
  });
  for(const s of scores.slice(-20))if(typeof s.compatibility_score==='number'&&s.score_computed_at&&hasOfferTitle(s))timeline.push({at:s.score_computed_at,text:`${stamp(s.score_computed_at)} – Score ${s.compatibility_score} % sur ${describeOffer(s,now)}`});
  const lines=timeline.sort((a,b)=>new Date(a.at).getTime()-new Date(b.at).getTime()).map(x=>x.text);
