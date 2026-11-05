@@ -394,6 +394,8 @@ async function searchOpportunities(req: Request, res: Response) {
       status,        // 'active' | 'expired' | 'awarded' | 'cancelled' (comma-separated for multiple)
       nature,        // R02: 'travaux' | 'fournitures' | 'etudes' | 'mixte' | 'services' (comma-separated).
                       // Explicit nature-of-prestation filter - see naturePrestation.ts.
+      deadline_within, // 5 Nov (volet « Affiner ») : '7' | '30' = réponse attendue sous N jours ; 'later' = au-delà de 30 jours
+      include_unknown_value, // 5 Nov : '1' = avec min/max_value, garder les marchés sans montant annoncé (sinon la moitié des marchés publics disparaît)
       recent_days,   // client's filter list ("marchés nouveaux") - publication_date within N days,
                       // independent of status: a just-published notice can still be 'active' whether
                       // or not it's "new", so this has to be its own filter, not folded into status.
@@ -864,6 +866,12 @@ async function searchOpportunities(req: Request, res: Response) {
     const lngNum = parseFloat(lng);
     const radiusNum = parseFloat(radius_km);
     const hasRadiusSearch = !isNaN(latNum) && !isNaN(lngNum) && !isNaN(radiusNum) && radiusNum > 0;
+    // 5 Nov (volet « Affiner ») : distance en km renvoyée sur chaque carte et tri « le plus proche ». Les coordonnées sont
+    // des nombres validés, insérés en littéraux : l'ORDER BY et le SELECT ne peuvent pas ajouter de paramètres, le
+    // COUNT réutilise exactement la même liste de paramètres que le WHERE.
+    const distanceExpr = hasRadiusSearch
+      ? `(6371 * acos(LEAST(1, GREATEST(-1, cos(radians(${latNum})) * cos(radians(o.location_latitude)) * cos(radians(o.location_longitude) - radians(${lngNum})) + sin(radians(${latNum})) * sin(radians(o.location_latitude))))))`
+      : null;
 
     if (hasRadiusSearch) {
       // Real distance filter, not a text match - a visitor searching
@@ -947,13 +955,21 @@ async function searchOpportunities(req: Request, res: Response) {
     if (min_value && max_value && parseFloat(min_value) > parseFloat(max_value)) {
       return res.status(400).json({ error: 'Le montant minimum doit être inférieur ou égal au montant maximum.' });
     }
+    const keepUnknownValue = include_unknown_value === '1';
     if (min_value) {
-      conditions.push(`o.estimated_value >= $${idx++}`);
+      conditions.push(keepUnknownValue ? `(o.estimated_value IS NULL OR o.estimated_value >= $${idx++})` : `o.estimated_value >= $${idx++}`);
       params.push(min_value);
     }
     if (max_value) {
-      conditions.push(`o.estimated_value <= $${idx++}`);
+      conditions.push(keepUnknownValue ? `(o.estimated_value IS NULL OR o.estimated_value <= $${idx++})` : `o.estimated_value <= $${idx++}`);
       params.push(max_value);
+    }
+    // 5 Nov : « Réponse attendue » (sous 7 jours, sous 30 jours, plus de 30 jours). Une date limite absente n'est
+    // jamais comptée comme proche ; elle n'apparaît que dans « toutes dates ».
+    if (deadline_within === '7' || deadline_within === '30') {
+      conditions.push(`o.deadline IS NOT NULL AND o.deadline >= NOW() AND o.deadline <= NOW() + INTERVAL '${deadline_within === '7' ? 7 : 30} days'`);
+    } else if (deadline_within === 'later') {
+      conditions.push(`o.deadline IS NOT NULL AND o.deadline > NOW() + INTERVAL '30 days'`);
     }
     if (status) {
       // Only filters by status when the caller explicitly asks for one -
@@ -1091,6 +1107,12 @@ async function searchOpportunities(req: Request, res: Response) {
       // relevance has no business ranking it ahead of the one thing this
       // sort promises.
       orderClause = DEFAULT_ORDER;
+    } else if (sort === 'distance' && distanceExpr) {
+      // 5 Nov : « Le plus proche » (volet Affiner), seulement avec une position ; sinon l'ordre par défaut.
+      orderClause = `${distanceExpr} ASC, ${DEFAULT_ORDER}`;
+    } else if (sort === 'amount') {
+      // 5 Nov : « Montant » : les plus gros marchés d'abord, ceux sans montant en dernier.
+      orderClause = `o.estimated_value DESC NULLS LAST, ${DEFAULT_ORDER}`;
     } else if (sort === 'recent') {
       orderClause = `o.publication_date DESC NULLS LAST, o.id ASC`;
     } else if (sort === 'match') {
@@ -1160,7 +1182,8 @@ async function searchOpportunities(req: Request, res: Response) {
               -- R02: resolved nature, so the card can say "Fournitures" out loud.
               np.nature AS nature_prestation,
               -- 1 Oct client request: templated catalogue rows are demonstration examples.
-              (ds.code = 'editorial_catalog') AS is_demo`;
+              (ds.code = 'editorial_catalog') AS is_demo${distanceExpr ? `,
+              ${distanceExpr} AS distance_km` : ''}`;
     const SCOPE_JOINS = `LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
        LEFT JOIN trades t ON o.trade_id = t.id
        LEFT JOIN data_sources ds ON o.source_id = ds.id`;
