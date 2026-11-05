@@ -824,8 +824,8 @@ async function handleLeadCapture(
     if (opportunityId) {
       try {
         const oppFactsResult = await db.query(
-          `SELECT title, buyer_name, source_reference, location_city, deadline, estimated_value, currency, status
-           FROM opportunities WHERE id = $1 AND deleted_at IS NULL`,
+          `SELECT o.title, o.buyer_name, o.source_reference, o.location_city, o.deadline, o.estimated_value, o.currency, o.status, ot.code AS journey
+           FROM opportunities o LEFT JOIN opportunity_types ot ON ot.id = o.opportunity_type_id WHERE o.id = $1 AND o.deleted_at IS NULL`,
           [opportunityId]
         );
         // Without an e-mail address nothing is sent: the visitor downloads the PDF on the confirmation screen instead.
@@ -843,6 +843,7 @@ async function handleLeadCapture(
             estimatedValue: o.estimated_value ? Number(o.estimated_value) : null,
             currency: o.currency,
             isClosed: isOpportunityClosed({ status: o.status, deadline: o.deadline }),
+            journey: o.journey || null, deadlineAt: o.deadline ? new Date(o.deadline) : null, opportunityId,
           }, { sessionId, opportunityId, siret: companySiret });
         }
       } catch (err) {
@@ -935,14 +936,15 @@ async function loadPrefilledDossierInput(sessionId: string, opportunityId: strin
   }
 
   const oppResult = await db.query(
-    `SELECT title, buyer_name, source_reference, location_city, deadline, estimated_value, currency, status
-     FROM opportunities WHERE id = $1 AND deleted_at IS NULL`,
+    `SELECT o.title, o.buyer_name, o.source_reference, o.location_city, o.deadline, o.estimated_value, o.currency, o.status, ot.code AS journey
+     FROM opportunities o LEFT JOIN opportunity_types ot ON ot.id = o.opportunity_type_id WHERE o.id = $1 AND o.deleted_at IS NULL`,
     [opportunityId]
   );
   if (oppResult.rows.length === 0) {
     return { error: 'opportunity_not_found' as const };
   }
   const o = oppResult.rows[0];
+  const lot = await db.query('SELECT lot_label FROM crm_leads WHERE session_id = $1 AND opportunity_id = $2 AND lot_label IS NOT NULL ORDER BY created_at DESC LIMIT 1', [sessionId, opportunityId]).catch(() => ({ rows: [] as any[] }));
 
   return {
     email,
@@ -957,6 +959,12 @@ async function loadPrefilledDossierInput(sessionId: string, opportunityId: strin
       estimatedValue: o.estimated_value ? Number(o.estimated_value) : null,
       currency: o.currency,
       isClosed: isOpportunityClosed({ status: o.status, deadline: o.deadline }),
+      journey: o.journey || null,
+      deadlineAt: o.deadline ? new Date(o.deadline) : null,
+      opportunityId,
+      lotLabel: lot.rows[0]?.lot_label || null,
+      company: company_data ? { legal: company_data.legal || null, created: company_data.created || null, address: company_data.address || null, city: company_data.city || null,
+        postal: company_data.postal || null, director: company_data.director || null, employees: company_data.employees || null, ape: company_data.ape || null, activity: company_data.activity || null } : null,
     },
   };
 }

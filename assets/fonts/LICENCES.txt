@@ -1,0 +1,3 @@
+Polices embarquées dans le dossier PDF.
+Poppins : SIL Open Font License 1.1 (Indian Type Foundry).
+Liberation Sans : SIL Open Font License 1.1 (Red Hat).

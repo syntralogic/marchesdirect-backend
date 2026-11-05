@@ -1,5 +1,6 @@
 import { recordDossierGeneration } from './dossierStateService';
 import PDFDocument from 'pdfkit';
+import { generateDossierPdfV2, DossierKind, DossierV2Input } from './dossierPdfV2';
 import { logger } from '../utils/logger';
 import { deliverEmail, recordDelivery, DeliveryContext } from './deliveryLogService';
 
@@ -36,6 +37,19 @@ export interface PrefilledDossierInput {
   // DEV-02/DEV-09: true when the marché is closed (declared status or deadline
   // passed) at generation time - the document must not promise an open candidature.
   isClosed?: boolean;
+  // v2 (5 nov.) : type de marché, fiche entreprise et date limite exacte pour le dossier adapté.
+  journey?: string | null;
+  company?: DossierV2Input['company'];
+  deadlineAt?: Date | null;
+  opportunityId?: string | null;
+}
+
+export const dossierKindFor = (journey?: string | null): DossierKind =>
+  journey === 'subcontracting' ? 'st' : journey === 'tender' ? 'prive' : 'public';
+export function dossierRef(opportunityId?: string | null, now = new Date()): string {
+  const p = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/Paris' }));
+  const tail = (opportunityId || '').replace(/[^0-9a-f]/gi, '').slice(0, 4).toUpperCase() || '0000';
+  return `MD-${String(p.getFullYear()).slice(2)}${String(p.getMonth() + 1).padStart(2, '0')}-${tail}`;
 }
 
 function escapeHtml(v: string): string {
@@ -48,7 +62,26 @@ function escapeHtml(v: string): string {
 const C = { navy: '#0A1628', navy2: '#142B4A', orange: '#F97316', orangeDark: '#C2410C', ink: '#0A1628', grey: '#4B5B70', light: '#F2F5F9', line: '#D6E0EC', green: '#15803D', red: '#B42318' };
 const pdfText = (v: string) => v.replace(/[\u202f\u00a0]/g, ' ').replace(/[\u2713\u2714]/g, '').replace(/[\u2018]/g, "'");
 
-export function generatePrefilledDossierPdf(input: PrefilledDossierInput): Promise<Buffer> {
+// Point d'entrée : dossier v2 adapté au type de marché ; en cas d'erreur, ancien gabarit (jamais de dossier perdu).
+export async function generatePrefilledDossierPdf(input: PrefilledDossierInput): Promise<Buffer> {
+  if (process.env.DOSSIER_PDF_V2 !== 'false') {
+    try {
+      const base = (process.env.FRONTEND_URL || 'https://www.marchesdirect.fr').trim().replace(/\/$/, '');
+      return await generateDossierPdfV2({
+        kind: dossierKindFor(input.journey), ref: dossierRef(input.opportunityId),
+        url: input.opportunityId ? `${base}/mon-dossier/${input.opportunityId}` : `${base}/tableau-de-bord`,
+        companyName: input.companyName, siret: input.siret, company: input.company || null, title: input.opportunityTitle, lotLabel: input.lotLabel,
+        buyerName: input.buyerName, reference: input.reference, locationCity: input.locationCity, deadline: input.deadlineAt || null,
+        estimatedValue: input.estimatedValue, isClosed: input.isClosed,
+      });
+    } catch (err) {
+      logger.error('[Dossier PDF v2] échec, ancien gabarit utilisé :', err);
+    }
+  }
+  return generateLegacyDossierPdf(input);
+}
+
+function generateLegacyDossierPdf(input: PrefilledDossierInput): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'A4', margins: { top: 50, bottom: 60, left: 50, right: 50 }, bufferPages: true, info: { Title: `Dossier prérempli - ${input.companyName}`, Author: 'Marchés Direct' } });
     const chunks: Buffer[] = [];
