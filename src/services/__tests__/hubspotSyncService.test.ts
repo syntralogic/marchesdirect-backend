@@ -52,10 +52,10 @@ describe('syncLeadToHubspot', () => {
   const journalRows = () => {
     // journeyForSessions = 3 queries (counts, step, search); called once for the contact, once for the company
     q.mockResolvedValueOnce({ rows: [{ session_id: 's1' }] })                                   // sessions of this e-mail
+     .mockResolvedValueOnce({ rows: [{ siret: '12345678901234', company_data: { name: 'ACME SARL' } }] }) // lookup (read before the contact journey: test-company check)
      .mockResolvedValueOnce({ rows: [{ offer_views: 3, analyses: 1, last_activity: '2026-10-30T10:00:00Z' }] })
      .mockResolvedValueOnce({ rows: [{ event_type: 'analysis_completed' }] })
      .mockResolvedValueOnce({ rows: [{ event_data: { q: 'isolation', location: 'Lyon' } }] })
-     .mockResolvedValueOnce({ rows: [{ siret: '12345678901234', company_data: { name: 'ACME SARL' } }] }) // lookup
      .mockResolvedValueOnce({ rows: [{ session_id: 's1' }, { session_id: 's2' }] })              // every visitor of that SIRET
      .mockResolvedValueOnce({ rows: [{ offer_views: 7, analyses: 2, last_activity: '2026-10-30T11:00:00Z' }] })
      .mockResolvedValueOnce({ rows: [{ event_type: 'offer_view' }] })
