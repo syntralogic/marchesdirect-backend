@@ -53,6 +53,7 @@ export function normDeptCode(v: unknown): string | null {
   const d = /^\d$/.test(s) ? `0${s}` : s;
   return DEPARTMENTS[d] ? d : null;
 }
+const decodeEntities = (v: string) => v.replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
 const uniq = <T>(a: T[]) => [...new Set(a)];
 
 /** Débuts d'adresse (voie, zone, bâtiment) : jamais une commune. */
@@ -181,7 +182,7 @@ export function extractNoticeLocation(raw: any): NoticeLocation {
     let execText: string | null = null; const communes: ExecCommune[] = []; const depts: string[] = [];
     const le = walk(root, 'lieuExecution')[0];
     const lel = walk(root, 'lieuExecutionLivraison')[0];
-    if (typeof le === 'string') execText = le.trim() || null;
+    if (typeof le === 'string') execText = decodeEntities(le).trim() || null;
     else if (le && typeof le === 'object') execText = [le.nom, le.libelle, le.code].filter(Boolean).join(' ') || null;
     if (lel && typeof lel === 'object') {
       const lcp = lel.cp ? String(lel.cp) : null; const lv = lel.ville;

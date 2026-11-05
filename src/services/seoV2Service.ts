@@ -344,6 +344,14 @@ export async function topLinks(journey?: string) {
 // Les 8 464 pages seo_pages générées automatiquement ont des adresses /pages/:slug et des « villes » qui sont souvent
 // des noms d'acheteurs. Correspondance proposée, sans rien supprimer : commune réelle → page commune ; acheteur pris pour
 // une ville → page département ; rien d'exploitable → page catégorie. La table seo_pages n'est pas modifiée.
+/** « Département de l'Oise », « DEPARTEMENT DE L'AUDE - CD11 » → code du département (nom le plus long trouvé). */
+const DEPT_NAMES = Object.entries(DEPARTMENTS).map(([c, n]) => [c, fold(n).replace(/[^a-z]+/g, ' ').trim()] as const).sort((a, b) => b[1].length - a[1].length);
+export function deptInName(name: string | null | undefined): string | null {
+  if (!name) return null;
+  const f = ` ${fold(String(name)).replace(/&#0?39;|&apos;/g, "'").replace(/[^a-z]+/g, ' ').trim()} `;
+  for (const [c, n] of DEPT_NAMES) if (f.includes(` ${n} `)) return c;
+  return null;
+}
 export async function legacyTargets(opts: { slug?: string; limit?: number; offset?: number }) {
   const r = await db.query(`
     SELECT sp.page_slug, sp.page_type, sp.filter_city, sp.filter_department, t.slug AS trade_slug, ot.code AS journey
@@ -357,7 +365,7 @@ export async function legacyTargets(opts: { slug?: string; limit?: number; offse
   const rows = r.rows.map((p: any) => {
     const base = JOURNEY_BASE[p.journey] || 'marches-publics';
     const trade = p.trade_slug ? `/${p.trade_slug}` : '';
-    const dept = normDept(p.filter_department);
+    const dept = normDept(p.filter_department) || deptInName(p.filter_city);
     let target: string; let reason: string;
     if (p.filter_city && isCommuneName(p.filter_city)) { target = `/${base}/${slugify(p.filter_city)}${trade}`; reason = 'commune'; }
     else if (p.filter_city && dept) { target = `/${base}/departement/${dept.toLowerCase()}${trade}`; reason = 'acheteur pris pour une ville → département'; }
