@@ -167,7 +167,9 @@ export async function refreshOpenFollowups(): Promise<number> {
   await followupSchema();
   const r = await db.query(`SELECT id, hubspot_deal_id, stage, session_id, email FROM dossier_followups
     WHERE hubspot_deal_id IS NOT NULL AND (stage NOT IN ('won','lost') OR stage_changed_at > NOW() - INTERVAL '30 days') ORDER BY synced_at NULLS FIRST LIMIT 500`);
-  return refreshStages(r.rows);
+  const n = await refreshStages(r.rows);
+  for (const row of r.rows) { try { await syncElenaReplies(row); } catch (e: any) { logger.warn('[Messages] relecture impossible:', e?.message); } }
+  return n;
 }
 
 // ---------------------------------------------------------------- lecture côté client
@@ -200,4 +202,80 @@ export function clientSteps(f: { known: boolean; analysed: boolean; leadAt: stri
   if (cur === 'won') { result.state = 'done'; result.label = 'Marché remporté'; result.detail = 'Félicitations : l’acheteur a retenu votre offre'; result.at = at('won'); }
   if (cur === 'lost') { result.state = 'done'; result.label = 'Offre non retenue'; result.detail = 'Elena vous aide à demander les motifs et à préparer le prochain'; result.at = at('lost'); }
   return [...steps, entrusted, sign, result];
+}
+
+
+// ---------------------------------------------------------------- messagerie client <-> Elena (5 nov.)
+// Elena reste dans HubSpot : le message du client devient une note (et une tâche « Répondre ») sur la transaction
+// du dossier ; Elena répond par une note qui commence par « Pour le client : ». Le site ne montre au client que ces
+// notes-là : les notes internes de l'équipe restent internes.
+export const CLIENT_PREFIX = /^\s*pour le client\s*[:：-]\s*/i;
+const stripHtml = (h: string) => h.replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>/gi, '\n').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/\n{3,}/g, '\n\n').trim();
+export const elenaReplyText = (html: string | null | undefined): string | null => { const t = stripHtml(String(html || '')); return CLIENT_PREFIX.test(t) ? t.replace(CLIENT_PREFIX, '').trim() || null : null; };
+
+let msgSchema: Promise<void> | null = null;
+export const messagesSchema = () => (msgSchema ??= (async () => {
+  await followupSchema();
+  await db.query(`CREATE TABLE IF NOT EXISTS dossier_messages (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    followup_id UUID NOT NULL REFERENCES dossier_followups(id) ON DELETE CASCADE,
+    author VARCHAR(10) NOT NULL CHECK (author IN ('client','elena')),
+    body TEXT NOT NULL,
+    hubspot_note_id VARCHAR(40) UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await db.query('CREATE INDEX IF NOT EXISTS dossier_messages_followup ON dossier_messages(followup_id, created_at)');
+  await db.query('ALTER TABLE dossier_followups ADD COLUMN IF NOT EXISTS messages_synced_at TIMESTAMPTZ');
+})().catch(e => { msgSchema = null; throw e; }));
+
+export async function postClientMessage(f: { id: string; hubspot_deal_id: string | null; is_test: boolean; title?: string }, body: string) {
+  await messagesSchema();
+  const ins = await db.query(`INSERT INTO dossier_messages (followup_id, author, body) VALUES ($1, 'client', $2) RETURNING *`, [f.id, body]);
+  if (f.hubspot_deal_id && !f.is_test && hubspotOn()) {
+    try {
+      const now = new Date().toISOString();
+      const esc = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+      const note = await hs<{ id: string }>({ method: 'POST', url: '/crm/v3/objects/notes', data: { properties: { hs_timestamp: now, hs_note_body: `<b>Message du client (site Marchés Direct)</b><br>${esc}<br><br><i>Pour répondre : ajoutez une note qui commence par « Pour le client : ». Seules ces notes sont visibles par le client.</i>` } } });
+      await hs({ method: 'PUT', url: `/crm/v4/objects/notes/${note.id}/associations/default/deals/${f.hubspot_deal_id}` });
+      await db.query('UPDATE dossier_messages SET hubspot_note_id = $2 WHERE id = $1', [ins.rows[0].id, String(note.id)]);
+      const task = await hs<{ id: string }>({ method: 'POST', url: '/crm/v3/objects/tasks', data: { properties: {
+        hs_timestamp: now, hs_task_subject: `Répondre au message du client${f.title ? ' - ' + String(f.title).slice(0, 80) : ''}`, hs_task_status: 'NOT_STARTED', hs_task_priority: 'HIGH', hubspot_owner_id: defaultCommercialOwner(),
+        hs_task_body: body.slice(0, 1000) } } });
+      await hs({ method: 'PUT', url: `/crm/v4/objects/tasks/${task.id}/associations/default/deals/${f.hubspot_deal_id}` });
+    } catch (e: any) { logger.error('[Messages] note HubSpot impossible:', e?.response?.data || e?.message); }
+  }
+  return ins.rows[0];
+}
+
+/** Relit les notes « Pour le client : » de la transaction et les ajoute au fil. Renvoie le nombre de nouvelles réponses. */
+export async function syncElenaReplies(f: { id: string; hubspot_deal_id: string | null; session_id?: string | null; email?: string | null }): Promise<number> {
+  if (!f.hubspot_deal_id || !hubspotOn()) return 0;
+  await messagesSchema();
+  const a = await hs<{ results?: { toObjectId: number | string }[] }>({ method: 'GET', url: `/crm/v4/objects/deals/${f.hubspot_deal_id}/associations/notes`, params: { limit: 100 } });
+  const ids = (a.results || []).map(x => String(x.toObjectId));
+  let added = 0;
+  if (ids.length) {
+    const known = await db.query('SELECT hubspot_note_id FROM dossier_messages WHERE hubspot_note_id = ANY($1)', [ids]);
+    const todo = ids.filter(i => !known.rows.some((k: any) => k.hubspot_note_id === i));
+    for (let i = 0; i < todo.length; i += 100) {
+      const b = await hs<{ results?: { id: string; properties?: { hs_note_body?: string; hs_timestamp?: string } }[] }>({ method: 'POST', url: '/crm/v3/objects/notes/batch/read',
+        data: { properties: ['hs_note_body', 'hs_timestamp'], inputs: todo.slice(i, i + 100).map(id => ({ id })) } });
+      for (const n of b.results || []) {
+        const text = elenaReplyText(n.properties?.hs_note_body);
+        if (!text) continue;
+        const r = await db.query(`INSERT INTO dossier_messages (followup_id, author, body, hubspot_note_id, created_at) VALUES ($1, 'elena', $2, $3, COALESCE($4::timestamptz, NOW())) ON CONFLICT (hubspot_note_id) DO NOTHING`,
+          [f.id, text.slice(0, 5000), String(n.id), n.properties?.hs_timestamp || null]);
+        added += r.rowCount || 0;
+      }
+    }
+  }
+  await db.query('UPDATE dossier_followups SET messages_synced_at = NOW() WHERE id = $1', [f.id]);
+  if (added) void notifyDossierUpdate({ sessionId: f.session_id, email: f.email });
+  return added;
+}
+
+export async function listMessages(followupId: string) {
+  await messagesSchema();
+  const r = await db.query('SELECT id, author, body, created_at FROM dossier_messages WHERE followup_id = $1 ORDER BY created_at ASC LIMIT 200', [followupId]);
+  return r.rows.map((m: any) => ({ id: m.id, author: m.author, body: m.body, at: m.created_at }));
 }
