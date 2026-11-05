@@ -56,7 +56,22 @@ export interface MatchCriterion {
   evidence?: EvidenceState; // guide v24 s.5 state behind status/factor
   mandatory?: boolean;      // a condition the market makes compulsory
   conflict?: boolean;       // the visitor's answer contradicts what the data shows: to examine, never silently overwritten
+  // v28 (5 Nov) — calcul continu : valeur 0..1 tirée des données (distance, ratio montant/CA, jours restants…),
+  // points réellement gagnés et maximum possible sur 100 (la somme des points = le pourcentage affiché).
+  value?: number;
+  points?: number;
+  maxPoints?: number;
 }
+
+export interface MatchFacts {
+  km: number | null;               // distance siège -> lieu d'exécution, quand les deux sont géolocalisés
+  radiusKm: number;                // rayon utilisé (déclaré, sinon 80 km par défaut)
+  radiusDeclared: boolean;
+  daysLeft: number | null;         // jours avant la date limite
+  metierLevel: 'exact' | 'secondary' | 'general' | 'none' | 'unknown';
+  revenueRatio: number | null;     // montant du marché / chiffre d'affaires
+}
+export interface MatchUpgrade { key: 'experience' | 'capacity' | 'location' | 'calendar'; label: string; points: number }
 
 export interface CompanyProfile {
   source: 'account' | 'siret';
@@ -98,6 +113,9 @@ export interface MatchEvaluation {
   mandatoryUnmet: string[];
   criteria: MatchCriterion[];
   metierStatus: CriterionStatus;
+  facts: MatchFacts;
+  upgrades: MatchUpgrade[];        // ce que chaque réponse « oui » ferait gagner, en points
+  adjustment: string | null;       // phrase quand un métier différent ou une zone hors de portée réduit le total
 }
 
 export const TRADE_LABELS: Record<string, string> = {
@@ -176,9 +194,21 @@ function distanceKm(lat1: number, lng1: number, lat2: number, lng2: number): num
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// Guide v24 s.5 (weights are "à valider" by the client): activité 40, moyens 15, références 15,
-// zone 10, calendrier 10, qualifications 10.
-const WEIGHTS = { metier: 40, moyens: 15, experience: 15, zone: 10, disponibilite: 10, qualifications: 10 } as const;
+// v28 (validé par le client le 5 nov.) : activité 30, zone 20, moyens 15, calendrier 15, références 10, qualifications 10.
+// (Guide v24 : 40/15/15/10/10/10 en tout-ou-rien, ce qui ne donnait que des multiples de 5.)
+const WEIGHTS = { metier: 30, moyens: 15, experience: 10, zone: 20, disponibilite: 15, qualifications: 10 } as const;
+export const DEFAULT_RADIUS_KM = 80;
+// Courbes continues (aucune IA, aucune donnée inventée) :
+//  - zone : 1 / (1 + (d / R)²) — 12 km ≈ 0,98 ; 28 km ≈ 0,89 ; 80 km = 0,5 ; 150 km ≈ 0,22 (R = rayon, 80 km par défaut) ;
+//  - moyens : r = montant / CA, 1 / (1 + (r / 0,9)³) — r 0,5 (CA = 2× le montant, plafond légal d'exigence) ≈ 0,85 ;
+//  - calendrier : (jours − 2) / 19, borné 0..1 — J-21 et plus = 1 ; J-7 ≈ 0,26 ; J-2 = 0 ;
+//  - donnée inconnue : 0,5 (neutre, affichée « en attendant »), jamais 0 ni 1.
+export const zoneValue = (km: number, radius: number) => 1 / (1 + (km / radius) ** 2);
+export const capacityValue = (ratio: number) => 1 / (1 + (ratio / 0.9) ** 3);
+export const calendarValue = (days: number) => Math.max(0, Math.min(1, (days - 2) / 19));
+const UNKNOWN_VALUE = 0.5;
+const DECLARED_VALUE = 0.85;   // un « oui » du visiteur : déclaration, pas une preuve
+const DECLARED_NO_VALUE = 0.1; // un « non » du visiteur sur ce chantier
 
 // A visitor's answer is a declaration, never a check (guide s.5):
 //  - "oui" on something unknown            -> declared_match (half the weight)
@@ -207,25 +237,36 @@ const evidenceOf = (c: MatchCriterion): EvidenceState => {
   return c.factor > 0 ? 'declared_match' : 'unknown';
 };
 
-export function evaluateMatch(company: CompanyProfile | null, market: MarketInput, answers: RefineAnswers = {}, now: Date = new Date()): MatchEvaluation {
+export function evaluateMatch(company: CompanyProfile | null, market: MarketInput, answers: RefineAnswers = {}, now: Date = new Date(), withUpgrades = true): MatchEvaluation {
+  let metierLevel: MatchFacts['metierLevel'] = 'unknown';
+  let factKm: number | null = null;
+  let factDays: number | null = null;
+  let factRatio: number | null = null;
   // --- Métier ---------------------------------------------------------------
   let metier: MatchCriterion;
   const marketLabel = labelList(market.tradeSlugs);
   if (!company) {
     metier = { key: 'metier', label: 'Activité', status: 'confirm', factor: 0, weight: WEIGHTS.metier, answered: false, detail: 'Identifiez votre entreprise pour comparer ses activités aux prestations demandées.' };
   } else if (market.tradeSlugs.length === 0) {
-    metier = { key: 'metier', label: 'Activité', status: 'confirm', factor: 0, weight: WEIGHTS.metier, answered: false, detail: 'Les prestations demandées ne sont pas identifiables avec certitude dans l’annonce : à confirmer.' };
+    // v28 : une activité non identifiable ne vaut pas « neutre » (un marché de repas scolaires ne doit pas sortir
+    // à 49 % pour une entreprise de CVC) : 0,35, et la réduction « métier » s'applique.
+    metier = { key: 'metier', label: 'Activité', status: 'confirm', factor: 0, value: 0.35, weight: WEIGHTS.metier, answered: false, detail: 'Les prestations demandées ne sont pas identifiables avec certitude dans l’annonce : à confirmer.' };
   } else if (company.tradeSlugs.length === 0) {
-    metier = { key: 'metier', label: 'Activité', status: 'confirm', factor: 0, weight: WEIGHTS.metier, answered: false, detail: `Le marché demande : ${marketLabel}. Votre activité n’a pas pu être rattachée à un métier : précisez vos prestations.` };
+    metier = { key: 'metier', label: 'Activité', status: 'confirm', factor: 0, value: 0.35, weight: WEIGHTS.metier, answered: false, detail: `Le marché demande : ${marketLabel}. Votre activité n’a pas pu être rattachée à un métier : précisez vos prestations.` };
   } else {
     const common = market.tradeSlugs.filter((s) => company.tradeSlugs.includes(s));
     const companyIsGeneral = company.tradeSlugs.some((s) => GENERAL_CONTRACTOR.has(s));
     if (common.length > 0) {
-      metier = { key: 'metier', label: 'Activité', status: 'match', factor: 1, weight: WEIGHTS.metier, answered: false, detail: `Le marché demande : ${marketLabel}. Cela correspond à votre activité (${labelList(common)}).` };
+      // Métier principal (code NAF) = 1 ; métier secondaire de l'entreprise = 0,85.
+      const primary = common.includes(company.tradeSlugs[0]);
+      metierLevel = primary ? 'exact' : 'secondary';
+      metier = { key: 'metier', label: 'Activité', status: 'match', factor: 1, value: primary ? 1 : 0.85, weight: WEIGHTS.metier, answered: false, detail: primary ? `Le marché demande : ${marketLabel}. C’est votre métier principal.` : `Le marché demande : ${marketLabel}. Cela fait partie de vos activités (${labelList(common)}).` };
     } else if (companyIsGeneral && market.tradeSlugs.some((s) => BUILDING_TRADES.has(s))) {
-      metier = { key: 'metier', label: 'Activité', status: 'confirm', factor: 0.5, evidence: 'declared_match', weight: WEIGHTS.metier, answered: false, detail: `Le marché demande : ${marketLabel}. En tant qu’entreprise de bâtiment général, vous pouvez y répondre ou sous-traiter : à confirmer.` };
+      metierLevel = 'general';
+      metier = { key: 'metier', label: 'Activité', status: 'confirm', factor: 0.5, value: 0.55, evidence: 'declared_match', weight: WEIGHTS.metier, answered: false, detail: `Le marché demande : ${marketLabel}. En tant qu’entreprise de bâtiment général, vous pouvez y répondre ou sous-traiter : à confirmer.` };
     } else {
-      metier = { key: 'metier', label: 'Activité', status: 'mismatch', factor: 0, weight: WEIGHTS.metier, answered: false, detail: `Le marché demande : ${marketLabel}. Votre activité déclarée (${labelList(company.tradeSlugs)}) ne correspond pas.` };
+      metierLevel = 'none';
+      metier = { key: 'metier', label: 'Activité', status: 'mismatch', factor: 0, value: 0, weight: WEIGHTS.metier, answered: false, detail: `Le marché demande : ${marketLabel}. Votre activité déclarée (${labelList(company.tradeSlugs)}) ne correspond pas.` };
     }
   }
 
@@ -246,16 +287,23 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
       : null;
     const km = kmRaw != null && !(sameDepartment && kmRaw > 250) ? kmRaw : null;
     if (km != null) {
+      factKm = km;
+      const v = zoneValue(km, company.radiusKm ?? DEFAULT_RADIUS_KM);
       if (company.radiusKm != null) {
         const radius = company.radiusKm;
         zone = km <= radius
-          ? { ...zone, status: 'match', factor: 1, detail: `Marché à environ ${km} km, dans votre rayon d’intervention de ${radius} km.` }
-          : { ...zone, status: 'mismatch', factor: 0, detail: `Marché à environ ${km} km, au-delà de votre rayon d’intervention de ${radius} km.` };
+          ? { ...zone, status: 'match', factor: 1, value: v, detail: `Marché à environ ${km} km, dans votre rayon d’intervention de ${radius} km.` }
+          : { ...zone, status: 'mismatch', factor: 0, value: v, detail: `Marché à environ ${km} km, au-delà de votre rayon d’intervention de ${radius} km.` };
       } else {
-        zone = { ...zone, detail: `Marché à environ ${km} km. Votre rayon d’intervention n’est pas renseigné : précisez-le pour confirmer si cette zone vous convient.` };
+        zone = { ...zone, value: v, detail: `Marché à environ ${km} km de votre siège.` };
       }
     } else if (company.department && market.department && company.department === market.department) {
-      zone = { ...zone, status: 'match', factor: 1, detail: `Le marché se situe dans votre département (${company.department}).` };
+      zone = { ...zone, status: 'match', factor: 1, value: 0.85, detail: `Le marché se situe dans votre département (${company.department}).` };
+    } else if (company.department && market.department) {
+      // Sans coordonnées : départements différents. Outre-mer contre métropole = hors de portée habituelle.
+      const overseas = (d: string) => /^97/.test(d);
+      const far = overseas(company.department) !== overseas(market.department);
+      zone = { ...zone, value: far ? 0.02 : 0.35, detail: far ? `Marché en outre-mer (${market.department}), loin de votre siège (${company.department}).` : `Marché dans un autre département (${market.department}) que votre siège (${company.department}).` };
     }
   }
   zone = apply(zone, answers.location, {
@@ -280,14 +328,19 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
   // exceeds even the estimate), but a match on an estimate alone is only
   // provisional until the visitor confirms it or a real account figure backs it.
   let moyens: MatchCriterion = { key: 'moyens', label: 'Moyens', status: 'confirm', factor: 0, weight: WEIGHTS.moyens, answered: false, detail: 'Vos moyens humains et matériels ne sont pas connus : à confirmer.' };
+  if (!market.estimatedValue) moyens = { ...moyens, detail: 'Montant du marché non publié : valeur neutre en attendant.' };
   if (company && market.estimatedValue && company.annualRevenue) {
+    const ratio = Number(market.estimatedValue) / Number(company.annualRevenue);
+    factRatio = Math.round(ratio * 100) / 100;
+    const v = capacityValue(ratio);
+    const share = ratio < 1 ? `${Math.max(1, Math.round(ratio * 100))} % de votre chiffre d’affaires` : `${(Math.round(ratio * 10) / 10).toString().replace('.', ',')} fois votre chiffre d’affaires`;
     const compatible = Number(market.estimatedValue) <= Number(company.annualRevenue) * 3;
     if (!compatible) {
-      moyens = { ...moyens, status: 'mismatch', factor: 0, detail: 'Montant du marché supérieur à 3 fois votre chiffre d’affaires.' };
+      moyens = { ...moyens, status: 'mismatch', factor: 0, value: v, detail: `Montant du marché : ${share}, au-delà de ce qu’un acheteur accepte en général.` };
     } else if (!company.revenueEstimated) {
-      moyens = { ...moyens, status: 'match', factor: 1, detail: 'Montant du marché compatible avec votre chiffre d’affaires (au plus 3 fois).' };
+      moyens = { ...moyens, status: 'match', factor: 1, value: v, detail: `Montant du marché : ${share}.` };
     } else {
-      moyens = { ...moyens, detail: 'Montant du marché a priori compatible avec le chiffre d’affaires estimé de votre entreprise. Une estimation ne suffit pas à elle seule à confirmer vos moyens : confirmez-le ci-dessous.' };
+      moyens = { ...moyens, value: v, detail: `Montant du marché : ${share} (chiffre d’affaires estimé). Confirmez vos moyens ci-dessous.` };
     }
   }
   moyens = apply(moyens, answers.capacity, {
@@ -299,8 +352,13 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
   let dispo: MatchCriterion = { key: 'disponibilite', label: 'Calendrier', status: 'confirm', factor: 0, weight: WEIGHTS.disponibilite, answered: false, detail: 'Votre disponibilité sur le calendrier du marché est à confirmer.' };
   if (market.deadline) {
     const days = Math.ceil((new Date(market.deadline).getTime() - now.getTime()) / 86400000);
-    if (days <= 0) dispo = { ...dispo, status: 'mismatch', factor: 0, detail: 'La date limite de remise est dépassée.' };
-    else if (days <= 3) dispo = { ...dispo, detail: `Échéance dans ${days} jour${days > 1 ? 's' : ''} : confirmez que vous pouvez répondre dans ce délai.` };
+    factDays = days;
+    const v = calendarValue(days);
+    if (days <= 0) dispo = { ...dispo, status: 'mismatch', factor: 0, value: 0, detail: 'La date limite de remise est dépassée.' };
+    else if (days <= 3) dispo = { ...dispo, value: v, detail: `Échéance dans ${days} jour${days > 1 ? 's' : ''} : confirmez que vous pouvez répondre dans ce délai.` };
+    else if (days <= 10) dispo = { ...dispo, value: v, detail: `J-${days} : délai serré pour préparer un mémoire technique (environ 10 jours ouvrés).` };
+    else if (days < 21) dispo = { ...dispo, value: v, detail: `J-${days} : délai correct, à organiser dès maintenant.` };
+    else dispo = { ...dispo, value: v, detail: `J-${days} : délai confortable pour préparer votre réponse.` };
   }
   dispo = apply(dispo, answers.calendar, {
     oui: 'Vous indiquez être disponible sur ce calendrier : déclaration à confirmer.',
@@ -329,9 +387,18 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
   }
 
   const mandatoryKeys = new Set(market.mandatoryCriteria || []);
+  // v28 : facteur continu. Preuve des données -> valeur mesurée ; « oui » -> au moins 0,85 ; « non » -> 0,1 ; inconnu -> 0,5.
+  const continuous = (c: MatchCriterion, evidence: EvidenceState): number => {
+    if (evidence === 'not_applicable') return 0;
+    if (c.answered && evidence === 'mismatch' && !c.conflict) return DECLARED_NO_VALUE;
+    if (evidence === 'declared_match') return c.answered ? Math.max(c.value ?? 0, DECLARED_VALUE) : (c.value ?? DECLARED_VALUE);
+    if (evidence === 'verified_match') return c.value ?? 1;
+    if (evidence === 'mismatch') return c.value ?? 0;
+    return c.value ?? UNKNOWN_VALUE;
+  };
   const criteria = [metier, zone, experience, moyens, dispo, qualifications].map((c) => {
     const evidence = evidenceOf(c);
-    return { ...c, evidence, factor: evidence === 'not_applicable' ? 0 : EVIDENCE_COEFFICIENT[evidence], mandatory: mandatoryKeys.has(c.key), conflict: !!c.conflict };
+    return { ...c, evidence, factor: Math.round(continuous(c, evidence) * 1000) / 1000, mandatory: mandatoryKeys.has(c.key), conflict: !!c.conflict };
   });
 
   // --- Score (guide s.5) -----------------------------------------------------------
@@ -346,8 +413,39 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
   // documented / to-confirm counts next to it. The verdict sentence is unchanged.
   const applicable = criteria.filter((c) => c.evidence !== 'not_applicable');
   const denominator = applicable.reduce((sum, c) => sum + c.weight, 0);
+  // Un métier différent ou une zone hors de portée réduisent tout le total (sinon une entreprise à 7 000 km
+  // garderait 40 % grâce aux autres critères). Inconnu = pas de réduction.
+  const m0 = criteria.find((c) => c.key === 'metier')!;
+  const z0 = criteria.find((c) => c.key === 'zone')!;
+  const gateMetier = !company ? 1 : 0.2 + 0.8 * m0.factor;
+  const gateZone = z0.evidence === 'unknown' && z0.value === undefined ? 1 : 0.3 + 0.7 * Math.min(1, z0.factor / 0.5);
+  const gate = gateMetier * gateZone;
+  for (const c of criteria) {
+    if (c.evidence === 'not_applicable' || denominator === 0) { c.points = 0; c.maxPoints = 0; continue; }
+    c.maxPoints = Math.round((1000 * c.weight) / denominator) / 10;
+    c.points = Math.round((1000 * c.weight * c.factor * gate) / denominator) / 10;
+  }
   const earned = applicable.reduce((sum, c) => sum + c.weight * c.factor, 0);
-  const score: number | null = company && denominator > 0 ? Math.round((100 * earned) / denominator) : null;
+  const score: number | null = company && denominator > 0 ? Math.round((100 * earned * gate) / denominator) : null;
+  const adjustment = !company || score === null ? null
+    : gateMetier < 0.999 && m0.evidence === 'mismatch' ? 'Activité différente de la vôtre : le pourcentage est fortement réduit.'
+    : gateZone < 0.999 ? 'Zone éloignée de votre siège : le pourcentage est réduit.' : null;
+
+  // Ce que chaque réponse « oui » ferait gagner (même calcul, réponse simulée), seulement pour les questions sans réponse.
+  const upgrades: MatchUpgrade[] = [];
+  if (withUpgrades && company && score !== null) {
+    const LABELS: Record<MatchUpgrade['key'], string> = {
+      experience: 'Vous avez des chantiers comparables', capacity: 'Vos moyens couvrent ce marché',
+      location: 'Vous intervenez sur cette zone', calendar: 'Vous êtes disponible sur ce calendrier',
+    };
+    for (const key of ['experience', 'capacity', 'location', 'calendar'] as const) {
+      if (answers[key]) continue;
+      const alt = evaluateMatch(company, market, { ...answers, [key]: 'oui' }, now, false).score;
+      if (alt !== null && alt - score >= 1) upgrades.push({ key, label: LABELS[key], points: alt - score });
+    }
+    upgrades.sort((a, b) => b.points - a.points);
+    upgrades.splice(3);
+  }
 
   const documentedCount = applicable.filter((c) => c.evidence === 'verified_match' || c.evidence === 'mismatch').length;
   const toConfirmCount = applicable.filter((c) => c.evidence === 'declared_match' || c.evidence === 'unknown').length;
@@ -365,8 +463,12 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
   else if (activityOk) verdict = { code: 'ACTIVITY_MATCH', label: VERDICT_LABELS.ACTIVITY_MATCH, tone: metier.status === 'match' ? 'green' : 'neutral', priorityIssue: null };
   else verdict = { code: 'ACTIVITY_UNCLEAR', label: VERDICT_LABELS.ACTIVITY_UNCLEAR, tone: 'neutral', priorityIssue: null };
 
-  return { score, verdict, documentedCount, toConfirmCount, mandatoryUnmet, criteria, metierStatus: metier.status };
+  const facts: MatchFacts = {
+    km: factKm, radiusKm: company?.radiusKm ?? DEFAULT_RADIUS_KM, radiusDeclared: company?.radiusKm != null,
+    daysLeft: factDays, metierLevel, revenueRatio: factRatio,
+  };
+  return { score, verdict, documentedCount, toConfirmCount, mandatoryUnmet, criteria, metierStatus: metier.status, facts, upgrades, adjustment };
 }
 
-// Version of the deterministic scoring rules (guide v24 s.4/s.5): stored on every analysis snapshot.
-export const RULES_VERSION = 'concordance-v24.1';
+// Version of the deterministic scoring rules: stored on every analysis snapshot.
+export const RULES_VERSION = 'concordance-v28.0';

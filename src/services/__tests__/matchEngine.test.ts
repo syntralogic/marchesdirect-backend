@@ -47,9 +47,9 @@ describe('trade normalisation', () => {
   });
 });
 
-// Guide v24 s.5 - deterministic concordance. Weights (to be validated by the client):
-// activité 40, moyens 15, références 15, zone 10, calendrier 10, qualifications 10.
-// verified_match = 1, declared_match ("Oui") = 0.5, mismatch = 0, unknown = 0, not_applicable = out of the denominator.
+// v28 (5 nov.) - calcul continu, déterministe, sans IA. Poids : activité 30, zone 20, moyens 15, calendrier 15,
+// références 10, qualifications 10. Valeur mesurée par les données ; « oui » ≥ 0,85 ; « non » 0,1 ; inconnu 0,5 ;
+// non applicable hors du dénominateur ; métier différent / zone hors de portée réduisent le total.
 const NOW = new Date('2026-10-17T10:00:00Z');
 const ev = (c: CompanyProfile | null, m: MarketInput, a = {}) => evaluateMatch(c, m, a, NOW);
 const crit = (r: ReturnType<typeof evaluateMatch>, key: string) => r.criteria.find((c) => c.key === key)!;
@@ -58,16 +58,16 @@ describe('evaluateMatch', () => {
   it('uses the guide weights', () => {
     const r = ev(company(), market('Installation de climatisation'));
     expect(Object.fromEntries(r.criteria.map((c) => [c.key, c.weight]))).toEqual({
-      metier: 40, moyens: 15, experience: 15, zone: 10, disponibilite: 10, qualifications: 10,
+      metier: 30, zone: 20, experience: 10, moyens: 15, disponibilite: 15, qualifications: 10,
     });
   });
 
   it('a heating/AC company matches a climatisation job on the activité', () => {
     const r = ev(company(), market('Installation de climatisation — école Michelet'));
     expect(r.metierStatus).toBe('match');
-    expect(crit(r, 'metier').detail).toMatch(/correspond à votre activité/);
-    // activité 40 + same-department zone 10 earned, out of 100 applicable; the rest is unknown (0 point, not a refusal)
-    expect(r.score).toBe(50);
+    expect(crit(r, 'metier').detail).toMatch(/votre métier principal/);
+    // v28 : activité 30 + zone même département 0,85 × 20 + calendrier J-45 15 + inconnus à 0,5 (références, moyens, qualifications)
+    expect(r.score).toBe(80);
     expect(r.documentedCount).toBe(2);
     expect(r.toConfirmCount).toBe(4);
   });
@@ -80,7 +80,7 @@ describe('evaluateMatch', () => {
     const complete = market('Peinture de parties communes — La Rochelle', { estimatedValue: 80000, latitude: 46.16, longitude: -1.15, department: '17' });
     const r = ev(company({ latitude: 50.42, longitude: 2.95 }), complete);
     expect(r.metierStatus).toBe('mismatch');
-    expect(r.score).toBe(0);
+    expect(r.score).toBeLessThanOrEqual(5); // métier différent + 700 km : quasi nul, jamais un bon score
     expect(crit(r, 'metier').detail).toMatch(/ne correspond pas/);
     expect(r.verdict.code).toBe('REVIEW_REQUIRED');
   });
@@ -94,7 +94,7 @@ describe('evaluateMatch', () => {
   it('an unknown zone is not a refusal: it earns nothing but the index is still computed', () => {
     const r = ev(company({ department: null }), market('Installation de climatisation', { department: '62' }));
     expect(crit(r, 'zone').status).toBe('confirm');
-    expect(r.score).toBe(40);
+    expect(r.score).toBe(73); // zone inconnue = valeur neutre, sans réduction
   });
 
   it('a missing revenue figure carries no penalty of its own', () => {
@@ -102,13 +102,14 @@ describe('evaluateMatch', () => {
     const m = crit(noRevenue, 'moyens');
     expect(m.evidence).toBe('unknown');
     expect(m.status).toBe('confirm');
-    expect(noRevenue.score).toBe(50);
+    expect(noRevenue.score).toBe(80);
   });
 
   it('a métier mismatch gives a verdict of caution and no invented ceiling', () => {
     const r = ev(company({ department: null }), market('Peinture de parties communes'));
     expect(r.metierStatus).toBe('mismatch');
-    expect(r.score).toBe(0);
+    expect(r.score).toBeLessThan(15); // la réduction « métier différent » écrase le total
+    expect(r.adjustment).toMatch(/Activité différente/);
     expect(r.verdict.label).toBe('À étudier de près : des points demandent une vérification');
   });
 
@@ -119,28 +120,37 @@ describe('evaluateMatch', () => {
     expect(r.verdict.label).toBe('Précisons votre activité pour examiner ce marché');
   });
 
-  it('"Oui" is a declaration worth half the weight, never a verification', () => {
+  it('"Oui" is a declaration (0,85 at least), never a verification', () => {
     const base = ev(company(), market('Installation de climatisation'));
     const answered = ev(company(), market('Installation de climatisation'), { experience: 'oui', capacity: 'oui', location: 'oui', calendar: 'oui' });
-    expect(base.score).toBe(50);
-    expect(answered.score).toBe(70); // 40 + 10 + 7.5 + 7.5 + 5: all "Oui" never gives 100 without proof
+    expect(base.score).toBe(80);
+    expect(answered.score).toBe(88); // all "Oui" never gives 100 without proof
     for (const key of ['experience', 'moyens', 'disponibilite']) {
       const c = crit(answered, key);
       expect(c.evidence).toBe('declared_match');
-      expect(c.factor).toBe(0.5);
+      expect(c.factor).toBeGreaterThanOrEqual(0.85);
       expect(c.status).toBe('confirm');
       expect(c.answered).toBe(true);
     }
     const one = ev(company(), market('Installation de climatisation'), { experience: 'oui' });
-    expect(one.score).toBe(58); // 57.5 rounded
+    expect(one.score).toBe(83);
     expect(crit(one, 'moyens').status).toBe('confirm');
+    // le gain annoncé dans « Ce qui ferait monter votre pourcentage » est exactement celui de la réponse
+    expect(base.upgrades.find((u) => u.key === 'experience')?.points).toBe(one.score! - base.score!);
+  });
+
+  it('points per criterion add up to the percentage', () => {
+    const r = ev(company({ latitude: 44.8378, longitude: -0.5792, department: '33' }), market('Installation de climatisation', { latitude: 44.9233, longitude: -0.3631, department: '33' }));
+    const total = r.criteria.reduce((sum, c) => sum + (c.points || 0), 0);
+    expect(Math.abs(total - r.score!)).toBeLessThan(1);
+    expect(r.facts.km).toBe(20);
   });
 
   it('changing an answer recalculates', () => {
     const yes = ev(company(), market('Installation de climatisation'), { calendar: 'oui' });
     const no = ev(company(), market('Installation de climatisation'), { calendar: 'non' });
-    expect(yes.score).toBe(55);
-    expect(no.score).toBe(50);
+    expect(yes.score).toBe(80); // J-45 : déjà au maximum
+    expect(no.score).toBe(66);
     expect(crit(no, 'disponibilite').status).toBe('mismatch');
   });
 
@@ -166,7 +176,7 @@ describe('evaluateMatch', () => {
     expect(crit(ev(c, m), 'moyens').status).toBe('match');
     const no = crit(ev(c, m, { capacity: 'non' }), 'moyens');
     expect(no.status).toBe('mismatch');
-    expect(no.factor).toBe(0);
+    expect(no.factor).toBe(0.1);
     expect(no.conflict).toBeFalsy();
     expect(no.detail).not.toMatch(/correspond/i);
   });
@@ -174,7 +184,7 @@ describe('evaluateMatch', () => {
   it('a general contractor is a partial (declared-level) match for a building trade', () => {
     const r = ev(company({ tradeSlugs: ['batiment-general'] }), market('Peinture de parties communes'));
     expect(crit(r, 'metier').status).toBe('confirm');
-    expect(r.score).toBe(30); // 0.5 x 40 + 10
+    expect(r.score).toBe(42); // métier partiel 0,55 : réduction modérée
   });
 
   it('a deadline already passed closes the market', () => {
@@ -206,7 +216,7 @@ describe('evaluateMatch', () => {
     expect(unknown.evidence).toBe('unknown');
     const none = ev(company(), market('Installation de climatisation', { requiredQualifications: 'Aucune qualification exigée' }));
     expect(crit(none, 'qualifications').evidence).toBe('not_applicable');
-    expect(none.score).toBe(56); // 50 / 90 applicable weight
+    expect(none.score).toBe(83); // qualifications hors calcul : poids réparti sur 90
   });
 
   it('gives no percentage without a company', () => {
@@ -281,7 +291,7 @@ describe('distance plausibility (1 Oct client report)', () => {
     // no métier link on the market, company with no zone/revenue/reference/qualification evidence
     const c = company({ department: null, tradeSlugs: [], annualRevenue: null });
     const r = ev(c, { ...market('Conception et animation du stand de l\'ODEADOM au SIA 2026'), tradeSlugs: [], department: null, deadline: null });
-    expect(r.score).toBe(0);
+    expect(r.score).toBe(22); // tout inconnu : valeurs neutres, activité non identifiable réduite — jamais un anneau vide
     expect(r.documentedCount).toBe(0);
     expect(r.toConfirmCount).toBeGreaterThan(0);
     expect(r.verdict.label).toMatch(/Précisons votre activité/);
