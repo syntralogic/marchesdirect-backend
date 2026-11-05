@@ -992,6 +992,9 @@ router.get('/lead/dossier-pdf', async (req: AuthRequest, res: Response) => {
       return res.status(409).json({ error: result.error, message: "Confirmez d'abord vos coordonnées pour accéder à ce document." });
     }
     const pdf = await generatePrefilledDossierPdf(result.input);
+    // 5 nov. : le téléchargement est une action sur l'annonce, visible dans le résumé HubSpot (un par jour au plus).
+    void recordJourneyEvent({ sessionId, eventType: 'dossier_downloaded', eventId: `dossier-pdf:${sessionId}:${opportunityId}:${new Date().toISOString().slice(0, 10)}`, opportunityId })
+      .then(() => refreshJourneyForSession(sessionId)).catch(() => {});
     res.setHeader('Content-Type', 'application/pdf');
     // v26 (5.1): the file is named after the company ("dossier-<entreprise>.pdf").
     res.setHeader('Content-Disposition', `attachment; filename="${dossierPdfFilename(result.input.companyName)}"`);
