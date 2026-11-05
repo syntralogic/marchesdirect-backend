@@ -56,6 +56,12 @@ const refOf = async () => { const { run } = require('./boot.js'); return Object.
   const bd = p33.pagination.breakdown;
   T('Concordance des compteurs', 'department=33 : total vs décompte', 'ouvertes + à vérifier + clôturées = total = exécution + acheteur seul + non relues', `${bd.open}+${bd.verify}+${bd.closed} = ${bd.open + bd.verify + bd.closed} ; ${bd.execution}+${bd.buyerOnly}+${bd.notYetRead} ; total ${p33.pagination.total}`,
     bd.open + bd.verify + bd.closed === p33.pagination.total && bd.execution + bd.buyerOnly + bd.notYetRead === p33.pagination.total);
+  const rc = await S({ city: 'Bordeaux', q: 'TEST' });
+  const has = r => rc.results.some(x => x.ref === r), st = r => (rc.results.find(x => x.ref === r) || {}).open_state;
+  T('Échéance modifiée par rectificatif', '26-900001 (initial, J+5) puis 26-900002 (rectificatif lié, J+15)', 'L’avis initial n’apparaît plus ; le rectificatif apparaît avec la nouvelle date',
+    `initial : ${has('26-900001') ? 'présent' : 'masqué'} ; rectificatif : ${has('26-900002') ? st('26-900002') : 'absent'}`, !has('26-900001') && st('26-900002') === 'open');
+  T('Annulation publiée après l’avis', '26-900003 (initial) puis 26-900004 (annulation liée)', 'Initial masqué ; annulation affichée « annulée », jamais comme ouverte',
+    `initial : ${has('26-900003') ? 'présent' : 'masqué'} ; annulation : ${st('26-900004') || 'absente'}`, !has('26-900003') && st('26-900004') === 'cancelled');
   const fs = require('fs');
   const md = ['| Scénario | Entrée | Attendu | Obtenu | Conclusion |', '| --- | --- | --- | --- | --- |', ...rows.map(r => `| ${r.name} | ${r.input} | ${r.expected} | ${r.obtained} | ${r.ok ? 'Conforme' : 'ÉCART'} |`)].join('\n');
   fs.writeFileSync('scenarios.md', md); console.log(md);

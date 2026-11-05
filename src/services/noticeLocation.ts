@@ -11,7 +11,7 @@
 // Rien n'est deviné : sans source, l'exécution vaut « inconnue ». Aucun appel externe, aucune IA : lecture pure du texte.
 import { DEPARTMENTS, slugify, isCommuneName, displayCity } from './seoV2Service';
 
-export const LOCATION_EXTRACTOR_VERSION = 3; // 3 : date limite avec son vrai fuseau horaire // 2 : entités HTML décodées, lieu lu dans le titre « (17) ROCHEFORT - … »
+export const LOCATION_EXTRACTOR_VERSION = 4; // 4 : liens vers les avis antérieurs (rectificatifs, annulations) // 3 : date limite avec son vrai fuseau horaire // 2 : entités HTML décodées, lieu lu dans le titre « (17) ROCHEFORT - … »
 
 export type ExecCommune = { name: string; slug: string; postalCode: string | null; department: string | null };
 export type NoticeLocation = {
@@ -263,4 +263,18 @@ export function locationFromTitle(title: string | null | undefined): { communes:
   const d = normDeptCode(m[1]); if (!d) return null;
   const c = cleanCommune(m[2]);
   return { communes: c ? [{ ...commune(c, null), department: d }] : [], departments: [d] };
+}
+
+/** Nature de l'avis et avis antérieurs qu'il modifie (rectificatif, annulation, attribution) — champs BOAMP
+ *  « nature », « etat », « annonce_lie », « annonces_anterieures ». Rien n'est déduit du texte libre. */
+export function extractNoticeLinks(raw: any): { nature: string | null; supersedes: string[] } {
+  const rec = raw?.fields ? raw.fields : raw || {};
+  const nature = [rec.nature, rec.etat, rec.nature_libelle].filter(Boolean).map(String).join(' / ') || null;
+  const own = String(rec.idweb || '');
+  const refs = new Set<string>();
+  for (const f of [rec.annonce_lie, rec.annonces_anterieures]) {
+    if (f == null) continue;
+    for (const m of JSON.stringify(f).matchAll(/\b(\d{2}-\d{3,7})\b/g)) if (m[1] !== own) refs.add(m[1]);
+  }
+  return { nature, supersedes: [...refs] };
 }

@@ -1,6 +1,6 @@
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
-import { extractNoticeLocation, extractNoticeDates, locationFromTitle, LOCATION_EXTRACTOR_VERSION, deptFromPostal } from '../services/noticeLocation';
+import { extractNoticeLocation, extractNoticeDates, extractNoticeLinks, locationFromTitle, LOCATION_EXTRACTOR_VERSION, deptFromPostal } from '../services/noticeLocation';
 import { buyerCommune } from '../services/seoV2Service';
 
 // Remplit opportunity_locations (table ajoutée le 6 nov., aucune colonne existante modifiée) : lieu d'exécution,
@@ -24,6 +24,9 @@ export async function ensureLocationSchema(): Promise<void> {
     computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`);
   await db.query(`ALTER TABLE opportunity_locations ADD COLUMN IF NOT EXISTS deadline_source TEXT`);
+  await db.query(`ALTER TABLE opportunity_locations ADD COLUMN IF NOT EXISTS notice_nature TEXT`);
+  await db.query(`ALTER TABLE opportunity_locations ADD COLUMN IF NOT EXISTS supersedes TEXT[] NOT NULL DEFAULT '{}'`);
+  await db.query(`CREATE INDEX IF NOT EXISTS opportunity_locations_supersedes_idx ON opportunity_locations USING GIN (supersedes)`);
 }
 
 export async function processLocationBatch(limit = 250): Promise<number> {
@@ -38,7 +41,7 @@ export async function processLocationBatch(limit = 250): Promise<number> {
      ORDER BY COALESCE(o.deadline, o.created_at) DESC
      LIMIT $2`, [LOCATION_EXTRACTOR_VERSION, limit]);
   for (const o of r.rows) {
-    let loc; let dates;
+    let loc; let dates; const links = (() => { try { return extractNoticeLinks(o.raw_data || {}); } catch { return { nature: null, supersedes: [] as string[] }; } })();
     try { loc = extractNoticeLocation(o.raw_data || {}); dates = extractNoticeDates(o.raw_data || {}); }
     catch (e: any) { logger.warn(`[Lieux] avis ${o.id} illisible : ${e?.message}`); loc = extractNoticeLocation({}); dates = { deadline: null, diffusionEnd: null, deadlineSource: null }; }
     if (loc.execution.status === 'inconnu') {
@@ -52,15 +55,15 @@ export async function processLocationBatch(limit = 250): Promise<number> {
     }
     if (!loc.buyer.department) loc.buyer.department = deptFromPostal(loc.buyer.postalCode);
     await db.query(`INSERT INTO opportunity_locations (opportunity_id, extractor_version, exec_status, exec_source, exec_communes, exec_departments, exec_text,
-        buyer_city, buyer_postal, buyer_department, publication_departments, notice_deadline, diffusion_end, deadline_source, computed_at)
-      VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
+        buyer_city, buyer_postal, buyer_department, publication_departments, notice_deadline, diffusion_end, deadline_source, notice_nature, supersedes, computed_at)
+      VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW())
       ON CONFLICT (opportunity_id) DO UPDATE SET extractor_version=EXCLUDED.extractor_version, exec_status=EXCLUDED.exec_status, exec_source=EXCLUDED.exec_source,
         exec_communes=EXCLUDED.exec_communes, exec_departments=EXCLUDED.exec_departments, exec_text=EXCLUDED.exec_text, buyer_city=EXCLUDED.buyer_city,
         buyer_postal=EXCLUDED.buyer_postal, buyer_department=EXCLUDED.buyer_department, publication_departments=EXCLUDED.publication_departments,
-        notice_deadline=EXCLUDED.notice_deadline, diffusion_end=EXCLUDED.diffusion_end, deadline_source=EXCLUDED.deadline_source, computed_at=NOW()`,
+        notice_deadline=EXCLUDED.notice_deadline, diffusion_end=EXCLUDED.diffusion_end, deadline_source=EXCLUDED.deadline_source, notice_nature=EXCLUDED.notice_nature, supersedes=EXCLUDED.supersedes, computed_at=NOW()`,
       [o.id, LOCATION_EXTRACTOR_VERSION, loc.execution.status, loc.execution.source, JSON.stringify(loc.execution.communes), loc.execution.departments,
         loc.execution.text ? loc.execution.text.slice(0, 500) : null, loc.buyer.city, loc.buyer.postalCode, loc.buyer.department, loc.publicationDepartments,
-        dates.deadline, dates.diffusionEnd, dates.deadlineSource]);
+        dates.deadline, dates.diffusionEnd, dates.deadlineSource, links.nature, links.supersedes]);
   }
   return r.rows.length;
 }

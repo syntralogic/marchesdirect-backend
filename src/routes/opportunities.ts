@@ -1211,9 +1211,13 @@ async function searchOpportunities(req: Request, res: Response) {
     // La date limite utilisée est celle relue dans l'avis, à l'heure de Paris (opportunity_locations.notice_deadline).
     if (v2) {
       const DL = 'COALESCE(l.notice_deadline, o.deadline)';
+      // Un avis remplacé par un rectificatif ou une annulation publiés ensuite n'apparaît plus : c'est l'avis le plus
+      // récent qui porte l'information à jour (et l'annulation rend l'état « annulée »).
+      whereClause += ` AND NOT EXISTS (SELECT 1 FROM opportunity_locations l2 JOIN opportunities o2 ON o2.id = l2.opportunity_id
+        WHERE o.source_reference = ANY(l2.supersedes) AND o2.deleted_at IS NULL AND o2.id <> o.id AND o2.source_id = o.source_id)`;
       whereClause = whereClause.replace(/o\.deadline/g, DL);
       orderClause = orderClause.replace(/o\.deadline/g, DL);
-      const liveV2 = `(o.status = 'active' AND NOT COALESCE(o.is_cancelled, false) AND ${DL} IS NOT NULL AND ${DL} >= NOW() AND ${DL} <= NOW() + INTERVAL '3 years')`;
+      const liveV2 = `(o.status = 'active' AND NOT COALESCE(o.is_cancelled, false) AND COALESCE(l.notice_nature, '') NOT ILIKE '%annul%' AND ${DL} IS NOT NULL AND ${DL} >= NOW() AND ${DL} <= NOW() + INTERVAL '3 years')`;
       const verifyV2 = `(o.status = 'active' AND NOT COALESCE(o.is_cancelled, false) AND (${DL} IS NULL OR ${DL} > NOW() + INTERVAL '3 years'))`;
       const stateRank = `(CASE WHEN ${liveV2} THEN 0 WHEN ${verifyV2} THEN 1 ELSE 2 END)`;
       const liveOld = LIVE_EXPR.replace(/o\.deadline/g, DL);
@@ -1221,7 +1225,7 @@ async function searchOpportunities(req: Request, res: Response) {
       if (!orderClause.startsWith(stateRank)) orderClause = `${stateRank} ASC, ${orderClause}`;
       if (locLevelExpr) orderClause = orderClause.replace(`${stateRank} ASC`, `${stateRank} ASC, ${locLevelExpr} ASC`);
       if (!/o\.id ASC\s*$/.test(orderClause)) orderClause = `${orderClause}, o.id ASC`;
-      v2Select = `, ${stateRank} AS state_rank, CASE WHEN COALESCE(o.is_cancelled, false) OR o.status = 'cancelled' THEN 'cancelled' WHEN o.status = 'awarded' THEN 'awarded'
+      v2Select = `, ${stateRank} AS state_rank, CASE WHEN COALESCE(o.is_cancelled, false) OR o.status = 'cancelled' OR l.notice_nature ILIKE '%annul%' THEN 'cancelled' WHEN o.status = 'awarded' THEN 'awarded'
         WHEN ${liveV2} THEN 'open' WHEN ${verifyV2} THEN 'verify' ELSE 'closed' END AS open_state,
         ${DL} AS deadline_checked, l.deadline_source, l.exec_status, l.exec_source, l.exec_communes, l.exec_departments, l.exec_text,
         l.buyer_city, l.buyer_department, l.publication_departments${locLevelExpr ? `, ${locLevelExpr} AS location_level` : ''}`;
