@@ -375,7 +375,7 @@ const TRADE_LOOKUP_TTL_MS = 10 * 60 * 1000;
 let locationTableReady: boolean | null = null; let locationTableCheckedAt = 0;
 async function hasLocationTable(): Promise<boolean> {
   if (locationTableReady !== null && Date.now() - locationTableCheckedAt < 10 * 60000) return locationTableReady;
-  try { const r = await db.query(`SELECT to_regclass('public.opportunity_locations') IS NOT NULL AS ok`); locationTableReady = !!r.rows[0]?.ok; }
+  try { await require('../jobs/noticeLocationJob').ensureLocationSchema(); const r = await db.query(`SELECT to_regclass('public.opportunity_locations') IS NOT NULL AS ok`); locationTableReady = !!r.rows[0]?.ok; }
   catch { locationTableReady = false; }
   locationTableCheckedAt = Date.now(); return locationTableReady;
 }

@@ -43,4 +43,19 @@ router.get('/annonce/:id', async (req: Request, res: Response) => {
   catch (err) { logger.error('[SEO v2] annonce:', err); res.status(503).json({ error: 'unavailable' }); }
 });
 
+// Contrôle technique en lecture seule (aucune donnée personnelle) : état de la table des lieux et de la recherche v2.
+router.get('/diag', async (_req: Request, res: Response) => {
+  try {
+    const { db } = require('../config/database');
+    const cols = await db.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'opportunity_locations' ORDER BY ordinal_position`);
+    const n = await db.query(`SELECT COUNT(*)::int AS n, COUNT(*) FILTER (WHERE extractor_version >= 3)::int AS v3, MAX(computed_at) AS last FROM opportunity_locations`).catch((e: any) => ({ rows: [{ error: e.code || 'err' }] }));
+    const st = await db.query(`SELECT exec_status, COUNT(*)::int AS n FROM opportunity_locations GROUP BY 1 ORDER BY 2 DESC`).catch(() => ({ rows: [] }));
+    const open = await db.query(`SELECT COUNT(*)::int AS n FROM opportunities WHERE deleted_at IS NULL AND status = 'active' AND (deadline IS NULL OR deadline >= NOW())`);
+    let probe: any = null;
+    try { await db.query(`SELECT o.id FROM opportunities o LEFT JOIN opportunity_locations l ON l.opportunity_id = o.id WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(l.exec_communes) ec WHERE ec->>'slug' = ANY($1::text[])) AND cardinality(l.exec_departments) >= 0 AND l.deadline_source IS NULL LIMIT 1`, [['bordeaux']]); probe = 'ok'; }
+    catch (e: any) { probe = { code: e.code, message: String(e.message || '').slice(0, 160) }; }
+    res.set('Cache-Control', 'no-store').json({ columns: cols.rows.map((r: any) => r.column_name), table: n.rows[0], byStatus: st.rows, openInBase: open.rows[0].n, v2SqlProbe: probe });
+  } catch (err: any) { res.status(503).json({ error: 'unavailable', code: err?.code || null }); }
+});
+
 export default router;
