@@ -403,7 +403,12 @@ function buildPublic(ly: Layout, input: DossierV2Input, _qr: Buffer) {
 }
 
 function plan(D: ReturnType<typeof dl>, steps: [number, string][]): [string, string][] {
-  return steps.map(([off, what]) => {
+  // Délai plus court que le plan type : on resserre les étapes proportionnellement (jamais d'étapes empilées le dernier jour).
+  const maxOff = Math.max(...steps.map(x => x[0]), 1);
+  const room = D.days !== null ? Math.max(0, D.days - 1) : maxOff;
+  const k = room < maxOff ? room / maxOff : 1;
+  return steps.map(([off0, what]) => {
+    const off = Math.round(off0 * k);
     let d = new Date(D.now.getTime() + off * 86400000);
     while ([0, 6].includes(paris(d).getDay())) d = new Date(d.getTime() + 86400000);
     if (D.d && d > D.d) d = D.d;
