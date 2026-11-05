@@ -107,7 +107,7 @@ async function load(): Promise<Snapshot> {
   const t = await db.query('SELECT id, name, slug FROM trades WHERE slug IS NOT NULL');
   const tradeById = new Map<string, string>(t.rows.map((r: any) => [String(r.id), String(r.slug)]));
   const trades = new Map<string, string>(t.rows.map((r: any) => [String(r.slug), String(r.name)]));
-  const r = await db.query(`
+  const RICH = `
     SELECT o.id, o.title, o.location_city, o.location_department, o.deadline, o.buyer_name, ot.code AS journey, o.source_reference,
            o.estimated_value, o.trade_id, COALESCE(o.updated_at, o.created_at) AS updated_at,
            o.raw_data->>'ville_avis' AS ville_avis,
@@ -119,7 +119,20 @@ async function load(): Promise<Snapshot> {
        AND COALESCE(ds.code, '') <> 'editorial_catalog'
        AND (ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))
        AND (o.deadline >= NOW() OR (o.deadline IS NULL AND o.created_at >= NOW() - INTERVAL '45 days'))
-     LIMIT 60000`);
+     LIMIT 60000`;
+  const PLAIN = `
+    SELECT o.id, o.title, o.location_city, o.location_department, o.deadline, o.buyer_name, ot.code AS journey, o.source_reference,
+           o.estimated_value, o.trade_id, COALESCE(o.updated_at, o.created_at) AS updated_at
+      FROM opportunities o
+      JOIN opportunity_types ot ON ot.id = o.opportunity_type_id
+      LEFT JOIN data_sources ds ON ds.id = o.source_id
+     WHERE o.deleted_at IS NULL AND COALESCE(o.status, '') = 'active'
+       AND COALESCE(ds.code, '') <> 'editorial_catalog'
+       AND (ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))
+       AND (o.deadline >= NOW() OR (o.deadline IS NULL AND o.created_at >= NOW() - INTERVAL '45 days'))
+     LIMIT 60000`;
+  // La lecture de la commune dans l'avis (raw_data) est un plus : si elle échoue ou dépasse le délai, on garde les pages.
+  const r = await db.query(RICH).catch(async (e: unknown) => { logger.error('[SEO v2] lecture des avis impossible, repli :', e); return db.query(PLAIN); });
   const cityNames = new Map<string, string>();
   const items: OpenItem[] = r.rows.map((o: any) => {
     // Commune = commune de l'ACHETEUR (adresse de l'organisme dans l'avis), jamais présentée comme lieu d'exécution :
