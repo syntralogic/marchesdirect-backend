@@ -3,7 +3,7 @@ import { offerDepartment } from './journeyOfferDepartment';
 // Keep links and public references aligned with the existing opportunity page.
 export function offerUrl(id: unknown): string | undefined {
   return typeof id === 'string' && id.trim()
-    ? `https://marchesdirect.fr/opportunites/${encodeURIComponent(id.trim())}`
+    ? `https://www.marchesdirect.fr/opportunites/${encodeURIComponent(id.trim())}`
     : undefined;
 }
 

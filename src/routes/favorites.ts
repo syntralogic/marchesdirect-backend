@@ -1,3 +1,4 @@
+import { recordJourneyEvent, refreshJourneyForSession } from '../services/journeyEventService';
 import { Router, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
@@ -136,6 +137,8 @@ router.put('/session/:opportunityId', async (req: AuthRequest, res: Response) =>
        ON CONFLICT (session_id, opportunity_id) DO NOTHING`,
       [sessionId, req.params.opportunityId]
     );
+    void recordJourneyEvent({ sessionId, eventType: 'favorite_added', eventId: `favorite:${sessionId}:${req.params.opportunityId}`, opportunityId: req.params.opportunityId })
+      .then(() => refreshJourneyForSession(sessionId)).catch(() => {});
     res.json({ saved: true });
   } catch (err: any) {
     logger.error('Session favorite save error:', err);

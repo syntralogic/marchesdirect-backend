@@ -130,10 +130,11 @@ export async function entrustDossier(args: { sessionIds: string[]; opportunityId
       await db.query('UPDATE dossier_followups SET hubspot_error = $2 WHERE id = $1', [row.id, String(e?.message || 'error').slice(0, 300)]);
     }
   }
-  if (lead.session_id) try {
-    await db.query(`INSERT INTO visitor_events (session_id, event_type, event_label, opportunity_id, siret) VALUES ($1, 'dossier_entrusted', 'Dossier confié à Elena', $2, $3)`,
-      [lead.session_id, args.opportunityId, lead.siret]);
-  } catch { /* parcours : non bloquant */ }
+  if (lead.session_id) {
+    const { recordJourneyEvent, refreshJourneyForSession } = await import('./journeyEventService');
+    await recordJourneyEvent({ sessionId: lead.session_id, eventType: 'dossier_entrusted', eventId: `entrusted:${lead.id}`, siret: lead.siret, opportunityId: args.opportunityId });
+    void refreshJourneyForSession(lead.session_id);
+  }
   return { ok: true as const, followup: row };
 }
 

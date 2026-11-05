@@ -15,7 +15,7 @@ it('renders only this visit, five linked offers maximum and one compact journey'
  expect(notes[0].title).toBe('Rappel demandé · score 25 % · source SMS électriciens 33');
  expect(notes[0].text).toContain('SIRET saisi → analyse 25 % → retour arrière → 2 annonces → coordonnées → rappel');
  expect(notes[0].html.match(/<li>/g)).toHaveLength(5);
- expect(notes[0].html).toContain('https://marchesdirect.fr/opportunites/a');
+ expect(notes[0].html).toContain('https://www.marchesdirect.fr/opportunites/a');
  expect(notes[0].html).toContain('(33) · J-12');
  expect(notes[0].text).not.toContain('old'); expect(notes[0].text).not.toContain('99 %');
  const more=buildVisitNotes([...events,view('f',90)],[score],now)[0];

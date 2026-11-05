@@ -125,6 +125,8 @@ router.post('/:opportunityId/messages', async (req: AuthRequest, res: Response) 
     const recent = await db.query(`SELECT COUNT(*)::int AS n FROM dossier_messages WHERE followup_id = $1 AND author = 'client' AND created_at > NOW() - INTERVAL '10 minutes'`, [f.id]);
     if ((recent.rows[0]?.n || 0) >= 5) return res.status(429).json({ error: 'too_many', message: 'Vous avez envoyé plusieurs messages : Elena vous répond dès que possible.' });
     await postClientMessage({ id: f.id, hubspot_deal_id: f.hubspot_deal_id, is_test: f.is_test, title: f.title }, body);
+    if (f.session_id) { const { recordJourneyEvent } = await import('../services/journeyEventService');
+      void recordJourneyEvent({ sessionId: f.session_id, eventType: 'message_sent', eventId: `message:${f.id}:${Date.now()}`, siret: f.siret, opportunityId: opp }); }
     res.json({ messages: await listMessages(f.id) });
   } catch (err: any) { logger.error('[Messages] envoi:', err); res.status(500).json({ error: 'messages_unavailable' }); }
 });
