@@ -4,6 +4,7 @@ import { logger } from '../utils/logger';
 import { isTestCompany } from './companyProfileService';
 import { defaultCommercialOwner, marketTypeOf } from './hubspotDealService';
 import { activeCrmSystem } from './crmSystem';
+import { notifyDossierUpdate } from './webPushService';
 
 // ============================================================================
 // SUIVI DES DOSSIERS (5 nov., demande client : favoris, « Confier à Elena », suivi par étapes)
@@ -137,7 +138,7 @@ export async function entrustDossier(args: { sessionIds: string[]; opportunityId
 }
 
 /** Relit l'étape HubSpot des suivis donnés (lot de 100). Ne recule jamais l'historique, ajoute chaque nouvelle étape. */
-export async function refreshStages(rows: { id: string; hubspot_deal_id: string | null; stage: string }[]): Promise<number> {
+export async function refreshStages(rows: { id: string; hubspot_deal_id: string | null; stage: string; session_id?: string | null; email?: string | null }[]): Promise<number> {
   if (!hubspotOn()) return 0;
   const withDeal = rows.filter(r => r.hubspot_deal_id);
   let changed = 0;
@@ -152,6 +153,7 @@ export async function refreshStages(rows: { id: string; hubspot_deal_id: string 
         await db.query(`UPDATE dossier_followups SET stage = $2, stage_changed_at = NOW(), synced_at = NOW(), updated_at = NOW(),
                           stage_history = stage_history || jsonb_build_array(jsonb_build_object('stage', $2::text, 'at', NOW())) WHERE id = $1`, [r.id, st]);
         r.stage = st; changed++;
+        void notifyDossierUpdate({ sessionId: r.session_id, email: r.email });
       } else {
         await db.query('UPDATE dossier_followups SET synced_at = NOW() WHERE id = $1', [r.id]);
       }
@@ -163,7 +165,7 @@ export async function refreshStages(rows: { id: string; hubspot_deal_id: string 
 /** Tâche de fond : suivis ouverts, ou clos depuis moins de 30 jours. */
 export async function refreshOpenFollowups(): Promise<number> {
   await followupSchema();
-  const r = await db.query(`SELECT id, hubspot_deal_id, stage FROM dossier_followups
+  const r = await db.query(`SELECT id, hubspot_deal_id, stage, session_id, email FROM dossier_followups
     WHERE hubspot_deal_id IS NOT NULL AND (stage NOT IN ('won','lost') OR stage_changed_at > NOW() - INTERVAL '30 days') ORDER BY synced_at NULLS FIRST LIMIT 500`);
   return refreshStages(r.rows);
 }
