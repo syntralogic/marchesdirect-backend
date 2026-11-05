@@ -371,14 +371,22 @@ export async function legacyTargets(opts: { slug?: string; limit?: number; offse
 /** Localisation lue pour un avis (contrôle, rapport de tests) : par référence source (ex. 26-11675) ou par id. */
 export async function locationOf(ref: string) {
   const r = await db.query(`
-    SELECT o.id, o.source_reference, o.title, o.deadline, o.buyer_name, l.*
+    SELECT o.id, o.source_reference, o.title, o.deadline, o.buyer_name, o.raw_data AS raw, l.*
       FROM opportunities o LEFT JOIN opportunity_locations l ON l.opportunity_id = o.id
      WHERE o.source_reference = $1 OR o.id::text = $1
      ORDER BY o.updated_at DESC NULLS LAST LIMIT 1`, [ref]);
   const o = r.rows[0]; if (!o) return null;
+  // Avis hors du périmètre du job (ancien, clôturé depuis plus de 200 jours) : lecture directe, sans rien enregistrer.
+  if (!o.computed_at && o.raw) {
+    const { extractNoticeLocation, extractNoticeDates } = require('./noticeLocation');
+    const l = extractNoticeLocation(o.raw); const d = extractNoticeDates(o.raw);
+    Object.assign(o, { exec_status: l.execution.status, exec_source: l.execution.source, exec_communes: l.execution.communes, exec_departments: l.execution.departments,
+      exec_text: l.execution.text, buyer_city: l.buyer.city, buyer_postal: l.buyer.postalCode, buyer_department: l.buyer.department,
+      publication_departments: l.publicationDepartments, notice_deadline: d.deadline, diffusion_end: d.diffusionEnd });
+  }
   return {
     id: o.id, reference: o.source_reference, title: o.title, buyer: o.buyer_name, deadline: o.deadline || o.notice_deadline || null,
-    computed: !!o.computed_at,
+    computed: o.computed_at ? 'table opportunity_locations' : 'lecture directe de l’avis',
     execution: { status: o.exec_status || 'inconnu', source: o.exec_source || null, communes: o.exec_communes || [], departments: o.exec_departments || [], text: o.exec_text || null },
     buyerAddress: { city: o.buyer_city || null, postalCode: o.buyer_postal || null, department: o.buyer_department || null },
     publicationDepartments: o.publication_departments || [], diffusionEnd: o.diffusion_end || null,
