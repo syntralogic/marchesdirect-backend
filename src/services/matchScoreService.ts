@@ -5,7 +5,7 @@ import { extractTradeSlugs } from './tradeResolver';
 import { lotsFromDescription } from '../utils/boampLots';
 import { geocodeCity } from './geocodingService';
 import { extractQualificationsFromText } from '../utils/qualificationText';
-import { evaluateMatch, tradeSlugsForCompany, MatchCriterion, MatchVerdict, RefineAnswers, CompanyProfile, CONCORDANCE_DISCLAIMER } from './matchEngine';
+import { evaluateMatch, tradeSlugsForCompany, MatchCriterion, MatchVerdict, RefineAnswers, CompanyProfile, CONCORDANCE_DISCLAIMER, MatchFacts, MatchUpgrade } from './matchEngine';
 import { inferNaturePrestation, isNaturePrestation, NaturePrestation } from '../utils/naturePrestation';
 
 // ============================================================================
@@ -64,6 +64,10 @@ export interface MatchScoreResult {
   // Per-criterion comparison (métier, zone, expérience, moyens, disponibilité,
   // qualifications), each with a status and a justifying sentence.
   matchCriteria: MatchCriterion[];
+  // v28 (5 nov.) : faits chiffrés pour les repères et le conseil d'Elena, gains possibles par réponse, phrase de réduction.
+  matchFacts?: MatchFacts | null;
+  upgrades?: MatchUpgrade[];
+  adjustment?: string | null;
   warning: string | null;
   // Award criteria as stated by the buyer in the notice/DCE, nothing else.
   criteria: CriterionWeight[];
@@ -403,7 +407,7 @@ export const computeMatchScore = async (
     ? 'Identifiez votre entreprise pour comparer ses activités, sa zone et ses moyens à ce marché.'
     : score === null
       ? 'Pas encore assez d’éléments pour calculer un indice : confirmez les critères marqués « à confirmer ».'
-      : `Indice provisoire : ${plural(documentedCount, 'critère documenté', 'critères documentés')}, ${plural(toConfirmCount, 'critère à confirmer', 'critères à confirmer')}. Un critère sans preuve ne rapporte pas de point sans être un refus ; une réponse « oui » compte pour moitié.`;
+      : `Fiabilité : ${plural(documentedCount, 'critère vérifié', 'critères vérifiés')} par les données, ${plural(toConfirmCount, 'à confirmer', 'à confirmer')}. Une donnée inconnue compte pour une valeur neutre en attendant ; une réponse « oui » est une déclaration, pas une preuve.`;
   // The verdict is one of the five fixed sentences; it is never derived from the percentage band.
   const matchLabel = verdict.label;
 
@@ -457,6 +461,7 @@ export const computeMatchScore = async (
     score, scoreTitle, scoreNote, scoreDisclaimer: CONCORDANCE_DISCLAIMER, matchLabel,
     verdict, criteriaDocumented: documentedCount, criteriaToConfirm: toConfirmCount,
     positiveFactors: [], matchCriteria: evaluation.criteria, warning,
+    matchFacts: company ? evaluation.facts : null, upgrades: evaluation.upgrades, adjustment: evaluation.adjustment,
     criteria, criteriaSource: criteria.length > 0 ? 'notice' : 'unknown', eligibility, whyRespond,
   };
 };
