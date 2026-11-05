@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { logger } from '../utils/logger';
-import { legacyTargets, locationOf, buildPage, indexablePaths, topLinks, BASE_JOURNEY } from '../services/seoV2Service';
+import { noticeForSeo, legacyTargets, locationOf, buildPage, indexablePaths, topLinks, BASE_JOURNEY } from '../services/seoV2Service';
 
 // /api/seo/v2 — lecture seule, publique, mise en cache (5 nov., mandat référencement). Aucune route existante modifiée.
 const router = Router();
@@ -36,6 +36,11 @@ router.get('/legacy', async (req: Request, res: Response) => {
 router.get('/lieu/:ref', async (req: Request, res: Response) => {
   try { const out = await locationOf(String(req.params.ref)); if (!out) return res.status(404).json({ error: 'not_found' }); cache(res, 300); res.json(out); }
   catch (err) { logger.error('[SEO v2] lieu:', err); res.status(503).json({ error: 'unavailable' }); }
+});
+
+router.get('/annonce/:id', async (req: Request, res: Response) => {
+  try { const out = await noticeForSeo(String(req.params.id)); if (!out) return res.status(404).json({ error: 'not_found' }); cache(res, 300); res.json(out); }
+  catch (err) { logger.error('[SEO v2] annonce:', err); res.status(503).json({ error: 'unavailable' }); }
 });
 
 export default router;

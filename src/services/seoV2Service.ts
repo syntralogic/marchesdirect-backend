@@ -384,3 +384,65 @@ export async function locationOf(ref: string) {
     publicationDepartments: o.publication_departments || [], diffusionEnd: o.diffusion_end || null,
   };
 }
+
+// ── Fiche d'annonce pour le pré-rendu (6 nov.) ─────────────────────────────────────────────────────────────────
+// Politique d'indexation d'une annonce clôturée, fondée sur sa valeur réelle (et non un délai unique de 30 jours) :
+//  - annulée ou démonstration : hors index tout de suite (la page reste consultable) ;
+//  - clôturée : on garde la page dans l'index tant qu'elle sert de référence. Signaux lus dans les données :
+//      R = acheteur récurrent (≥ 3 avis de cet acheteur dans la base) — la consultation reviendra, souvent à l'identique ;
+//      C = contenu substantiel (description ≥ 400 caractères, montant estimé, ou plusieurs lots) ;
+//      A = accord-cadre ou reconduction mentionnés (renouvellement prévisible).
+//    C avec R ou A → 12 mois après la clôture ; un seul signal → 90 jours ; aucun → 14 jours (requêtes tardives).
+//  - supprimée : 404 avec liens utiles (jamais de redirection vers l'accueil).
+export function closedIndexPolicy(o: { cancelled: boolean; demo: boolean; deadline: string | null; descriptionLength: number; estimatedValue: number | null;
+  lots: number; buyerHistory: number; framework: boolean }, now = Date.now()) {
+  if (o.demo) return { indexable: false, reason: 'annonce de démonstration', keepUntil: null as string | null };
+  if (o.cancelled) return { indexable: false, reason: 'consultation annulée', keepUntil: null };
+  if (!o.deadline || Date.parse(o.deadline) >= now) return { indexable: true, reason: 'candidatures ouvertes ou date à vérifier', keepUntil: null };
+  const R = o.buyerHistory >= 3; const C = o.descriptionLength >= 400 || o.estimatedValue != null || o.lots >= 2; const A = o.framework;
+  const days = C && (R || A) ? 365 : (R || C || A) ? 90 : 14;
+  const until = Date.parse(o.deadline) + days * 86400000;
+  const signals = [R && 'acheteur récurrent', C && 'contenu substantiel', A && 'accord-cadre ou reconduction'].filter(Boolean).join(', ') || 'aucun signal de valeur';
+  return { indexable: now < until, reason: `clôturée — ${signals} : conservée ${days} jours après la clôture`, keepUntil: new Date(until).toISOString() };
+}
+
+export async function noticeForSeo(id: string) {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+  const r = await db.query(`
+    SELECT o.id, o.title, o.description, o.deadline, o.status, o.estimated_value, o.buyer_name, o.source_reference, o.official_url,
+           COALESCE(o.is_cancelled, false) AS is_cancelled, (ds.code = 'editorial_catalog') AS is_demo, t.name AS trade_name, ot.code AS journey,
+           (SELECT COUNT(*)::int FROM opportunities b WHERE b.buyer_name = o.buyer_name AND b.deleted_at IS NULL) AS buyer_history,
+           l.exec_status, l.exec_communes, l.exec_departments, l.exec_text, l.buyer_city, l.buyer_department, l.publication_departments, l.notice_deadline
+      FROM opportunities o
+      LEFT JOIN trades t ON t.id = o.trade_id
+      LEFT JOIN opportunity_types ot ON ot.id = o.opportunity_type_id
+      LEFT JOIN data_sources ds ON ds.id = o.source_id
+      LEFT JOIN opportunity_locations l ON l.opportunity_id = o.id
+     WHERE o.id = $1 AND o.deleted_at IS NULL AND COALESCE(o.status, '') <> 'merged'`, [id]).catch(async () => db.query(`
+    SELECT o.id, o.title, o.description, o.deadline, o.status, o.estimated_value, o.buyer_name, o.source_reference, o.official_url,
+           COALESCE(o.is_cancelled, false) AS is_cancelled, (ds.code = 'editorial_catalog') AS is_demo, t.name AS trade_name, ot.code AS journey, 0 AS buyer_history
+      FROM opportunities o LEFT JOIN trades t ON t.id = o.trade_id LEFT JOIN opportunity_types ot ON ot.id = o.opportunity_type_id
+      LEFT JOIN data_sources ds ON ds.id = o.source_id WHERE o.id = $1 AND o.deleted_at IS NULL AND COALESCE(o.status, '') <> 'merged'`, [id]));
+  const o = r.rows[0]; if (!o) return null;
+  const desc = String(o.description || '');
+  const lots = (desc.match(/\blot\s*n?°?\s*\d+/gi) || []).length;
+  const deadline = o.deadline ? new Date(o.deadline).toISOString() : o.notice_deadline ? new Date(o.notice_deadline).toISOString() : null;
+  const state = o.is_cancelled ? 'cancelled' : deadline ? (Date.parse(deadline) >= Date.now() ? 'open' : 'closed') : 'verify';
+  const policy = closedIndexPolicy({ cancelled: !!o.is_cancelled, demo: !!o.is_demo, deadline, descriptionLength: desc.length,
+    estimatedValue: o.estimated_value != null ? Number(o.estimated_value) : null, lots, buyerHistory: Number(o.buyer_history || 0), framework: /accord[- ]cadre|reconduct/i.test(desc) });
+  const communes = (Array.isArray(o.exec_communes) ? o.exec_communes : []).map((c: any) => String(c.name));
+  // Annonces ouvertes proches pour la page d'une annonce clôturée : même acheteur, sinon même département d'exécution.
+  const s = await snapshot();
+  const execDepts: string[] = o.exec_departments || [];
+  const similar = s.items.filter(i => i.state === 'open' && i.id !== String(o.id) && i.journey === o.journey &&
+    ((o.buyer_name && i.buyer === o.buyer_name) || (execDepts.length && i.exec.depts.some(d => execDepts.includes(d)))))
+    .sort((a, b) => Number(b.buyer === o.buyer_name) - Number(a.buyer === o.buyer_name)).slice(0, 5)
+    .map(i => ({ id: i.id, title: i.title, deadline: i.deadline, path: `/opportunites/${i.id}` }));
+  return {
+    id: o.id, title: o.title, journey: o.journey, tradeName: o.trade_name || null, buyer: o.buyer_name || null, reference: o.source_reference || null,
+    deadline, state, demo: !!o.is_demo, indexable: policy.indexable, indexReason: policy.reason, keepUntil: policy.keepUntil,
+    execution: { status: o.exec_status || 'inconnu', communes, departments: execDepts, text: o.exec_text || null },
+    buyerCity: o.buyer_city || null, buyerDepartment: o.buyer_department || null, publicationDepartments: o.publication_departments || [],
+    similar,
+  };
+}
