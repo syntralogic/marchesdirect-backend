@@ -81,7 +81,7 @@ export type Item = {
 };
 /** Compatibilité avec l'ancien nom de type. */
 export type OpenItem = Item;
-type Snapshot = { at: number; items: Item[]; trades: Map<string, string>; cityNames: Map<string, string>; withLocations: boolean };
+type Snapshot = { at: number; items: Item[]; trades: Map<string, string>; cityNames: Map<string, string>; cityDepts: Map<string, Map<string, number>>; withLocations: boolean };
 let snap: Snapshot | null = null; let loading: Promise<Snapshot> | null = null;
 
 /** Commune de l'acheteur : ville_avis du BOAMP, sinon la ville de l'organisme dans les données de l'avis, sinon
@@ -135,6 +135,7 @@ async function load(): Promise<Snapshot> {
   let withLocations = true;
   const r = await db.query(BASE_SQL(true)).catch(async (e: unknown) => { withLocations = false; logger.error('[SEO v2] table des lieux indisponible, repli :', e); return db.query(BASE_SQL(false)); });
   const cityNames = new Map<string, string>();
+  const cityDepts = new Map<string, Map<string, number>>();
   const now = Date.now(); const today = new Date().toISOString().slice(0, 10);
   const items: Item[] = [];
   for (const o of r.rows as any[]) {
@@ -153,7 +154,10 @@ async function load(): Promise<Snapshot> {
     let buyerPlace: Place | null = null;
     if (withLocations && o.buyer_city) buyerPlace = { slug: slugify(o.buyer_city), name: displayCity(o.buyer_city), dept: o.buyer_department || null };
     else if (!withLocations) { const c = buyerCommune(o); if (c) buyerPlace = { slug: slugify(c), name: displayCity(c), dept: normDept(o.location_department) }; }
-    for (const p of [...execCommunes, ...(buyerPlace ? [buyerPlace] : [])]) cityNames.set(p.slug, betterName(cityNames.get(p.slug), p.name));
+    for (const p of [...execCommunes, ...(buyerPlace ? [buyerPlace] : [])]) {
+      cityNames.set(p.slug, betterName(cityNames.get(p.slug), p.name));
+      if (p.dept) { const m = cityDepts.get(p.slug) || new Map<string, number>(); m.set(p.dept, (m.get(p.dept) || 0) + 1); cityDepts.set(p.slug, m); }
+    }
     const ts = new Set<string>();
     if (o.trade_id && tradeById.has(String(o.trade_id))) ts.add(tradeById.get(String(o.trade_id))!);
     for (const sl of extractTradeSlugs(title)) if (trades.has(sl)) ts.add(sl);
@@ -167,7 +171,7 @@ async function load(): Promise<Snapshot> {
       buyerPlace, pubDepts: (o.publication_departments || []).map((d: string) => normDept(d)).filter(Boolean) as string[],
     });
   }
-  return { at: Date.now(), items, trades, cityNames, withLocations };
+  return { at: Date.now(), items, trades, cityNames, cityDepts, withLocations };
 }
 export async function snapshot(): Promise<Snapshot> {
   if (snap && Date.now() - snap.at < 15 * 60000) return snap;
@@ -186,11 +190,14 @@ export function resolveTrade(raw: string, trades: Map<string, string>): string |
 
 // Appartenance d'une annonce à une zone, par rôle. « main » = lieu d'exécution dans la zone ; « buyer » = seul
 // l'acheteur y est situé et l'avis ne précise pas de lieu d'exécution au même niveau.
-type Zone = { type: 'city' | 'department'; slug: string; name: string; department: string | null; departmentName: string | null };
-export function roleIn(i: Item, z: { type: 'city' | 'department'; slug: string; department: string | null }): 'main' | 'buyer' | 'dept' | null {
+type Zone = { type: 'city' | 'department'; slug: string; name: string; department: string | null; departmentName: string | null; unambiguous?: boolean; urlSlug?: string };
+export function roleIn(i: Item, z: { type: 'city' | 'department'; slug: string; department: string | null; unambiguous?: boolean }): 'main' | 'buyer' | 'dept' | null {
   if (z.type === 'city') {
-    if (i.exec.communes.some(c => c.slug === z.slug)) return 'main';
-    if (i.buyerPlace?.slug === z.slug && !i.exec.communes.length) return 'buyer';
+    // Communes homonymes : le département doit concorder ; une commune sans département connu n'est retenue que si
+    // le nom n'existe que dans un seul département (z.unambiguous).
+    const same = (p: Place) => p.slug === z.slug && (p.dept ? !z.department || p.dept === z.department : !!z.unambiguous);
+    if (i.exec.communes.some(same)) return 'main';
+    if (i.buyerPlace && same(i.buyerPlace) && !i.exec.communes.length) return 'buyer';
     if (z.department && i.exec.depts.includes(z.department)) return 'dept';
     return null;
   }
@@ -216,6 +223,14 @@ const view = (i: Item, trades: Map<string, string>) => ({
   city: i.exec.communes[0]?.name || null, department: i.exec.depts[0] || null,
 });
 
+/** Adresse d'une commune : nue pour le département majoritaire (≥ 90 %), suffixée par le département sinon. */
+function citySlugFor(s: Snapshot, slug: string, dept: string | null): string {
+  const dc = [...(s.cityDepts.get(slug) || new Map<string, number>()).entries()].sort((a, b) => b[1] - a[1]);
+  if (dc.length <= 1 || !dept) return slug;
+  const total = dc.reduce((n, [, k]) => n + k, 0);
+  return dc[0][1] >= 0.9 * total && dc[0][0] === dept ? slug : `${slug}-${dept.toLowerCase()}`;
+}
+
 export async function buildPage(args: { base: string; city?: string; trade?: string; department?: string; page?: string | number }) {
   const journey = BASE_JOURNEY[args.base];
   if (!journey) return { status: 404 as const };
@@ -226,8 +241,18 @@ export async function buildPage(args: { base: string; city?: string; trade?: str
     const d = normDept(args.department); if (!d) return { status: 404 as const };
     zone = { type: 'department', slug: d.toLowerCase(), name: DEPARTMENTS[d], department: d, departmentName: DEPARTMENTS[d] };
   } else {
-    const cs = slugify(args.city);
+    let cs = slugify(args.city);
     if (!cs) return { status: 404 as const };
+    // Communes homonymes (Rochefort 17 / Rochefort 21…) : l'adresse nue désigne le département largement majoritaire
+    // (≥ 90 % des mentions) ; les autres ont une adresse suffixée par le département (/marches-publics/rochefort-21).
+    // Sans majorité nette, l'adresse nue est une page de choix, jamais un mélange.
+    let forcedDept: string | null = null;
+    const suff = cs.match(/^(.+)-(\d{2,3}|2a|2b)$/);
+    if (suff && s.cityDepts.get(suff[1])?.has(suff[2].toUpperCase())) { cs = suff[1]; forcedDept = suff[2].toUpperCase(); }
+    const dc = [...(s.cityDepts.get(cs) || new Map<string, number>()).entries()].sort((a, b) => b[1] - a[1]);
+    const totalMentions = dc.reduce((n, [, k]) => n + k, 0);
+    const dominant = dc.length && dc[0][1] >= 0.9 * totalMentions ? dc[0][0] : null;
+    const homonyms = dc.length > 1;
     let name = s.cityNames.get(cs);
     if (!name) {
       const known = await db.query(`SELECT location_city AS c, location_department AS d FROM opportunities WHERE location_city IS NOT NULL
@@ -237,26 +262,28 @@ export async function buildPage(args: { base: string; city?: string; trade?: str
       const row = known.rows[0] || legacy?.rows[0];
       if (!row) return { status: 404 as const };
       if (!isCommuneName(row.c)) {
-        const d = normDept(row.d);
+        const d = normDept(row.d) || deptInName(row.c);
         return d ? { status: 301 as const, location: `/${args.base}/departement/${d.toLowerCase()}` } : { status: 404 as const };
       }
       name = displayCity(String(row.c).trim());
     }
-    const deptCounts = new Map<string, number>();
-    for (const i of s.items) {
-      for (const c of i.exec.communes) if (c.slug === cs && c.dept) deptCounts.set(c.dept, (deptCounts.get(c.dept) || 0) + 2);
-      if (i.buyerPlace?.slug === cs && i.buyerPlace.dept) deptCounts.set(i.buyerPlace.dept, (deptCounts.get(i.buyerPlace.dept) || 0) + 1);
-    }
-    const dept = [...deptCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
-    zone = { type: 'city', slug: cs, name, department: dept, departmentName: dept ? DEPARTMENTS[dept] : null };
+    let dept: string | null;
+    if (forcedDept) {
+      if (forcedDept === dominant) return { status: 301 as const, location: `/${args.base}/${cs}${args.trade ? `/${slugify(args.trade)}` : ''}` };
+      dept = forcedDept;
+    } else if (homonyms && !dominant) {
+      return { status: 300 as const, base: args.base, name, choices: dc.map(([d, n]) => ({ department: d, departmentName: DEPARTMENTS[d], mentions: n, path: `/${args.base}/${cs}-${d.toLowerCase()}` })) };
+    } else dept = dominant || dc[0]?.[0] || null;
+    zone = { type: 'city', slug: cs, name, department: dept, departmentName: dept ? DEPARTMENTS[dept] : null, unambiguous: !homonyms,
+      urlSlug: dept && homonyms && dept !== dominant ? `${cs}-${dept.toLowerCase()}` : cs };
   }
   let trade: { slug: string; name: string } | null = null;
   if (args.trade) {
     const t = resolveTrade(args.trade, s.trades);
-    if (!t) return { status: 301 as const, location: zone.type === 'city' ? `/${args.base}/${zone.slug}` : `/${args.base}/departement/${zone.slug}` };
+    if (!t) return { status: 301 as const, location: zone.type === 'city' ? `/${args.base}/${zone.urlSlug || zone.slug}` : `/${args.base}/departement/${zone.slug}` };
     trade = { slug: t, name: s.trades.get(t)! };
   }
-  const canonicalPath = zone.type === 'city' ? `/${args.base}/${zone.slug}${trade ? `/${trade.slug}` : ''}` : `/${args.base}/departement/${zone.slug}${trade ? `/${trade.slug}` : ''}`;
+  const canonicalPath = zone.type === 'city' ? `/${args.base}/${zone.urlSlug || zone.slug}${trade ? `/${trade.slug}` : ''}` : `/${args.base}/departement/${zone.slug}${trade ? `/${trade.slug}` : ''}`;
   const withTrade = (i: Item) => !trade || i.trades.includes(trade.slug);
   const groups = { main: [] as Item[], buyer: [] as Item[], dept: [] as Item[], verify: [] as Item[], closed: [] as Item[] };
   const zoneAll: Item[] = [];
@@ -278,7 +305,7 @@ export async function buildPage(args: { base: string; city?: string; trade?: str
   if (page > pages) return { status: 404 as const };
   const tradeCounts = new Map<string, number>(); for (const i of zoneAll) if (i.state === 'open') for (const t of i.trades) tradeCounts.set(t, (tradeCounts.get(t) || 0) + 1);
   const cityCounts = new Map<string, number>();
-  if (zone.department) for (const i of pool) if (i.state === 'open') for (const c of i.exec.communes) if (c.dept === zone.department && c.slug !== zone.slug) cityCounts.set(c.slug, (cityCounts.get(c.slug) || 0) + 1);
+  if (zone.department) for (const i of pool) if (i.state === 'open') for (const c of i.exec.communes) if (c.dept === zone.department && c.slug !== zone.slug) { const k = citySlugFor(s, c.slug, c.dept); cityCounts.set(k, (cityCounts.get(k) || 0) + 1); }
   const buyerCounts = new Map<string, number>(); for (const i of [...groups.main, ...groups.buyer]) if (i.buyer) buyerCounts.set(i.buyer, (buyerCounts.get(i.buyer) || 0) + 1);
   const otherTypes = Object.entries(JOURNEY_BASE).filter(([j]) => j !== journey).map(([j, b]) => ({ base: b, journey: j,
     count: s.items.filter(i => i.journey === j && i.state === 'open' && withTrade(i) && (roleIn(i, zone) === 'main' || roleIn(i, zone) === 'buyer')).length }));
@@ -295,7 +322,7 @@ export async function buildPage(args: { base: string; city?: string; trade?: str
     closedCount: groups.closed.length, closedItems: groups.closed.slice(0, 6).map(v),
     publishedOnlyCount: publishedOnly,
     trades: [...tradeCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([slug, n]) => ({ slug, name: s.trades.get(slug) || slug, count: n })),
-    cities: [...cityCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([slug, n]) => ({ slug, name: s.cityNames.get(slug) || slug, count: n })),
+    cities: [...cityCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([slug, n]) => ({ slug, name: s.cityNames.get(slug.replace(/-(\d{2,3}|2a|2b)$/, '')) || slug, count: n })),
     buyers: [...buyerCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([name, n]) => ({ name, count: n })),
     otherTypes, nextDeadline: [...groups.main, ...groups.buyer].sort(byDeadline).find(i => i.deadline)?.deadline || null, lastmod, generatedAt: new Date(s.at).toISOString(),
   };
@@ -315,7 +342,7 @@ export async function indexablePaths(): Promise<{ path: string; lastmod: string;
     const base = JOURNEY_BASE[i.journey]; if (!base || i.state === 'verify') continue;
     const depts = i.exec.depts.length ? i.exec.depts : i.buyerPlace?.dept ? [i.buyerPlace.dept] : [];
     for (const d of depts) { add(`/${base}/departement/${d.toLowerCase()}`, i); for (const t of i.trades) add(`/${base}/departement/${d.toLowerCase()}/${t}`, i); }
-    const cities = i.exec.communes.length ? i.exec.communes.map(c => c.slug) : i.buyerPlace ? [i.buyerPlace.slug] : [];
+    const cities = (i.exec.communes.length ? i.exec.communes : i.buyerPlace ? [i.buyerPlace] : []).filter(c => c.dept).map(c => citySlugFor(s, c.slug, c.dept));
     for (const c of new Set(cities)) { add(`/${base}/${c}`, i); for (const t of i.trades) add(`/${base}/${c}/${t}`, i); }
   }
   return [...acc.entries()].filter(([, a]) => indexRule(a.open, 0, a.closed).indexable)
@@ -329,13 +356,13 @@ export async function topLinks(journey?: string) {
   const depts = new Map<string, number>(); const cities = new Map<string, number>(); const trades = new Map<string, number>();
   for (const i of pool) {
     for (const d of i.exec.depts) depts.set(d, (depts.get(d) || 0) + 1);
-    for (const c of new Set(i.exec.communes.map(x => x.slug))) cities.set(c, (cities.get(c) || 0) + 1);
+    for (const c of new Set(i.exec.communes.filter(x => x.dept).map(x => citySlugFor(s, x.slug, x.dept)))) cities.set(c, (cities.get(c) || 0) + 1);
     for (const t of i.trades) trades.set(t, (trades.get(t) || 0) + 1);
   }
   const byType = Object.fromEntries(Object.keys(JOURNEY_BASE).map(j => [j, s.items.filter(i => i.journey === j && i.state === 'open').length]));
   return { total: pool.length, byType,
     departments: [...depts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 30).map(([code, n]) => ({ code, slug: code.toLowerCase(), name: DEPARTMENTS[code] || code, count: n })),
-    cities: [...cities.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40).map(([slug, n]) => ({ slug, name: s.cityNames.get(slug) || slug, count: n })),
+    cities: [...cities.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40).map(([slug, n]) => ({ slug, name: s.cityNames.get(slug.replace(/-(\d{2,3}|2a|2b)$/, '')) || slug, count: n })),
     trades: [...trades.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([slug, n]) => ({ slug, name: s.trades.get(slug) || slug, count: n })),
     generatedAt: new Date(s.at).toISOString() };
 }

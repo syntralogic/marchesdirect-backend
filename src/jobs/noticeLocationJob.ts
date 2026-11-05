@@ -1,6 +1,6 @@
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
-import { extractNoticeLocation, extractNoticeDates, LOCATION_EXTRACTOR_VERSION, deptFromPostal } from '../services/noticeLocation';
+import { extractNoticeLocation, extractNoticeDates, locationFromTitle, LOCATION_EXTRACTOR_VERSION, deptFromPostal } from '../services/noticeLocation';
 import { buyerCommune } from '../services/seoV2Service';
 
 // Remplit opportunity_locations (table ajoutée le 6 nov., aucune colonne existante modifiée) : lieu d'exécution,
@@ -27,7 +27,7 @@ export async function ensureLocationSchema(): Promise<void> {
 
 export async function processLocationBatch(limit = 250): Promise<number> {
   const r = await db.query(`
-    SELECT o.id, o.raw_data, o.buyer_name, o.location_city, o.location_department
+    SELECT o.id, o.title, o.raw_data, o.buyer_name, o.location_city, o.location_department
       FROM opportunities o
       LEFT JOIN opportunity_locations l ON l.opportunity_id = o.id
      WHERE o.deleted_at IS NULL
@@ -40,6 +40,10 @@ export async function processLocationBatch(limit = 250): Promise<number> {
     let loc; let dates;
     try { loc = extractNoticeLocation(o.raw_data || {}); dates = extractNoticeDates(o.raw_data || {}); }
     catch (e: any) { logger.warn(`[Lieux] avis ${o.id} illisible : ${e?.message}`); loc = extractNoticeLocation({}); dates = { deadline: null, diffusionEnd: null }; }
+    if (loc.execution.status === 'inconnu') {
+      const t = locationFromTitle(o.title);
+      if (t) loc.execution = { status: t.communes.length ? 'texte' : 'departement', communes: t.communes, departments: t.departments, text: String(o.title).slice(0, 80), source: 'titre' };
+    }
     // Sources sans adresse structurée (TED, plateformes) : commune de l'acheteur déduite de son nom (« Mairie de X »).
     if (!loc.buyer.city) {
       const c = buyerCommune({ buyer_name: o.buyer_name, location_city: o.location_city });

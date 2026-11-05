@@ -11,7 +11,7 @@
 // Rien n'est deviné : sans source, l'exécution vaut « inconnue ». Aucun appel externe, aucune IA : lecture pure du texte.
 import { DEPARTMENTS, slugify, isCommuneName, displayCity } from './seoV2Service';
 
-export const LOCATION_EXTRACTOR_VERSION = 1;
+export const LOCATION_EXTRACTOR_VERSION = 2; // 2 : entités HTML décodées, lieu lu dans le titre « (17) ROCHEFORT - … »
 
 export type ExecCommune = { name: string; slug: string; postalCode: string | null; department: string | null };
 export type NoticeLocation = {
@@ -21,7 +21,7 @@ export type NoticeLocation = {
     departments: string[];
     /** Texte d'origine quand l'avis décrit le lieu en clair (« Plusieurs lieux », adresse…). */
     text: string | null;
-    source: 'eforms' | 'fnsimple' | 'mapa' | 'aucune';
+    source: 'eforms' | 'fnsimple' | 'mapa' | 'titre' | 'aucune';
   };
   buyer: { city: string | null; postalCode: string | null; department: string | null };
   publicationDepartments: string[];
@@ -62,6 +62,8 @@ const STREET = /^(\d+\s*(bis|ter)?\s+)?(rue|avenue|av\.?|bd|boulevard|route|rte|
 function cleanCommune(raw: unknown): string | null {
   let s = String(raw ?? '').replace(/\s+/g, ' ').trim();
   s = s.replace(/\s+cedex(\s*\d+)?$/i, '').replace(/^(commune|ville|mairie)\s+(de\s+|d['’]\s*)/i, '').replace(/[.,;]+$/, '').trim();
+  // « PARIS 12 », « Lyon 3e arrondissement », « Marseille 13ème » → la commune (les arrondissements ne sont pas des communes)
+  s = s.replace(/^(paris|lyon|marseille)\s*\d{1,2}\s*(e|er|ème|eme)?(\s*arr(ondissement|\.)?)?$/i, '$1');
   if (!s || s.length < 2 || deptByName(s)) return null;
   if (!isCommuneName(s)) return null;
   if (/\b(plusieurs|lieux|divers|sites?|ensemble|territoire|france|m[ée]tropolitaine?|ultramarin|outre|national|r[ée]gion|départements?|voir|selon|cf|batiments?|bâtiments?)\b/i.test(s)) return null;
@@ -224,4 +226,14 @@ export function extractNoticeDates(raw: any): { deadline: string | null; diffusi
   }
   const fin = rec.datefindiffusion ? String(rec.datefindiffusion).slice(0, 10) : null;
   return { deadline, diffusionEnd: fin && /^\d{4}-\d{2}-\d{2}$/.test(fin) ? fin : null };
+}
+
+/** Dernier recours, quand l'avis ne donne aucun lieu : titre au format des acheteurs de l'État
+ *  « (17) ROCHEFORT - BA 721 - … » ou « (40) - MONT DE MARSAN - … ». Rien d'autre n'est tiré du titre. */
+export function locationFromTitle(title: string | null | undefined): { communes: ExecCommune[]; departments: string[] } | null {
+  const m = String(title || '').match(/^\s*\((\d{2,3}|2[AB])\)\s*-?\s*([A-Za-zÀ-ÿ'’ -]{2,40}?)\s+-\s+/);
+  if (!m) return null;
+  const d = normDeptCode(m[1]); if (!d) return null;
+  const c = cleanCommune(m[2]);
+  return { communes: c ? [{ ...commune(c, null), department: d }] : [], departments: [d] };
 }
