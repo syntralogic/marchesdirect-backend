@@ -40,7 +40,8 @@ const paris = (d: Date) => new Date(d.toLocaleString('en-US', { timeZone: 'Europ
 export const fdate = (d: Date, day = false) => { const p = paris(d); return `${day ? JOURS[p.getDay()] + ' ' : ''}${p.getDate()} ${MOIS[p.getMonth()]} ${p.getFullYear()}`; };
 const fhour = (d: Date) => { const p = paris(d); return p.getHours() === 0 && p.getMinutes() === 0 ? null : `${p.getHours()} h ${String(p.getMinutes()).padStart(2, '0')}`; };
 const fsiret = (s?: string | null) => (s && /^\d{14}$/.test(s) ? s.replace(/(\d{3})(\d{3})(\d{3})(\d{5})/, '$1 $2 $3 $4') : s || '');
-const money = (v?: number | null) => (v ? `${Math.round(v).toLocaleString('fr-FR').replace(/[  ]/g, ' ')} € HT` : null);
+// « HT » n'est écrit que si l'on sait que le montant est hors taxes (v2 : jamais affirmé sans source).
+const money = (v?: number | null, ht = true) => (v ? `${Math.round(v).toLocaleString('fr-FR').replace(/[\u00a0\u202f]/g, ' ')} €${ht ? ' HT' : ' (montant indiqué dans l’avis, HT/TTC non précisé)'}` : null);
 const clean = (s: string) => s.replace(/[  ]/g, ' ');
 
 function fontDir(): string | null {
