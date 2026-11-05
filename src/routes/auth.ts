@@ -303,6 +303,23 @@ router.post('/magic-link/verify', [body('token').isString().notEmpty(), body('em
 });
 
 // GET /api/auth/me
+// 5 nov. (repères de sécurité, comme une banque) : dernière connexion et appareils connectés, puis
+// « me déconnecter partout » (supprime toutes les sessions ; les autres appareils redemandent un lien).
+router.get('/security', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const u = await db.query('SELECT last_login, created_at FROM users WHERE id = $1', [req.user!.id]);
+    const s = await db.query('SELECT created_at, expires_at FROM user_sessions WHERE user_id = $1 AND expires_at > NOW() ORDER BY created_at DESC LIMIT 20', [req.user!.id]);
+    res.json({ lastLogin: u.rows[0]?.last_login || null, accountCreatedAt: u.rows[0]?.created_at || null, sessions: s.rows.map((r: any) => ({ createdAt: r.created_at, expiresAt: r.expires_at })) });
+  } catch (err) { logger.error('security info error:', err); res.status(500).json({ error: 'security_unavailable' }); }
+});
+router.post('/logout-everywhere', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await db.query('DELETE FROM user_sessions WHERE user_id = $1', [req.user!.id]);
+    await db.query(`INSERT INTO audit_logs (user_id, action, entity_type, entity_id) VALUES ($1, 'logout_everywhere', 'user', $1)`, [req.user!.id]).catch(() => {});
+    res.json({ success: true, closed: r.rowCount || 0 });
+  } catch (err) { logger.error('logout everywhere error:', err); res.status(500).json({ error: 'logout_failed' }); }
+});
+
 router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
   res.json({ user: req.user, company: req.company });
 });
