@@ -325,11 +325,11 @@ function buildPublic(ly: Layout, input: DossierV2Input, _qr: Buffer) {
   ly.text('BORDEREAU DES PIÈCES REMISES', { size: 13, font: ly.F.b, align: 'center' });
   ly.text(`${input.title}${input.lotLabel ? ' — ' + input.lotLabel : ''}`, { size: 9.4, color: '#555555', align: 'center' }); ly.space(10);
   ly.table(['N°', 'Désignation de la pièce', 'Origine', 'Jointe'], [
-    ['A. CANDIDATURE'], ['1', 'Lettre de candidature (formulaire DC1) ou DUME', 'Formulaire officiel — données en pièce 1', '☐'],
-    ['2', 'Déclaration du candidat (formulaire DC2) ou DUME', 'Formulaire officiel — données en pièce 2', '☐'], ['3', 'Références de travaux similaires', 'Pièce 3 du présent dossier', '☐'],
-    ['4', 'Moyens humains et matériels', 'Pièce 4 du présent dossier', '☐'], ['5', 'Attestations et certificats (Kbis, URSSAF, fiscale, assurances, qualifications)', 'Documents originaux du candidat', '☐'],
-    ['B. OFFRE'], ['6', 'Mémoire technique', 'Pièce 6 du présent dossier', '☐'], ['7', 'Acte d’engagement (ATTRI1 ou modèle de l’acheteur)', 'Pièce du DCE à compléter', '☐'],
-    ['8', 'Décomposition du prix global et forfaitaire (DPGF) ou bordereau des prix', 'Pièce du DCE à compléter', '☐'], ['9', 'Autres pièces exigées par le règlement de la consultation', '[selon RC]', '☐'],
+    ['A. CANDIDATURE'], ['1', 'Lettre de candidature (formulaire DC1) ou DUME', 'Formulaire officiel — données en pièce 1', '□'],
+    ['2', 'Déclaration du candidat (formulaire DC2) ou DUME', 'Formulaire officiel — données en pièce 2', '□'], ['3', 'Références de travaux similaires', 'Pièce 3 du présent dossier', '□'],
+    ['4', 'Moyens humains et matériels', 'Pièce 4 du présent dossier', '□'], ['5', 'Attestations et certificats (Kbis, URSSAF, fiscale, assurances, qualifications)', 'Documents originaux du candidat', '□'],
+    ['B. OFFRE'], ['6', 'Mémoire technique', 'Pièce 6 du présent dossier', '□'], ['7', 'Acte d’engagement (ATTRI1 ou modèle de l’acheteur)', 'Pièce du DCE à compléter', '□'],
+    ['8', 'Décomposition du prix global et forfaitaire (DPGF) ou bordereau des prix', 'Pièce du DCE à compléter', '□'], ['9', 'Autres pièces exigées par le règlement de la consultation', '[selon RC]', '□'],
   ], [30, CW - 210, 135, 45], { sectionRows: [0, 6] });
   ly.small('Les formulaires DC1 et DC2 sont les modèles publiés par la Direction des affaires juridiques du ministère de l’Économie ; le document unique de marché européen (DUME) peut les remplacer. Le règlement de la consultation précise les pièces exigées.');
   ly.space(26); ly.text('Fait à [lieu], le [date]'); ly.space(4); ly.text(`Pour ${name}, [nom et qualité du signataire]`);
@@ -340,9 +340,9 @@ function buildPublic(ly: Layout, input: DossierV2Input, _qr: Buffer) {
     ['Adresse du siège social', [c.address, [c.postal, c.city].filter(Boolean).join(' ')].filter(Boolean).join(', ') || FILL], ['Date de création', c.created || FILL],
     ['N° de TVA intracommunautaire', FILL], ['Adresse électronique', FILL], ['Téléphone', FILL]]);
   art(ly, '1.2 — Mode de candidature');
-  ly.kv([['Candidature', '☒ Candidat individuel      ☐ Membre d’un groupement'], ['Lot(s) concerné(s)', input.lotLabel || '[selon l’avis]'], ['Sous-traitance envisagée', '☐ Oui (formulaire DC4)      ☐ Non']]);
+  ly.kv([['Candidature', '■ Candidat individuel      □ Membre d’un groupement'], ['Lot(s) concerné(s)', input.lotLabel || '[selon l’avis]'], ['Sous-traitance envisagée', '□ Oui (formulaire DC4)      □ Non']]);
   art(ly, '1.3 — Personne habilitée à engager le candidat');
-  ly.kv([['Nom, prénom', c.director || FILL], ['Qualité', '[président, gérant…]'], ['Délégation de pouvoir', '☐ Non requise (représentant légal)      ☐ Jointe']]);
+  ly.kv([['Nom, prénom', c.director || FILL], ['Qualité', '[président, gérant…]'], ['Délégation de pouvoir', '□ Non requise (représentant légal)      □ Jointe']]);
   ly.small('Les déclarations sur l’honneur (absence d’interdiction de soumissionner, articles L2141-1 à L2141-5 du Code de la commande publique) figurent dans le formulaire DC1 ou le DUME : elles doivent être cochées et signées par le candidat lui-même.');
 
   ly.pageBreak(); pieceTitle(ly, 2, 'Capacités économiques, financières et professionnelles', 'Données à reporter dans le formulaire DC2 ou dans la partie IV du DUME.');
@@ -366,9 +366,9 @@ function buildPublic(ly: Layout, input: DossierV2Input, _qr: Buffer) {
   art(ly, '4.2 — Matériel et outillage');
   ly.table(['Désignation', 'Nombre', 'Observations'], [['Véhicules utilitaires', FILL, ''], ['Outillage spécifique au lot', FILL, ''], ['Appareils de mesure et de contrôle', FILL, ''], ['Moyens de levage et d’accès en hauteur', FILL, '']], [CW - 230, 75, 155]);
   art(ly, '4.3 — Pièces à joindre (pièce 5)');
-  ly.table(['Document', 'Délivré par', 'Validité exigée', 'Joint'], [['Extrait Kbis', 'Greffe du tribunal de commerce', 'Moins de 3 mois', '☐'], ['Attestation de vigilance', 'URSSAF', 'Moins de 6 mois (art. D8222-5 du Code du travail)', '☐'],
-    ['Attestation de régularité fiscale', 'Direction générale des finances publiques', 'En cours de validité', '☐'], ['Attestation d’assurance RC professionnelle', 'Assureur', 'Année en cours', '☐'],
-    ['Attestation d’assurance décennale', 'Assureur', 'Année en cours, activités du lot', '☐'], ['Certificats de qualification', 'Organisme certificateur', 'En cours de validité', '☐']], [150, 130, CW - 325, 45]);
+  ly.table(['Document', 'Délivré par', 'Validité exigée', 'Joint'], [['Extrait Kbis', 'Greffe du tribunal de commerce', 'Moins de 3 mois', '□'], ['Attestation de vigilance', 'URSSAF', 'Moins de 6 mois (art. D8222-5 du Code du travail)', '□'],
+    ['Attestation de régularité fiscale', 'Direction générale des finances publiques', 'En cours de validité', '□'], ['Attestation d’assurance RC professionnelle', 'Assureur', 'Année en cours', '□'],
+    ['Attestation d’assurance décennale', 'Assureur', 'Année en cours, activités du lot', '□'], ['Certificats de qualification', 'Organisme certificateur', 'En cours de validité', '□']], [150, 130, CW - 325, 45]);
 
   ly.pageBreak(); pieceTitle(ly, 6, 'Mémoire technique', `Établi par ${name} en réponse au cahier des clauses techniques particulières (CCTP). Les passages entre crochets sont à compléter par le candidat.`);
   const mem: [string, string][] = [
@@ -393,10 +393,10 @@ function buildPublic(ly: Layout, input: DossierV2Input, _qr: Buffer) {
   ly.table(['Pièce', 'Points à vérifier'], [['Règlement de la consultation (RC)', 'Pièces exigées, critères et pondération, visite obligatoire, variantes, date et heure limites, date limite des questions.'], ['Acte d’engagement (AE)', 'Prix, délai d’exécution, coordonnées bancaires, signature.'],
     ['CCAP', 'Pénalités, avance, retenue de garantie, délai de paiement, révision des prix.'], ['CCTP', 'Ouvrages à réaliser, performances, références de produits, essais.'], ['DPGF ou bordereau des prix', 'À remplir sans modifier le cadre, les quantités ni les intitulés.'], ['Plans, diagnostics, PGC', 'Contraintes du site, repérage amiante, règles de sécurité du chantier.']], [160, CW - 160]);
   ly.h2('B.2 — Calendrier de préparation');
-  ly.table(['Date', 'Étape', 'Fait'], plan(D, [[0, 'Téléchargement du DCE, lecture du RC'], [1, 'Lecture du CCTP, questions écrites à l’acheteur'], [1, 'Demande des attestations (URSSAF, fiscale, assurances)'], [4, 'Chiffrage de la DPGF'], [4, 'Rédaction du mémoire technique (pièce 6)'], [5, 'Relecture et contrôle des pièces'], [6, 'Dépôt sur le profil d’acheteur, au plus tard la veille']]).map(([d, w]) => [d, w, '☐']), [140, CW - 185, 45]);
+  ly.table(['Date', 'Étape', 'Fait'], plan(D, [[0, 'Téléchargement du DCE, lecture du RC'], [1, 'Lecture du CCTP, questions écrites à l’acheteur'], [1, 'Demande des attestations (URSSAF, fiscale, assurances)'], [4, 'Chiffrage de la DPGF'], [4, 'Rédaction du mémoire technique (pièce 6)'], [5, 'Relecture et contrôle des pièces'], [6, 'Dépôt sur le profil d’acheteur, au plus tard la veille']]).map(([d, w]) => [d, w, '□']), [140, CW - 185, 45]);
   ly.h2('B.3 — Contrôle avant dépôt');
-  ly.table(null, [['☐', 'Toutes les pièces du bordereau sont jointes, lisibles, au format PDF, nommées clairement.'], ['☐', 'Les attestations sont en cours de validité à la date limite.'], ['☐', 'La DPGF est complète et les totaux sont vérifiés.'],
-    ['☐', 'L’acte d’engagement est complété ; signature électronique si le RC l’exige au stade du dépôt.'], ['☐', 'Dépôt effectué avant l’heure limite : une offre reçue hors délai est irrecevable.'], ['☐', 'Accusé de réception horodaté téléchargé et conservé.']], [26, CW - 26]);
+  ly.table(null, [['□', 'Toutes les pièces du bordereau sont jointes, lisibles, au format PDF, nommées clairement.'], ['□', 'Les attestations sont en cours de validité à la date limite.'], ['□', 'La DPGF est complète et les totaux sont vérifiés.'],
+    ['□', 'L’acte d’engagement est complété ; signature électronique si le RC l’exige au stade du dépôt.'], ['□', 'Dépôt effectué avant l’heure limite : une offre reçue hors délai est irrecevable.'], ['□', 'Accusé de réception horodaté téléchargé et conservé.']], [26, CW - 26]);
   ly.space(6);
   ly.small('Repère réglementaire : depuis le décret n° 2025-1386 du 29 décembre 2025, les marchés de travaux inférieurs à 100 000 € HT peuvent être conclus sans publicité ni mise en concurrence ; au-delà et jusqu’à 5 404 000 € HT (seuil européen 2026-2027), la procédure adaptée s’applique.');
   ly.space(4); ly.small(`Notice établie le ${fdate(D.now)} par Marchés Direct (www.marchesdirect.fr), dossier n° ${input.ref}, à partir de l’avis publié et du répertoire SIRENE. Document préparatoire : les pièces de la consultation font foi.`);
@@ -515,7 +515,7 @@ function buildBranded(ly: Layout, input: DossierV2Input, _qr: Buffer) {
   ly.section('9', st ? 'Contrat et paiement' : 'Remise et signature', st ? 'Sécuriser votre paiement avant le premier jour' : 'Avant d’envoyer, et avant de signer', st ? 'La sous-traitance protège bien le sous-traitant, à condition de respecter ces étapes.' : 'En privé, tout se joue dans le contrat. Ces points vous protègent.');
   const chk = st ? ['DC4 signée par l’entreprise principale et par vous, transmise à l’acheteur public.', 'Acceptation et agrément des conditions de paiement notifiés avant votre démarrage.', 'Contrat de sous-traitance signé : prix, délais, pénalités, révision, assurances.', 'Facturation HT avec la mention « autoliquidation » (CGI, art. 283-2 nonies).', 'Demandes de paiement direct adressées au titulaire, qui dispose de 15 jours pour les accepter ou les refuser ; passé ce délai, l’acheteur peut payer.', 'Attestation URSSAF renouvelée tous les 6 mois pendant le chantier.', 'Cartes BTP de chaque salarié présentes sur le chantier.']
     : ['Devis daté, numéroté, avec durée de validité et mentions de l’assurance décennale.', 'Délai de paiement : 60 jours maximum après la date de la facture, ou 45 jours fin de mois (Code de commerce, art. L441-10).', 'Acompte à la commande prévu par écrit.', 'Retenue de garantie limitée à 5 %, remplaçable par une caution bancaire.', 'Pénalités de retard plafonnées et réciproques.', 'Bon pour accord signé avant toute commande de matériel.', 'Procès-verbal de réception signé à la fin des travaux.'];
-  ly.table(null, chk.map(x => ['▢', x]), [24, CW - 24], { zebra: false, size: 9.2 });
+  ly.table(null, chk.map(x => ['□', x]), [24, CW - 24], { zebra: false, size: 9.2 });
   ly.box(null, st ? 'Le paiement direct est votre meilleure garantie : l’acheteur public vous paie lui-même, même si l’entreprise principale rencontre des difficultés.' : 'Conservez une trace écrite de chaque échange : en cas de désaccord, c’est votre meilleure protection.', { bg: '#F2F5F9', bar: '#142B4A' });
 
   // 10. Accompagnement
