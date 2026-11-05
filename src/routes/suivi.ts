@@ -4,6 +4,7 @@ import { logger } from '../utils/logger';
 import { AuthRequest } from '../middleware/auth';
 import { generateDossierPdfV2, DossierKind } from '../services/dossierPdfV2';
 import { getVapid, isValidEndpoint, saveSubscription } from '../services/webPushService';
+import { postClientMessage, syncElenaReplies, listMessages } from '../services/dossierFollowupService';
 import { clientSteps, entrustDossier, followupSchema, refreshStages, findLeadFor } from '../services/dossierFollowupService';
 
 // /api/suivi : favoris, « Confier à Elena » et suivi des dossiers (5 nov.).
@@ -100,6 +101,32 @@ router.get('/:opportunityId', async (req: AuthRequest, res: Response) => {
     }
     res.json({ dossier: null, steps: clientSteps({ known, analysed, leadAt: lead?.created_at || null, followup: null }) });
   } catch (err: any) { logger.error('[Suivi] fiche:', err); res.status(500).json({ error: 'suivi_unavailable' }); }
+});
+
+// Messagerie du dossier (une fois confié à Elena).
+router.get('/:opportunityId/messages', async (req: AuthRequest, res: Response) => {
+  const opp = req.params.opportunityId;
+  if (!UUID.test(opp)) return res.status(400).json({ error: 'invalid_opportunity' });
+  try {
+    const f = (await rowsFor(req, opp))[0];
+    if (!f) return res.status(404).json({ error: 'not_entrusted' });
+    if (!f.messages_synced_at || Date.now() - new Date(f.messages_synced_at).getTime() > 60000) { try { await syncElenaReplies(f); } catch (e: any) { logger.warn('[Messages] relecture:', e?.message); } }
+    res.json({ messages: await listMessages(f.id) });
+  } catch (err: any) { logger.error('[Messages] liste:', err); res.status(500).json({ error: 'messages_unavailable' }); }
+});
+router.post('/:opportunityId/messages', async (req: AuthRequest, res: Response) => {
+  const opp = req.params.opportunityId;
+  const body = String(req.body?.body || '').trim();
+  if (!UUID.test(opp)) return res.status(400).json({ error: 'invalid_opportunity' });
+  if (body.length < 2 || body.length > 2000) return res.status(400).json({ error: 'invalid_message', message: 'Votre message doit faire entre 2 et 2 000 caractères.' });
+  try {
+    const f = (await rowsFor(req, opp))[0];
+    if (!f) return res.status(404).json({ error: 'not_entrusted', message: 'Confiez d’abord ce dossier à Elena pour lui écrire.' });
+    const recent = await db.query(`SELECT COUNT(*)::int AS n FROM dossier_messages WHERE followup_id = $1 AND author = 'client' AND created_at > NOW() - INTERVAL '10 minutes'`, [f.id]);
+    if ((recent.rows[0]?.n || 0) >= 5) return res.status(429).json({ error: 'too_many', message: 'Vous avez envoyé plusieurs messages : Elena vous répond dès que possible.' });
+    await postClientMessage({ id: f.id, hubspot_deal_id: f.hubspot_deal_id, is_test: f.is_test, title: f.title }, body);
+    res.json({ messages: await listMessages(f.id) });
+  } catch (err: any) { logger.error('[Messages] envoi:', err); res.status(500).json({ error: 'messages_unavailable' }); }
 });
 
 // POST /api/suivi/:opportunityId/confier { sessionId } : « Confier à Elena ».
