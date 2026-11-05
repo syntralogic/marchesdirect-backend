@@ -1,3 +1,4 @@
+import { isTestCompany } from './companyProfileService';
 import axios, { AxiosRequestConfig } from 'axios';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
@@ -94,6 +95,8 @@ export async function syncVisitNote(lead: NoteLead, ids: { contactId: string; co
 export async function syncAppointmentTask(lead: NoteLead, ids: { contactId: string; dealId: string | null }): Promise<void> {
   const isAppointment = lead.appointment_mode === 'slot' || lead.lead_source === 'appointment_modal';
   if (!isAppointment || !lead.appointment_slot_at) return;
+  // 5 nov. (contrôle client) : un rendez-vous de test ne crée jamais de tâche d'appel pour l'équipe.
+  if (lead.is_test || isTestCompany((lead as any).siret || '', lead.company_name)) return;
   return withLock(`task:${lead.id}`, async () => {
     const known = await db.query('SELECT 1 FROM crm_tasks WHERE lead_id = $1', [lead.id]);
     if (known.rows.length > 0) return;

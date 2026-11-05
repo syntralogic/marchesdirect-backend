@@ -258,6 +258,13 @@ router.post(
   }
 );
 
+// GET /api/auth/magic-link/status - 5 nov. : le site n'affiche la connexion par e-mail que si un envoi réel est
+// possible (envoi activé + fournisseur configuré). Aucune donnée personnelle, aucune clé exposée.
+router.get('/magic-link/status', (_req: Request, res: Response) => {
+  const available = process.env.EMAIL_DELIVERY_ENABLED === 'true' && !!process.env.RESEND_API_KEY?.trim() && !!process.env.EMAIL_FROM?.trim();
+  res.set('Cache-Control', 'public, max-age=300').json({ available });
+});
+
 // POST /api/auth/magic-link - client's 6 Sep brief: "il saisit son adresse
 // e-mail → il reçoit un lien de connexion sécurisé". Same answer whether the
 // address is known or not (no enumeration); an unknown address gets its
