@@ -15,7 +15,8 @@ import { applyContactChoice, parseContactMode } from '../services/contactPrefere
 import { AuthRequest } from '../middleware/auth';
 import { tradeSlugsForCompany } from '../services/matchEngine';
 import { notifyTeamOfNewLead } from '../services/leadNotificationService';
-import { dossierPdfFilename, isTestRequest } from '../utils/requestFacts';
+import { dossierPdfFilename, isTestRequest, parseCallbackMoment } from '../utils/requestFacts';
+import { reserveSlot, attachBooking, releaseBooking, slotInfo } from '../services/appointmentService';
 import {
   requestVerificationCode,
   confirmVerificationCode,
@@ -723,6 +724,9 @@ router.post(
     // v26 "coordonnées" form: the e-mail is optional (only the phone is required). When given it is validated as before.
     body('email').optional({ checkFalsy: true }).isEmail().withMessage("L'e-mail n'est pas valide.").normalizeEmail(),
     body('opportunityId').optional({ checkFalsy: true }).isUUID(),
+    // 5 Nov (un clic = dossier + appel) : créneau souhaité (ISO, parmi ceux proposés) ou moment de rappel.
+    body('slotAt').optional({ checkFalsy: true }).isISO8601(),
+    body('callbackMoment').optional({ checkFalsy: true }).isString(),
   ],
   async (req: AuthRequest, res: Response) => {
     const errors = validationResult(req);
@@ -731,6 +735,16 @@ router.post(
     }
 
     const { sessionId, phone, email, opportunityId } = req.body;
+    const callbackMoment = parseCallbackMoment(req.body.callbackMoment);
+    // Le créneau est réservé de façon atomique (même règle que /crm/leads) ; s'il vient d'être pris, la demande de
+    // dossier n'est PAS enregistrée dans cet état : le visiteur choisit un autre créneau et renvoie (409 / 400).
+    let slotBookingId: string | null = null;
+    let slotDate: Date | null = null;
+    if (req.body.slotAt) {
+      const r = await reserveSlot(String(req.body.slotAt), opportunityId || null);
+      if (!r.ok) return res.status(r.status).json(r.body);
+      slotBookingId = r.bookingId; slotDate = r.slotDate;
+    }
     // Optional: the lot the visitor is looking at (free text, trimmed, bounded).
     const lotLabel = typeof req.body?.lot === 'string' ? req.body.lot.replace(/\s+/g, ' ').trim().slice(0, 200) || null : null;
     // This whole handler used to run with no top-level try/catch. Express
@@ -750,8 +764,9 @@ router.post(
     // timeout. The dossier-email and CRM-linking blocks further down
     // already had their own non-fatal try/catch and are unaffected.
     try {
-      return await handleLeadCapture(req as AuthRequest, res, { sessionId, phone, email, opportunityId, lotLabel });
+      return await handleLeadCapture(req as AuthRequest, res, { sessionId, phone, email, opportunityId, lotLabel, callbackMoment, slotBookingId, slotDate });
     } catch (err) {
+      if (slotBookingId) await releaseBooking(slotBookingId);
       logger.error('POST /siret/lead failed:', err);
       return res.status(500).json({ error: "L'enregistrement de vos coordonnées a échoué. Réessayez dans un instant." });
     }
@@ -761,11 +776,15 @@ router.post(
 async function handleLeadCapture(
   req: AuthRequest,
   res: Response,
-  { sessionId, phone, email, opportunityId, lotLabel }: { sessionId: string; phone: string; email?: string | null; opportunityId?: string; lotLabel?: string | null }
+  { sessionId, phone, email, opportunityId, lotLabel, callbackMoment = null, slotBookingId: initialBookingId = null, slotDate = null }:
+  { sessionId: string; phone: string; email?: string | null; opportunityId?: string; lotLabel?: string | null; callbackMoment?: string | null; slotBookingId?: string | null; slotDate?: Date | null }
 ) {
+    // 5 Nov : créneau réservé en amont par la route ; rattaché à la demande ci-dessous, libéré s'il ne l'est pas.
+    let slotBookingId: string | null = initialBookingId;
 
     const existing = await db.query('SELECT id, siret, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
     if (existing.rows.length === 0) {
+      if (slotBookingId) await releaseBooking(slotBookingId);
       return res.status(409).json({ error: 'company_not_identified', message: "Identifiez d'abord votre entreprise." });
     }
 
@@ -776,6 +795,7 @@ async function handleLeadCapture(
     // provider is configured (isVerificationRequired) so the flow degrades to
     // today's behaviour instead of blocking every visitor.
     if (isVerificationRequired() && !(await isPhoneVerified(sessionId, phone))) {
+      if (slotBookingId) await releaseBooking(slotBookingId);
       return res.status(403).json({
         error: 'phone_not_verified',
         message: 'Confirmez d’abord le code reçu par SMS sur ce numéro.',
@@ -852,17 +872,31 @@ async function handleLeadCapture(
           if (dup.rows.length === 0 && brandId) {
             const insertResult = await db.query(
               `INSERT INTO crm_leads
-                (brand_id, email, phone, company_name, lead_source, opportunity_id, session_id, crm_sync_status, lot_label, siret, utm_source, utm_campaign, is_test)
-               VALUES ($1, $2, $3, $4, 'analysis_gate', $5, $6, 'pending', $7, $8, $9, $10, $11)
+                (brand_id, email, phone, company_name, lead_source, opportunity_id, session_id, crm_sync_status, lot_label, siret, utm_source, utm_campaign, callback_moment, appointment_mode, appointment_slot_at, is_test)
+               VALUES ($1, $2, $3, $4, 'analysis_gate', $5, $6, 'pending', $7, $8, $9, $10, $11, $12, $13, $14)
                RETURNING id`,
-              [brandId, email || null, phone, companyName, opportunityId, sessionId, lotLabel || null, companySiret, cleanUtm(req.body?.utmSource, 100), cleanUtm(req.body?.utmCampaign, 150), isTestRequest(req.body?.isTest)]
+              [brandId, email || null, phone, companyName, opportunityId, sessionId, lotLabel || null, companySiret, cleanUtm(req.body?.utmSource, 100), cleanUtm(req.body?.utmCampaign, 150),
+               callbackMoment, slotDate ? 'slot' : null, slotDate ? slotDate.toISOString() : null, isTestRequest(req.body?.isTest)]
             );
+            if (slotBookingId) { await attachBooking(slotBookingId, insertResult.rows[0].id); slotBookingId = null; }
             await recordJourneyEvent({ sessionId, opportunityId, siret: companySiret, eventType: 'dossier_requested', eventId: `dossier:${insertResult.rows[0].id}` });
+            // Un clic = dossier + appel : l'appel est journalisé avec son propre code (codes existants, inchangés).
+            if (slotDate) await recordJourneyEvent({ sessionId, opportunityId, siret: companySiret, eventType: 'appointment_booked', eventId: `rdv:${insertResult.rows[0].id}` });
+            else if (callbackMoment) await recordJourneyEvent({ sessionId, opportunityId, siret: companySiret, eventType: 'callback_requested', eventId: `rappel:${insertResult.rows[0].id}` });
             syncLeadToCrm(insertResult.rows[0].id).catch((err) => logger.error('Unexpected error firing CRM sync:', err));
             scheduleFollowUps(insertResult.rows[0].id).catch(() => {});
           } else if (dup.rows[0]) {
-            await db.query("UPDATE crm_leads SET phone = $2, lot_label = COALESCE($3, lot_label), crm_sync_status = 'pending' WHERE id = $1", [dup.rows[0].id, phone, lotLabel || null]);
+            await db.query(
+              `UPDATE crm_leads SET phone = $2, lot_label = COALESCE($3, lot_label), crm_sync_status = 'pending',
+                 callback_moment = COALESCE($4, callback_moment),
+                 appointment_mode = CASE WHEN $5::text IS NOT NULL THEN 'slot' ELSE appointment_mode END,
+                 appointment_slot_at = COALESCE($5::timestamptz, appointment_slot_at)
+               WHERE id = $1`,
+              [dup.rows[0].id, phone, lotLabel || null, callbackMoment, slotDate ? slotDate.toISOString() : null]);
+            if (slotBookingId) { await attachBooking(slotBookingId, dup.rows[0].id); slotBookingId = null; }
             await recordJourneyEvent({ sessionId, opportunityId, siret: companySiret, eventType: 'dossier_requested', eventId: `dossier:${dup.rows[0].id}:${Date.now()}` });
+            if (slotDate) await recordJourneyEvent({ sessionId, opportunityId, siret: companySiret, eventType: 'appointment_booked', eventId: `rdv:${dup.rows[0].id}:${Date.now()}` });
+            else if (callbackMoment) await recordJourneyEvent({ sessionId, opportunityId, siret: companySiret, eventType: 'callback_requested', eventId: `rappel:${dup.rows[0].id}:${Date.now()}` });
             void syncLeadToCrm(dup.rows[0].id);
           }
         }
@@ -872,8 +906,10 @@ async function handleLeadCapture(
         logger.error('Lead-capture CRM linking error (non-fatal):', err);
       }
     }
+    // Créneau réservé mais aucune demande n'a pu le porter (marché inconnu, erreur) : on le libère, jamais de créneau fantôme.
+    if (slotBookingId) await releaseBooking(slotBookingId).catch(() => undefined);
 
-    res.json({ leadCaptured: true, dossierEmailed });
+    res.json({ leadCaptured: true, dossierEmailed, ...(slotDate && !slotBookingId ? slotInfo(slotDate) : {}), ...(callbackMoment ? { callbackMoment } : {}) });
 }
 
 // Shared by GET /lead/dossier-pdf and POST /lead/resend below: re-derives the
