@@ -11,7 +11,7 @@
 // Rien n'est deviné : sans source, l'exécution vaut « inconnue ». Aucun appel externe, aucune IA : lecture pure du texte.
 import { DEPARTMENTS, slugify, isCommuneName, displayCity } from './seoV2Service';
 
-export const LOCATION_EXTRACTOR_VERSION = 2; // 2 : entités HTML décodées, lieu lu dans le titre « (17) ROCHEFORT - … »
+export const LOCATION_EXTRACTOR_VERSION = 3; // 3 : date limite avec son vrai fuseau horaire // 2 : entités HTML décodées, lieu lu dans le titre « (17) ROCHEFORT - … »
 
 export type ExecCommune = { name: string; slug: string; postalCode: string | null; department: string | null };
 export type NoticeLocation = {
@@ -211,21 +211,48 @@ export function extractNoticeLocation(raw: any): NoticeLocation {
 }
 
 /** Dates lues dans l'avis : date limite de réponse et fin de diffusion. Null quand l'avis ne les donne pas. */
-export function extractNoticeDates(raw: any): { deadline: string | null; diffusionEnd: string | null } {
+/** Heure murale (AAAA-MM-JJ, HH:MM:SS) interprétée dans le fuseau donné (Europe/Paris par défaut), heure d'été comprise. */
+export function wallClockToIso(day: string, time: string, tz = 'Europe/Paris'): string | null {
+  const m = `${day}T${time}`.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/); if (!m) return null;
+  const guess = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0));
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    .formatToParts(new Date(guess)).reduce((o: any, p) => { o[p.type] = p.value; return o; }, {});
+  const asTz = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second);
+  return new Date(guess - (asTz - guess)).toISOString();
+}
+// Outre-mer : un décalage déclaré propre à ces territoires est respecté (Antilles −04:00, Guyane −03:00, Mayotte +03:00, Réunion +04:00).
+const OVERSEAS_TZ: Record<string, string> = { '-04:00': 'America/Guadeloupe', '-03:00': 'America/Cayenne', '+03:00': 'Indian/Mayotte', '+04:00': 'Indian/Reunion' };
+
+export function extractNoticeDates(raw: any): { deadline: string | null; diffusionEnd: string | null; deadlineSource: string | null } {
+  // Date limite = heure murale écrite dans l'avis, interprétée à l'heure de Paris (ou du territoire d'outre-mer
+  // déclaré). Les décalages écrits dans les données sont souvent faux : l'API BOAMP met « 12:00+00:00 » pour un avis
+  // « 12:00+01:00 » (26-92640), certaines plateformes écrivent « +02:00 » en décembre (26-90736). Prendre ces décalages
+  // au pied de la lettre décale l'échéance d'une à deux heures. Ordre des sources : gestion.INDEXATION, eForms,
+  // formulaire national, puis datelimitereponse.
   const rec = raw?.fields ? raw.fields : raw || {};
-  const iso = (v: unknown): string | null => { if (!v) return null; const t = Date.parse(String(v)); return Number.isNaN(t) ? null : new Date(t).toISOString(); };
-  let deadline = iso(rec.datelimitereponse);
+  const split = (v: unknown): { day: string; time: string; off: string | null } | null => {
+    const m = String(v || '').match(/^(\d{4}-\d{2}-\d{2})(?:T(\d{2}:\d{2}(?::\d{2})?))?(?:\.\d+)?([+-]\d{2}:\d{2}|Z)?/);
+    return m ? { day: m[1], time: m[2] || '', off: m[3] || null } : null;
+  };
+  const toIso = (x: { day: string; time: string; off: string | null } | null) => {
+    if (!x) return null;
+    const tz = (x.off && OVERSEAS_TZ[x.off]) || 'Europe/Paris';
+    return wallClockToIso(x.day, x.time || '23:59:59', tz);
+  };
+  let deadline: string | null = null; let source: string | null = null;
+  let g: any = rec.gestion; if (typeof g === 'string') { try { g = JSON.parse(g); } catch { g = null; } }
+  const gd = split(g?.INDEXATION?.DATE_LIMITE_REPONSE);
+  if (gd?.time) { deadline = toIso(gd); source = 'avis (gestion)'; }
   const dn = !deadline ? parseDonnees(rec) : null;
   if (!deadline && dn) {
     const p = walk(dn, 'cac:TenderSubmissionDeadlinePeriod')[0];
-    if (p) {
-      const d = text(p['cbc:EndDate']); const tm = text(p['cbc:EndTime']);
-      if (d) { const day = d.slice(0, 10); const tz = (d.slice(10) || '+01:00'); deadline = iso(`${day}T${tm ? tm.slice(0, 8) : '23:59:59'}${tz}`); }
-    }
-    if (!deadline) deadline = iso(walk(dn, 'dateReceptionOffres')[0]);
+    const d = p ? split(text(p['cbc:EndDate'])) : null; const tm = p ? split(`2000-01-01T${String(text(p['cbc:EndTime']) || '')}`) : null;
+    if (d) { deadline = toIso({ day: d.day, time: tm?.time || '', off: tm?.off || d.off }); source = 'avis (eForms)'; }
+    if (!deadline) { const f = split(walk(dn, 'dateReceptionOffres')[0]); if (f?.time) { deadline = toIso(f); source = 'avis (formulaire)'; } }
   }
+  if (!deadline && rec.datelimitereponse) { deadline = toIso(split(rec.datelimitereponse)); source = 'champ BOAMP datelimitereponse (heure lue à Paris)'; }
   const fin = rec.datefindiffusion ? String(rec.datefindiffusion).slice(0, 10) : null;
-  return { deadline, diffusionEnd: fin && /^\d{4}-\d{2}-\d{2}$/.test(fin) ? fin : null };
+  return { deadline, deadlineSource: source, diffusionEnd: fin && /^\d{4}-\d{2}-\d{2}$/.test(fin) ? fin : null };
 }
 
 /** Dernier recours, quand l'avis ne donne aucun lieu : titre au format des acheteurs de l'État

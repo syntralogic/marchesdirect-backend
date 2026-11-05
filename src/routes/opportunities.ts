@@ -372,6 +372,14 @@ const searchCacheKey = (...parts: unknown[]): string =>
 // Tiny reference tables (trades): no need to hit the DB on every search.
 const TRADE_LOOKUP_TTL_MS = 10 * 60 * 1000;
 
+let locationTableReady: boolean | null = null; let locationTableCheckedAt = 0;
+async function hasLocationTable(): Promise<boolean> {
+  if (locationTableReady !== null && Date.now() - locationTableCheckedAt < 10 * 60000) return locationTableReady;
+  try { const r = await db.query(`SELECT to_regclass('public.opportunity_locations') IS NOT NULL AS ok`); locationTableReady = !!r.rows[0]?.ok; }
+  catch { locationTableReady = false; }
+  locationTableCheckedAt = Date.now(); return locationTableReady;
+}
+
 async function searchOpportunities(req: Request, res: Response) {
   try {
     const countOnly = (req as any).__countOnly === true;
@@ -435,6 +443,10 @@ async function searchOpportunities(req: Request, res: Response) {
     // chahiye" ask was about not hiding cancelled/expired/awarded - not
     // about undoing deduplication. Without this, merged duplicates that
     // were already fixed once (see dedup commit) silently reappear here.
+    // Recherche v2 (6 nov., mandat qualité) : activée seulement par ?loc=2, que seul l'aperçu envoie. Le site en
+    // production garde exactement l'ancien comportement tant que Hedi n'a pas validé. Voir RECHERCHE_V2 plus bas.
+    const v2 = String((req.query as any).loc || '') === '2' && await hasLocationTable();
+    let locLevelExpr: string | null = null;
     const conditions: string[] = ["o.deleted_at IS NULL", "COALESCE(o.status, '') != 'merged'"];
     // 27 Sep client report, point 5: "France entière" surfacing
     // Roumanie/Espagne/Italie notices. TED (joined via data_sources below)
@@ -911,8 +923,19 @@ async function searchOpportunities(req: Request, res: Response) {
         // for why): an un-geocoded row isn't "in" this city, so folding it
         // in only floods a specific-city search with unrelated nationwide
         // results the way the region/department filters did.
-        conditions.push(`${ua}(o.location_city) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p))`);
-        params.push(cities.map(c => `%${c}%`));
+        if (v2) {
+          const slugs = cities.map(c => c.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/['’]/g, '-').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''));
+          const si = idx++; params.push(slugs);
+          const li = idx++; params.push(cities.map(c => `%${c}%`));
+          const execHit = `EXISTS (SELECT 1 FROM jsonb_array_elements(l.exec_communes) ec WHERE ec->>'slug' = ANY($${si}::text[]))`;
+          const buyerHit = `(jsonb_array_length(l.exec_communes) = 0 AND regexp_replace(lower(${ua}(COALESCE(l.buyer_city, ''))), '[^a-z0-9]+', '-', 'g') = ANY($${si}::text[]))`;
+          conditions.push(`((l.opportunity_id IS NOT NULL AND (${execHit} OR ${buyerHit})) OR (l.opportunity_id IS NULL AND ${ua}(o.location_city) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${li}::text[]) AS p))))`);
+          const cityLevel = `(CASE WHEN ${execHit} THEN 0 WHEN l.opportunity_id IS NOT NULL THEN 1 ELSE 2 END)`;
+          locLevelExpr = locLevelExpr ? `GREATEST(${locLevelExpr}, ${cityLevel})` : cityLevel;
+        } else {
+          conditions.push(`${ua}(o.location_city) ILIKE ANY(ARRAY(SELECT unaccent(p) FROM unnest($${idx++}::text[]) AS p))`);
+          params.push(cities.map(c => `%${c}%`));
+        }
       }
     }
     if (department) {
@@ -941,8 +964,18 @@ async function searchOpportunities(req: Request, res: Response) {
         // an un-geocoded row isn't "in" this département either.
         departmentCond = `UPPER(TRIM(o.location_department)) = ANY($${idx++}::text[])`;
         params.push(Array.from(departmentVariants));
+        if (v2) {
+          // Lieu d'exécution d'abord ; acheteur seulement si l'avis ne donne aucun lieu ; ancienne colonne seulement
+          // pour les avis pas encore relus. Un avis seulement PUBLIÉ dans le département n'y entre pas.
+          const di = idx++; params.push(departments.map(d => (/^\d$/.test(d) ? `0${d}` : d)));
+          const vi = idx - 2;
+          departmentCond = `((l.opportunity_id IS NOT NULL AND (l.exec_departments && $${di}::text[] OR (cardinality(l.exec_departments) = 0 AND l.buyer_department = ANY($${di}::text[]))))
+            OR (l.opportunity_id IS NULL AND UPPER(TRIM(o.location_department)) = ANY($${vi}::text[])))`;
+          locLevelExpr = `(CASE WHEN l.exec_departments && $${di}::text[] THEN 0 WHEN l.opportunity_id IS NOT NULL THEN 1 ELSE 2 END)`;
+        }
       }
     }
+    if (v2 && regionCond && departmentCond) regionCond = null; // un département est plus précis que sa région : pas de OU qui élargit
     if (regionCond && departmentCond) conditions.push(`(${regionCond} OR ${departmentCond})`);
     else if (regionCond) conditions.push(regionCond);
     else if (departmentCond) conditions.push(departmentCond);
@@ -978,6 +1011,8 @@ async function searchOpportunities(req: Request, res: Response) {
       if (statuses.length > 0) {
         conditions.push(`o.status = ANY($${idx++}::text[])`);
         params.push(statuses);
+        // v2 : « active » veut dire candidatures possibles — ni annulée, ni date limite passée (date relue dans l'avis).
+        if (v2 && statuses.length === 1 && statuses[0] === 'active') conditions.push(`NOT COALESCE(o.is_cancelled, false) AND (o.deadline IS NULL OR o.deadline >= NOW())`);
       }
     } else {
       // Client audit (25 Sep): "Tous" on the public search was labelled
@@ -1041,7 +1076,8 @@ async function searchOpportunities(req: Request, res: Response) {
     const limitNum = Math.min(Math.max(parseInt(limit) || 20, 1), 100);
     const offset = (pageNum - 1) * limitNum;
 
-    const whereClause = conditions.join(' AND ');
+    let whereClause = conditions.join(' AND ');
+    let v2Select = '';
 
     // Default order (unchanged from before this ticket): active-and-not-yet-
     // expired opportunities first, then soonest deadline. Kept as the
@@ -1167,6 +1203,29 @@ async function searchOpportunities(req: Request, res: Response) {
     // actually reads it (explicit nature filter, or the métier-match ranking
     // that demotes fournitures/études). Otherwise it is only for display, so it
     // is computed for the returned page alone instead of for every match.
+    // RECHERCHE_V2 — règle de classement explicite :
+    //   1. état : ouverte (date limite connue et à venir) → à vérifier (pas de date limite) → clôturée/annulée ;
+    //   2. exactitude : métier demandé (déjà en tête ci-dessus), puis lieu (exécution > acheteur seul > non relu) ;
+    //   3. le tri choisi (pertinence, échéance, montant, publication, distance) ;
+    //   4. départage stable par id, pour qu'aucune annonce ne saute ni ne se répète d'une page à l'autre.
+    // La date limite utilisée est celle relue dans l'avis, à l'heure de Paris (opportunity_locations.notice_deadline).
+    if (v2) {
+      const DL = 'COALESCE(l.notice_deadline, o.deadline)';
+      whereClause = whereClause.replace(/o\.deadline/g, DL);
+      orderClause = orderClause.replace(/o\.deadline/g, DL);
+      const liveV2 = `(o.status = 'active' AND NOT COALESCE(o.is_cancelled, false) AND ${DL} IS NOT NULL AND ${DL} >= NOW() AND ${DL} <= NOW() + INTERVAL '3 years')`;
+      const verifyV2 = `(o.status = 'active' AND NOT COALESCE(o.is_cancelled, false) AND (${DL} IS NULL OR ${DL} > NOW() + INTERVAL '3 years'))`;
+      const stateRank = `(CASE WHEN ${liveV2} THEN 0 WHEN ${verifyV2} THEN 1 ELSE 2 END)`;
+      const liveOld = LIVE_EXPR.replace(/o\.deadline/g, DL);
+      orderClause = orderClause.split(`${liveOld} DESC`).join(`${stateRank} ASC`);
+      if (!orderClause.startsWith(stateRank)) orderClause = `${stateRank} ASC, ${orderClause}`;
+      if (locLevelExpr) orderClause = orderClause.replace(`${stateRank} ASC`, `${stateRank} ASC, ${locLevelExpr} ASC`);
+      if (!/o\.id ASC\s*$/.test(orderClause)) orderClause = `${orderClause}, o.id ASC`;
+      v2Select = `, ${stateRank} AS state_rank, CASE WHEN COALESCE(o.is_cancelled, false) OR o.status = 'cancelled' THEN 'cancelled' WHEN o.status = 'awarded' THEN 'awarded'
+        WHEN ${liveV2} THEN 'open' WHEN ${verifyV2} THEN 'verify' ELSE 'closed' END AS open_state,
+        ${DL} AS deadline_checked, l.deadline_source, l.exec_status, l.exec_source, l.exec_communes, l.exec_departments, l.exec_text,
+        l.buyer_city, l.buyer_department, l.publication_departments${locLevelExpr ? `, ${locLevelExpr} AS location_level` : ''}`;
+    }
     const natureInWhere = whereClause.includes('np.nature');
     const natureInOrder = orderClause.includes('np.nature');
 
@@ -1183,10 +1242,10 @@ async function searchOpportunities(req: Request, res: Response) {
               np.nature AS nature_prestation,
               -- 1 Oct client request: templated catalogue rows are demonstration examples.
               (ds.code = 'editorial_catalog') AS is_demo${distanceExpr ? `,
-              ${distanceExpr} AS distance_km` : ''}`;
+              ${distanceExpr} AS distance_km` : ''}${v2Select}`;
     const SCOPE_JOINS = `LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
        LEFT JOIN trades t ON o.trade_id = t.id
-       LEFT JOIN data_sources ds ON o.source_id = ds.id`;
+       LEFT JOIN data_sources ds ON o.source_id = ds.id${v2 ? '\n       LEFT JOIN opportunity_locations l ON l.opportunity_id = o.id' : ''}`;
     const limitIdx = idx++;
     const offsetIdx = idx++;
     const listParams = [...params, limitNum, offset];
@@ -1247,12 +1306,23 @@ async function searchOpportunities(req: Request, res: Response) {
 
     // Count and list are independent: run them together, and reuse a cached
     // count for "Voir plus" pages (same filters, only limit/offset differ).
+    // v2 : décompte par état et par niveau de lieu, sur exactement le même périmètre que la liste.
+    const loadBreakdown = async () => {
+      if (!v2) return null;
+      const r = await db.query(`SELECT ${v2Select.replace(/^,/, '').split(' AS state_rank')[0]} AS state_rank${locLevelExpr ? `, ${locLevelExpr} AS lvl` : ', 0 AS lvl'}, COUNT(*)::int AS n
+        FROM opportunities o ${SCOPE_JOINS} ${natureInWhere ? naturePrestationLateral('o') : ''} WHERE ${whereClause} GROUP BY 1, 2`, params);
+      const b = { open: 0, verify: 0, closed: 0, execution: 0, buyerOnly: 0, notYetRead: 0 };
+      for (const x of r.rows) { const n = Number(x.n); if (x.state_rank === 0) b.open += n; else if (x.state_rank === 1) b.verify += n; else b.closed += n;
+        if (locLevelExpr) { if (x.lvl === 0) b.execution += n; else if (x.lvl === 1) b.buyerOnly += n; else b.notYetRead += n; } }
+      return b;
+    };
     const [rows, total] = await Promise.all([
       countOnly
         ? Promise.resolve([] as any[])
         : searchListCache(searchCacheKey('list', whereClause, orderClause, listParams), SEARCH_LIST_TTL_MS, loadList),
       searchCountCache(searchCacheKey('count', whereClause, params), SEARCH_COUNT_TTL_MS, loadCount),
     ]);
+    const breakdown = v2 && !countOnly ? await searchCountCache(searchCacheKey('breakdown', whereClause, params), SEARCH_COUNT_TTL_MS, loadBreakdown as any).catch(() => null) : null;
 
     res.json({
       results: rows,
@@ -1261,7 +1331,9 @@ async function searchOpportunities(req: Request, res: Response) {
         limit: limitNum,
         total,
         totalPages: Math.ceil(total / limitNum),
+        ...(breakdown ? { breakdown } : {}),
       },
+      ...(v2 ? { rules: 'v2' } : {}),
     });
   } catch (err: any) {
     logger.error('Opportunities search error:', err);
