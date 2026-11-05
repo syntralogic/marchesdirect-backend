@@ -252,7 +252,7 @@ function cover(ly: Layout, input: DossierV2Input, qr: Buffer) {
     doc.font(ly.F.r).fontSize(10.4).text('Pièces administratives, pièces techniques et mémoire technique', L, y + 24, { width: CW, align: 'center' });
     y += 62;
     const rows: [string, string][] = [['Date limite de réception des offres', D.txt], ['Mode de transmission', 'Selon l’avis : dépôt électronique sur le profil d’acheteur'], ['Lieu d’exécution', input.locationCity || 'Selon l’avis']];
-    if (input.estimatedValue) rows.push(['Montant estimé', money(input.estimatedValue)!]);
+    if (input.estimatedValue) rows.push(['Montant estimé', money(input.estimatedValue, !(input as any).amountUnqualified)!]);
     rows.forEach(([k, v]) => {
       doc.lineWidth(0.5).rect(L + 22, y, 200, 22).stroke().rect(L + 222, y, CW - 244, 22).stroke();
       doc.font(ly.F.b).fontSize(9).text(k, L + 29, y + 7, { width: 190, lineBreak: false }); doc.font(ly.F.r).fontSize(9.3).text(clean(v), L + 229, y + 7, { width: CW - 258, lineBreak: false, ellipsis: true }); y += 22;
@@ -448,7 +448,7 @@ function buildBranded(ly: Layout, input: DossierV2Input, _qr: Buffer) {
   ly.pageBreak(); ly.section('2', 'Identité du marché', 'Les informations essentielles, au même endroit', 'Relevées dans l’annonce. Les lignes « à vérifier » doivent être confirmées avec le donneur d’ordre.');
   const rows: [string, string][] = [['Objet', input.title]]; if (input.lotLabel) rows.push(['Lot / périmètre', input.lotLabel]);
   rows.push([st ? 'Entreprise principale' : 'Donneur d’ordre', input.buyerName || 'Communiqué par Elena']); rows.push(['Cadre', st ? 'Sous-traitance (loi n° 75-1334 du 31 décembre 1975)' : 'Consultation privée, hors Code de la commande publique']);
-  rows.push(['Lieu d’exécution', input.locationCity || 'À vérifier'], ['Montant', money(input.estimatedValue) || 'Non communiqué'], ['Date limite', D.txt]); if (input.reference) rows.push(['Référence', input.reference]);
+  rows.push(['Lieu d’exécution', input.locationCity || 'À vérifier'], ['Montant', money(input.estimatedValue, !(input as any).amountUnqualified) || 'Non communiqué'], ['Date limite', D.txt]); if (input.reference) rows.push(['Référence', input.reference]);
   ly.kv(rows);
   ly.h2(st ? 'Ce qui change en sous-traitance' : 'Ce qui change en privé');
   ly.text(st ? 'Vous ne contractez pas avec l’acheteur public mais avec l’entreprise titulaire du marché. La loi du 31 décembre 1975 impose que l’acheteur vous accepte et agrée vos conditions de paiement. Dans un marché public, cette acceptation ouvre droit au paiement direct par l’acheteur lorsque votre prestation atteint 600 € TTC.'

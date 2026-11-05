@@ -921,7 +921,7 @@ async function handleLeadCapture(
 // someone skip straight to the document without capturing contact details
 // first, it only lets an already-captured visitor retrieve what they were
 // already sent.
-async function loadPrefilledDossierInput(sessionId: string, opportunityId: string) {
+async function loadPrefilledDossierInput(sessionId: string, opportunityId: string, v2 = false) {
   const lookup = await db.query(
     'SELECT siret, company_data, email, lead_captured_at FROM siret_lookups WHERE session_id = $1',
     [sessionId]
@@ -943,6 +943,16 @@ async function loadPrefilledDossierInput(sessionId: string, opportunityId: strin
   if (oppResult.rows.length === 0) {
     return { error: 'opportunity_not_found' as const };
   }
+  // v2 (aperçu, ?loc=2) : date limite relue dans l'avis à l'heure de Paris, lieu d'exécution au lieu de l'ancienne colonne.
+  if (v2 && oppResult.rows[0]) {
+    const l = (await db.query(`SELECT exec_communes, exec_departments, exec_status, notice_deadline FROM opportunity_locations WHERE opportunity_id = $1`, [opportunityId]).catch(() => ({ rows: [] as any[] }))).rows[0];
+    if (l) {
+      const c = (l.exec_communes || []).map((x: any) => `${x.name}${x.department ? ` (${x.department})` : ''}`);
+      oppResult.rows[0].location_city = c.length ? c.join(', ') : (l.exec_departments || []).length ? `département ${(l.exec_departments || []).join(', ')}` : 'Non précisé dans l’avis';
+      if (l.notice_deadline) oppResult.rows[0].deadline = l.notice_deadline;
+      oppResult.rows[0].__v2 = true;
+    }
+  }
   const o = oppResult.rows[0];
   const lot = await db.query('SELECT lot_label FROM crm_leads WHERE session_id = $1 AND opportunity_id = $2 AND lot_label IS NOT NULL ORDER BY created_at DESC LIMIT 1', [sessionId, opportunityId]).catch(() => ({ rows: [] as any[] }));
 
@@ -957,6 +967,7 @@ async function loadPrefilledDossierInput(sessionId: string, opportunityId: strin
       locationCity: o.location_city,
       submissionDeadline: o.deadline ? new Date(o.deadline).toLocaleDateString('fr-FR') : null,
       estimatedValue: o.estimated_value ? Number(o.estimated_value) : null,
+      ...(o.__v2 ? { amountUnqualified: true } : {}),
       currency: o.currency,
       isClosed: isOpportunityClosed({ status: o.status, deadline: o.deadline }),
       journey: o.journey || null,
@@ -987,7 +998,7 @@ router.get('/lead/dossier-pdf', async (req: AuthRequest, res: Response) => {
   // (same class of bug as /siret/lookup and /siret/confirm above). Only
   // the PDF-generation step itself had a safety net.
   try {
-    const result = await loadPrefilledDossierInput(sessionId, opportunityId);
+    const result = await loadPrefilledDossierInput(sessionId, opportunityId, String(req.query.loc || '') === '2');
     if ('error' in result) {
       return res.status(409).json({ error: result.error, message: "Confirmez d'abord vos coordonnées pour accéder à ce document." });
     }

@@ -72,8 +72,8 @@ export async function generatePrefilledDossierPdf(input: PrefilledDossierInput):
         url: input.opportunityId ? `${base}/mon-dossier/${input.opportunityId}` : `${base}/tableau-de-bord`,
         companyName: input.companyName, siret: input.siret, company: input.company || null, title: input.opportunityTitle, lotLabel: input.lotLabel,
         buyerName: input.buyerName, reference: input.reference, locationCity: input.locationCity, deadline: input.deadlineAt || null,
-        estimatedValue: input.estimatedValue, isClosed: input.isClosed,
-      });
+        estimatedValue: input.estimatedValue, isClosed: input.isClosed, ...((input as any).amountUnqualified ? { amountUnqualified: true } : {}),
+      } as any);
     } catch (err) {
       logger.error('[Dossier PDF v2] échec, ancien gabarit utilisé :', err);
     }
