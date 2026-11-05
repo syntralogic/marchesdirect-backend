@@ -3,6 +3,7 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { AuthRequest } from '../middleware/auth';
 import { generateDossierPdfV2, DossierKind } from '../services/dossierPdfV2';
+import { getVapid, isValidEndpoint, saveSubscription } from '../services/webPushService';
 import { clientSteps, entrustDossier, followupSchema, refreshStages, findLeadFor } from '../services/dossierFollowupService';
 
 // /api/suivi : favoris, « Confier à Elena » et suivi des dossiers (5 nov.).
@@ -46,6 +47,20 @@ const view = (x: any) => ({
 router.get('/', async (req: AuthRequest, res: Response) => {
   try { res.json({ dossiers: (await rowsFor(req)).map(view) }); }
   catch (err: any) { logger.error('[Suivi] liste:', err); res.status(500).json({ error: 'suivi_unavailable' }); }
+});
+
+// Notifications sur le téléphone : clé publique VAPID, puis abonnement (sans contenu personnel).
+router.get('/push/key', async (_req: AuthRequest, res: Response) => {
+  try { res.setHeader('Cache-Control', 'public, max-age=3600'); res.json({ publicKey: (await getVapid()).publicKey }); }
+  catch (err: any) { logger.error('[Push] clé:', err); res.status(503).json({ error: 'push_unavailable' }); }
+});
+router.post('/push/subscribe', async (req: AuthRequest, res: Response) => {
+  const endpoint = String(req.body?.subscription?.endpoint || '');
+  if (!isValidEndpoint(endpoint)) return res.status(400).json({ error: 'invalid_subscription' });
+  const sessions = sessionsOf(req);
+  if (!sessions.length && !req.user) return res.status(400).json({ error: 'session_required' });
+  try { await saveSubscription(endpoint, sessions[0] || null, req.user?.email || null, String(req.headers['user-agent'] || '') || null); res.json({ ok: true }); }
+  catch (err: any) { logger.error('[Push] abonnement:', err); res.status(500).json({ error: 'push_unavailable' }); }
 });
 
 // GET /api/suivi/apercu/:kind : dossier PDF d'EXEMPLE (données fictives) pour contrôler le rendu en production.
