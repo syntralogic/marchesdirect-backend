@@ -75,19 +75,28 @@ let snap: Snapshot | null = null; let loading: Promise<Snapshot> | null = null;
 
 /** Commune de l'acheteur : ville_avis du BOAMP, sinon la ville de l'organisme dans les données de l'avis, sinon
  *  « Mairie / Commune / Ville de X » dans le nom de l'acheteur. Les noms d'organismes sont rejetés. */
+/** Bloc « organisme » de l'avis : du début jusqu'à la section suivante (les sous-objets comme le SIRET y ont leurs propres accolades). */
+function orgBlock(raw: string | null | undefined): string | null {
+  if (!raw || !raw.startsWith('"organisme"')) return null;
+  let end = Math.min(raw.length, 700);
+  for (const k of ['"initial"', '"rectif"', '"communication"', '"procedure"', '"natureMarche"']) { const i = raw.indexOf(k, 12); if (i > 0 && i < end) end = i; }
+  return raw.slice(0, end);
+}
 const ORG_VILLE = /"ville"\s*:\s*"([^"]{1,60})"/;
 const ORG_CP = /"cp"\s*:\s*"(\d{5})"/;
 export function buyerCommune(o: { ville_avis?: string | null; organisme?: string | null; buyer_name?: string | null; location_city?: string | null }): string | null {
   const clean = (v: string) => v.replace(/\s+cedex.*$/i, '').replace(/\s+\d+$/, '').trim();
   const cands: string[] = [];
   if (o.ville_avis) cands.push(String(o.ville_avis));
-  const m = o.organisme ? ORG_VILLE.exec(o.organisme) : null; if (m) cands.push(m[1]);
+  const org = orgBlock(o.organisme);
+  const m = org ? ORG_VILLE.exec(org) : null; if (m) cands.push(m[1]);
   const b = String(o.buyer_name || '').match(/^\s*(?:mairie|commune|ville)\s+(?:de\s+|d['’]\s*)(.{2,40})$/i); if (b) cands.push(b[1]);
   if (o.location_city) cands.push(String(o.location_city));
   for (const c of cands) { const v = clean(c); if (isCommuneName(v)) return v; }
   return null;
 }
-function deptFromCp(org: string | null | undefined): string | null {
+function deptFromCp(raw: string | null | undefined): string | null {
+  const org = orgBlock(raw);
   const m = org ? ORG_CP.exec(org) : null; if (!m) return null;
   const cp = m[1]; if (cp.startsWith('97')) return DEPARTMENTS[cp.slice(0, 3)] ? cp.slice(0, 3) : null;
   if (cp.startsWith('20')) return Number(cp) < 20200 ? '2A' : '2B';
@@ -102,7 +111,7 @@ async function load(): Promise<Snapshot> {
     SELECT o.id, o.title, o.location_city, o.location_department, o.deadline, o.buyer_name, ot.code AS journey, o.source_reference,
            o.estimated_value, o.trade_id, COALESCE(o.updated_at, o.created_at) AS updated_at,
            o.raw_data->>'ville_avis' AS ville_avis,
-           substring(o.raw_data->>'donnees' from '"organisme"\s*:\s*\{[^}]{0,1200}\}') AS organisme
+           NULLIF(substring(o.raw_data->>'donnees', strpos(o.raw_data->>'donnees', '"organisme"'), 1200), '') AS organisme
       FROM opportunities o
       JOIN opportunity_types ot ON ot.id = o.opportunity_type_id
       LEFT JOIN data_sources ds ON ds.id = o.source_id
