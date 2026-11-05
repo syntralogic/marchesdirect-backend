@@ -42,83 +42,149 @@ function escapeHtml(v: string): string {
   return v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// v28 (5 nov., contrôle client : « moins soigné que le site ») : mise en page aux couleurs du site — bandeau bleu nuit,
+// accents orange, fiche du marché encadrée, « déjà prérempli », « qui fait quoi », calendrier et contact Elena.
+// Polices standard (Helvetica, encodage WinAnsi) : pas de symbole hors jeu (ni ✓ ni espace fine), d'où les puces dessinées.
+const C = { navy: '#0A1628', navy2: '#142B4A', orange: '#F97316', orangeDark: '#C2410C', ink: '#0A1628', grey: '#4B5B70', light: '#F2F5F9', line: '#D6E0EC', green: '#15803D', red: '#B42318' };
+const pdfText = (v: string) => v.replace(/[\u202f\u00a0]/g, ' ').replace(/[\u2713\u2714]/g, '').replace(/[\u2018]/g, "'");
+
 export function generatePrefilledDossierPdf(input: PrefilledDossierInput): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 50 });
+    const doc = new PDFDocument({ size: 'A4', margins: { top: 50, bottom: 60, left: 50, right: 50 }, bufferPages: true, info: { Title: `Dossier prérempli - ${input.companyName}`, Author: 'Marchés Direct' } });
     const chunks: Buffer[] = [];
     doc.on('data', (chunk) => chunks.push(chunk));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
 
-    doc.fontSize(18).font('Helvetica-Bold').text('Votre dossier pré-rempli', { align: 'left' });
-    doc.fontSize(10).font('Helvetica').fillColor('#5B6B80')
-      .text('Marchés Direct - aperçu préparatoire offert, non contractuel. Ce n\'est pas un dossier prêt au dépôt.', { align: 'left' });
-    doc.moveDown(1);
+    const W = doc.page.width; const L = 50; const CW = W - 100;
+    const t = (v: string) => pdfText(v);
+    const ensure = (h: number) => { if (doc.y + h > doc.page.height - 70) doc.addPage(); };
+    const sectionTitle = (label: string) => {
+      ensure(40);
+      doc.moveDown(0.6);
+      const y = doc.y;
+      doc.rect(L, y + 2, 3, 13).fill(C.orange);
+      doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(12.5).text(t(label), L + 10, y, { width: CW - 10 });
+      doc.moveDown(0.4);
+    };
+    const bullet = (text: string, color: string = C.green) => {
+      ensure(18);
+      const y = doc.y;
+      doc.rect(L + 2, y + 3.5, 5, 5).fill(color);
+      doc.fillColor(C.ink).font('Helvetica').fontSize(10).text(t(text), L + 14, y, { width: CW - 14, lineGap: 2 });
+      doc.moveDown(0.25);
+    };
+
+    // --- Bandeau ---------------------------------------------------------------------------------
+    doc.rect(0, 0, W, 92).fill(C.navy);
+    doc.rect(0, 92, W, 4).fill(C.orange);
+    doc.font('Helvetica-Bold').fontSize(22).fillColor('#FFFFFF').text('Marchés', L, 30, { continued: true }).fillColor('#FB923C').text(' Direct');
+    doc.font('Helvetica').fontSize(9).fillColor('#B4C1D3').text('Les marchés faits pour votre entreprise', L, 58);
+    const today = new Date().toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Paris' });
+    doc.font('Helvetica-Bold').fontSize(11).fillColor('#FFFFFF').text('Dossier prérempli', L, 32, { width: CW, align: 'right' });
+    doc.font('Helvetica').fontSize(9).fillColor('#B4C1D3').text(t(`Préparé le ${today}`), L, 50, { width: CW, align: 'right' });
+
+    // --- Entreprise ---------------------------------------------------------------------------------
+    doc.y = 110;
+    doc.font('Helvetica').fontSize(9).fillColor(C.grey).text('PRÉPARÉ POUR', L, doc.y, { characterSpacing: 1 });
+    doc.font('Helvetica-Bold').fontSize(20).fillColor(C.ink).text(t(input.companyName), L, doc.y + 2, { width: CW });
+    doc.font('Helvetica').fontSize(10).fillColor(C.grey).text(input.siret ? `SIRET ${input.siret.replace(/(\d{3})(\d{3})(\d{3})(\d{5})/, '$1 $2 $3 $4')}` : 'SIRET non communiqué', L, doc.y + 2);
 
     if (input.isClosed) {
-      doc.fillColor('#B42318').fontSize(11).font('Helvetica-Bold')
-        .text('Marché clôturé : la candidature n\'est plus possible. Ce document ne sert que d\'exemple.');
-      doc.moveDown(1);
+      doc.moveDown(0.8);
+      const y = doc.y;
+      doc.roundedRect(L, y, CW, 28, 6).fill('#FEE4E2');
+      doc.font('Helvetica-Bold').fontSize(10).fillColor(C.red).text('Marché clôturé : la candidature n’est plus possible. Ce document ne sert que d’exemple.', L + 12, y + 9, { width: CW - 24 });
+      doc.y = y + 28;
     }
 
-    doc.fillColor('#000000').fontSize(11).font('Helvetica-Bold').text('Sommaire');
-    doc.fontSize(10).font('Helvetica').list([
-      '1. Entreprise',
-      '2. Marché concerné',
-      '3. Éléments à compléter ou à vérifier',
-      '4. Pour finaliser votre candidature',
-    ], { bulletRadius: 0.1, textIndent: 6 });
-    doc.moveDown(1.2);
-
-    doc.fillColor('#000000').fontSize(12).font('Helvetica-Bold').text('1. Entreprise');
-    doc.moveDown(0.3);
-    doc.fontSize(13).text(input.companyName);
-    doc.fontSize(10).font('Helvetica').fillColor('#5B6B80')
-      .text(input.siret ? `SIRET : ${input.siret}` : 'SIRET : non communiqué');
-    doc.moveDown(1.2);
-
-    doc.fillColor('#000000').fontSize(12).font('Helvetica-Bold').text('2. Marché concerné');
-    doc.moveDown(0.3);
-    doc.fontSize(13).text(input.opportunityTitle);
-    if (input.lotLabel) doc.fontSize(11).text(`Lot : ${input.lotLabel}`);
-    doc.moveDown(0.3);
-    const facts: string[] = [];
+    // --- Fiche du marché ---------------------------------------------------------------------------
+    doc.moveDown(1);
+    const facts: [string, string][] = [];
     const missing: string[] = [];
-    if (input.buyerName) facts.push(`Donneur d'ordre : ${input.buyerName}`); else missing.push("Donneur d'ordre");
-    if (input.reference) facts.push(`Référence : ${input.reference}`); else missing.push('Référence de l\'avis');
-    if (input.locationCity) facts.push(`Lieu : ${input.locationCity}`); else missing.push("Lieu d'exécution");
-    if (input.submissionDeadline) facts.push(`Échéance de dépôt : ${input.submissionDeadline}`); else missing.push("Date limite de dépôt");
-    if (input.estimatedValue) facts.push(`Montant estimé : ${input.estimatedValue.toLocaleString('fr-FR')} ${input.currency || 'EUR'}`); else missing.push('Montant estimé');
-    if (typeof input.matchScore === 'number') facts.push(`Score de compatibilité : ${Math.round(input.matchScore)}%`);
-    doc.fontSize(10).font('Helvetica').fillColor('#000000');
-    facts.forEach(f => doc.text(f));
-    doc.moveDown(1.2);
+    if (input.buyerName) facts.push(['Acheteur', input.buyerName]); else missing.push('l’acheteur');
+    if (input.reference) facts.push(['Référence', input.reference]); else missing.push('la référence de l’avis');
+    if (input.locationCity) facts.push(['Lieu d’exécution', input.locationCity]); else missing.push('le lieu d’exécution');
+    if (input.submissionDeadline) facts.push(['Date limite de dépôt', input.submissionDeadline]); else missing.push('la date limite de dépôt');
+    if (input.estimatedValue) facts.push(['Montant estimé', `${input.estimatedValue.toLocaleString('fr-FR')} ${input.currency === 'EUR' || !input.currency ? '€' : input.currency}`]); else missing.push('le montant estimé');
+    if (typeof input.matchScore === 'number') facts.push(['Indice de correspondance', `${Math.round(input.matchScore)} %`]);
+    const top = doc.y;
+    doc.font('Helvetica-Bold').fontSize(13);
+    const titleH = doc.heightOfString(t(input.opportunityTitle), { width: CW - 28 });
+    const lotH = input.lotLabel ? 16 : 0;
+    const rows = Math.ceil(facts.length / 2);
+    const boxH = 34 + titleH + lotH + 12 + rows * 30 + 8;
+    ensure(boxH + 10);
+    const by = doc.y;
+    doc.roundedRect(L, by, CW, boxH, 10).fillAndStroke(C.light, C.line);
+    doc.rect(L, by + 10, 4, boxH - 20).fill(C.orange);
+    doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.orangeDark).text('MARCHÉ CONCERNÉ', L + 16, by + 14, { characterSpacing: 1 });
+    doc.font('Helvetica-Bold').fontSize(13).fillColor(C.ink).text(t(input.opportunityTitle), L + 16, by + 28, { width: CW - 28 });
+    let fy = by + 28 + titleH + 4;
+    if (input.lotLabel) { doc.font('Helvetica').fontSize(10).fillColor(C.grey).text(t(`Lot : ${input.lotLabel}`), L + 16, fy, { width: CW - 28 }); fy += lotH; }
+    fy += 8;
+    const colW = (CW - 32) / 2;
+    facts.forEach(([k, v], idx) => {
+      const x = L + 16 + (idx % 2) * colW; const y = fy + Math.floor(idx / 2) * 30;
+      doc.font('Helvetica').fontSize(8.5).fillColor(C.grey).text(t(k.toUpperCase()), x, y, { width: colW - 10, characterSpacing: 0.5 });
+      doc.font('Helvetica-Bold').fontSize(10.5).fillColor(C.ink).text(t(v), x, y + 11, { width: colW - 10, height: 22, ellipsis: true });
+    });
+    doc.y = by + boxH; doc.x = L;
+    void top;
 
-    doc.fontSize(12).font('Helvetica-Bold').text('3. Éléments à compléter ou à vérifier');
-    doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica').list([
-      ...missing.map(m => `Non communiqué par la source : ${m} (à vérifier dans l'avis officiel).`),
-      'Références de votre entreprise, moyens humains et techniques, périmètre de votre réponse.',
-      'Pièces administratives demandées par le règlement de consultation.',
-    ], { bulletRadius: 2 });
-    doc.moveDown(1.2);
+    // --- Déjà prérempli -----------------------------------------------------------------------------
+    sectionTitle('Déjà prérempli pour vous');
+    bullet(`Raison sociale : ${input.companyName}`);
+    bullet('Identification du marché, de l’acheteur et des échéances connues');
+    if (missing.length) bullet(`Non publié par la source, à vérifier dans l’avis officiel : ${missing.join(', ')}`, C.orange);
 
-    doc.fontSize(12).font('Helvetica-Bold').text('4. Pour finaliser votre candidature');
-    doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica').list([
-      'Confirmer les informations et la situation de votre entreprise.',
-      'Compléter vos références, vos moyens et le périmètre de votre réponse.',
-      "Rassembler les pièces demandées et relire l'ensemble.",
-      "Vérifier les modalités et l'échéance du dépôt sur la plateforme officielle.",
-    ], { bulletRadius: 2 });
-    doc.moveDown(1.5);
+    // --- Qui fait quoi --------------------------------------------------------------------------------
+    sectionTitle('Préparer votre candidature : qui fait quoi');
+    const who: [string, 'Vous' | 'Nous' | 'Ensemble'][] = [
+      ['Références de chantiers similaires', 'Vous'], ['Moyens humains et matériels', 'Vous'], ['Attestations et pièces administratives', 'Vous'],
+      ['Formulaires de candidature', 'Nous'], ['Mémoire technique', 'Nous'], ['Offre de prix', 'Ensemble'], ['Dépôt de la candidature', 'Nous'],
+    ];
+    ensure(who.length * 18 + 10);
+    who.forEach(([k, v], idx) => {
+      const y = doc.y;
+      if (idx % 2 === 0) doc.rect(L, y - 3, CW, 18).fill(C.light);
+      doc.font('Helvetica').fontSize(10).fillColor(C.ink).text(t(k), L + 10, y + 1, { width: CW - 120 });
+      const color = v === 'Vous' ? C.grey : v === 'Nous' ? C.orangeDark : C.navy2;
+      doc.font('Helvetica-Bold').fontSize(10).fillColor(color).text(v, L, y + 1, { width: CW - 10, align: 'right' });
+      doc.y = y + 18; doc.x = L;
+    });
 
-    doc.fontSize(9).font('Helvetica').fillColor('#5B6B80').text(
-      "Ce document est une synthèse préparatoire offerte, pas une candidature déposée. "
-      + "Un chargé d'affaires peut vous accompagner pour la suite : prise de rendez-vous "
-      + "ou demande de rappel depuis votre espace \"Votre dossier\"."
-    );
+    // --- Calendrier -------------------------------------------------------------------------------------
+    sectionTitle('Votre calendrier jusqu’au dépôt');
+    bullet('Aujourd’hui : indice de correspondance calculé, dossier prérempli', C.orange);
+    bullet('Sous 24 h ouvrées : point téléphonique avec Elena (30 minutes offertes)', C.orange);
+    bullet('Les jours suivants : vous réunissez vos pièces, nous rédigeons le mémoire technique', C.orange);
+    if (input.submissionDeadline && !input.isClosed) bullet(`${input.submissionDeadline} : date limite de dépôt de la candidature`, C.orange);
 
+    // --- Contact Elena ------------------------------------------------------------------------------------
+    ensure(84);
+    doc.moveDown(0.7);
+    const ey = doc.y;
+    doc.roundedRect(L, ey, CW, 74, 10).fill(C.navy);
+    doc.rect(L, ey + 12, 4, 50).fill(C.orange);
+    doc.font('Helvetica-Bold').fontSize(11.5).fillColor('#FFFFFF').text('Votre interlocutrice : Elena Popescu, chargée de relation', L + 18, ey + 12, { width: CW - 36 });
+    doc.font('Helvetica').fontSize(10).fillColor('#D6E0EC').text(
+      'Elena vous appelle avec ce dossier sous les yeux pour faire le point sur vos atouts, ce qu’il faut fournir et la suite. '
+      + '30 minutes offertes, sans engagement. Si vous le souhaitez, nous préparons ensuite la candidature avec vous.',
+      L + 18, ey + 29, { width: CW - 36, lineGap: 1.5 });
+    doc.y = ey + 74; doc.x = L;
+
+    // --- Pied de page sur chaque page ---------------------------------------------------------------------
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
+      doc.switchToPage(i);
+      doc.page.margins.bottom = 0; // sinon pdfkit ouvre une page blanche pour le pied de page
+      const fy2 = doc.page.height - 42;
+      doc.moveTo(L, fy2 - 8).lineTo(W - L, fy2 - 8).lineWidth(0.5).strokeColor(C.line).stroke();
+      doc.font('Helvetica').fontSize(8).fillColor(C.grey).text(
+        t(`Marchés Direct · marchesdirect.fr · Aperçu préparatoire offert, non contractuel : ce n’est pas une candidature déposée.   ${i - range.start + 1} / ${range.count}`),
+        L, fy2, { width: CW, align: 'center', lineBreak: false });
+    }
     doc.end();
   });
 }
