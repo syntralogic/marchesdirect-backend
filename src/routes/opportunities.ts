@@ -1778,7 +1778,8 @@ router.get('/ranked/candidates', optionalAuth, async (req: AuthRequest, res: Res
     if (trades.length === 0) {
       return res.json({ items: [], total: 0, zone: department || 'france', reason: 'trade_unknown' });
     }
-    const q = buildCandidatesQuery({ tradeSlugs: trades, department, limit: Number(req.query.limit) || 40 });
+    const v2 = String(req.query.loc || '') === '2' && await hasLocationTable();
+    const q = buildCandidatesQuery({ tradeSlugs: trades, department, limit: Number(req.query.limit) || 40, v2 });
     const [list, count] = await Promise.all([db.query(q.listSql, q.params), db.query(q.countSql, q.params)]);
     res.json({
       items: list.rows, total: count.rows[0]?.n || 0, zone: department || 'france',
@@ -1879,6 +1880,17 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     opportunity.identity_unlocked = unlocked;
 
 
+    // v2 (aperçu seulement, ?loc=2) : lieu d'exécution / acheteur / publication séparés et état relu dans l'avis.
+    if (String((req as any).query?.loc || '') === '2' && await hasLocationTable()) {
+      const l = (await db.query(`SELECT * FROM opportunity_locations WHERE opportunity_id = $1`, [opportunity.id]).catch(() => ({ rows: [] as any[] }))).rows[0];
+      const dl = l?.notice_deadline || opportunity.deadline || null;
+      const t = dl ? new Date(dl).getTime() : null;
+      opportunity.deadline_checked = dl; opportunity.deadline_source = l?.deadline_source || (dl ? 'base' : null);
+      opportunity.open_state = opportunity.is_cancelled || opportunity.status === 'cancelled' ? 'cancelled' : opportunity.status === 'awarded' ? 'awarded'
+        : opportunity.status !== 'active' ? 'closed' : t == null || t > Date.now() + 3 * 365 * 86400000 ? 'verify' : t >= Date.now() ? 'open' : 'closed';
+      opportunity.location_v2 = l ? { execution: { status: l.exec_status, source: l.exec_source, communes: l.exec_communes || [], departments: l.exec_departments || [], text: l.exec_text || null },
+        buyer: { city: l.buyer_city, postalCode: l.buyer_postal, department: l.buyer_department }, publicationDepartments: l.publication_departments || [] } : null;
+    }
     res.json(opportunity);
   } catch (err: any) {
     logger.error('Opportunity detail error:', err);
