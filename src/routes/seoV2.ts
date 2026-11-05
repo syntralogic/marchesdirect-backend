@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { logger } from '../utils/logger';
-import { buildPage, indexablePaths, topLinks, BASE_JOURNEY } from '../services/seoV2Service';
+import { legacyTargets, locationOf, buildPage, indexablePaths, topLinks, BASE_JOURNEY } from '../services/seoV2Service';
 
 // /api/seo/v2 — lecture seule, publique, mise en cache (5 nov., mandat référencement). Aucune route existante modifiée.
 const router = Router();
@@ -9,7 +9,7 @@ const cache = (res: Response, s = 600) => res.set('Cache-Control', `public, max-
 router.get('/page', async (req: Request, res: Response) => {
   const q = req.query as Record<string, string | undefined>;
   try {
-    const out = await buildPage({ base: String(q.base || ''), city: q.city, trade: q.trade, department: q.department });
+    const out = await buildPage({ base: String(q.base || ''), city: q.city, trade: q.trade, department: q.department, page: q.page });
     cache(res);
     if (out.status === 404) return res.status(404).json({ error: 'not_found' });
     if (out.status === 301) return res.json({ redirect: out.location });
@@ -26,6 +26,16 @@ router.get('/links', async (req: Request, res: Response) => {
   const base = String(req.query.base || '');
   try { cache(res); res.json(await topLinks(BASE_JOURNEY[base])); }
   catch (err) { logger.error('[SEO v2] liens:', err); res.status(503).json({ error: 'unavailable' }); }
+});
+
+router.get('/legacy', async (req: Request, res: Response) => {
+  try { cache(res, 3600); res.json(await legacyTargets({ slug: req.query.slug ? String(req.query.slug) : undefined, limit: Number(req.query.limit) || 200, offset: Number(req.query.offset) || 0 })); }
+  catch (err) { logger.error('[SEO v2] anciennes adresses:', err); res.status(503).json({ error: 'unavailable' }); }
+});
+
+router.get('/lieu/:ref', async (req: Request, res: Response) => {
+  try { const out = await locationOf(String(req.params.ref)); if (!out) return res.status(404).json({ error: 'not_found' }); cache(res, 300); res.json(out); }
+  catch (err) { logger.error('[SEO v2] lieu:', err); res.status(503).json({ error: 'unavailable' }); }
 });
 
 export default router;

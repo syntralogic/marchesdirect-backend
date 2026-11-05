@@ -8,13 +8,17 @@ import { fold, KEYWORD_TRADE_SLUG, extractTradeSlugs } from './tradeResolver';
 // Règles (documentées dans l'audit livré au client) :
 //  - Adresses canoniques en minuscules sans accents : /marches-publics/bordeaux, /marches-publics/bordeaux/electricite,
 //    /marches-publics/departement/33. Toute autre écriture (majuscules, accents, synonyme de métier) → 301.
-//  - « Ouvert » = annonce active, non fusionnée, hors catalogue de démonstration, hors avis TED étrangers, dont la date
-//    limite n'est pas passée ; une annonce sans date limite connue n'est comptée que si elle a moins de 45 jours.
-//  - Une page n'est indexable que si sa zone est une vraie commune ou un département ET qu'elle affiche au moins une
-//    annonce ouverte de la zone (dans la commune pour une page ville). Sinon : page servie (200) avec un état vide honnête
-//    et des alternatives, en « noindex, follow », jamais supprimée — elle redevient indexable dès qu'une annonce arrive.
-//  - Les compteurs sont calculés sur la même liste que celle affichée. Les annonces « à proximité » sont séparées et
-//    étiquetées comme telles.
+//  - État d'une annonce (6 nov.) : « ouverte » = date limite connue et à venir ; « à vérifier » = aucune date limite
+//    dans la base ni dans l'avis, diffusion non terminée, publiée depuis moins de 60 jours (jamais comptée comme
+//    ouverte) ; « clôturée » = date limite passée, fin de diffusion passée ou avis annulé.
+//  - Localisation (6 nov.) : lieu d'exécution, commune de l'acheteur et départements de publication sont distincts
+//    (table opportunity_locations, jobs/noticeLocationJob.ts). Une page commune liste d'abord les annonces EXÉCUTÉES
+//    dans la commune ; les annonces dont seul l'acheteur y est situé (lieu d'exécution non précisé) sont à part ; un
+//    avis seulement PUBLIÉ dans un département n'y est jamais compté.
+//  - Indexation (6 nov.) : une page est indexable si elle a au moins une annonce ouverte, OU au moins 3 consultations
+//    clôturées depuis moins de 180 jours (historique utile : acheteurs récurrents, métiers). Une absence passagère
+//    d'annonce ne fait donc pas sortir une page vivante de l'index ; une zone sans aucun historique reste en noindex.
+//  - Les compteurs sont calculés sur la même liste que celle affichée, groupe par groupe.
 //  - Aucun appel payant : tout vient de la base, en cache mémoire 15 minutes.
 // ============================================================================
 
@@ -68,9 +72,16 @@ export function displayCity(raw: string): string {
   }).join('');
 }
 
-export type OpenItem = { id: string; title: string; city: string | null; citySlug: string | null; dept: string | null; deadline: string | null;
-  buyer: string | null; journey: string; reference: string | null; value: number | null; trades: string[]; updatedAt: string };
-type Snapshot = { at: number; items: OpenItem[]; trades: Map<string, string>; cityNames: Map<string, string> };
+type Place = { slug: string; name: string; dept: string | null };
+export type Item = {
+  id: string; title: string; journey: string; reference: string | null; value: number | null; trades: string[]; updatedAt: string;
+  buyer: string | null; state: 'open' | 'verify' | 'closed'; deadline: string | null;
+  exec: { status: string; communes: Place[]; depts: string[]; text: string | null };
+  buyerPlace: Place | null; pubDepts: string[];
+};
+/** Compatibilité avec l'ancien nom de type. */
+export type OpenItem = Item;
+type Snapshot = { at: number; items: Item[]; trades: Map<string, string>; cityNames: Map<string, string>; withLocations: boolean };
 let snap: Snapshot | null = null; let loading: Promise<Snapshot> | null = null;
 
 /** Commune de l'acheteur : ville_avis du BOAMP, sinon la ville de l'organisme dans les données de l'avis, sinon
@@ -83,7 +94,6 @@ function orgBlock(raw: string | null | undefined): string | null {
   return raw.slice(0, end);
 }
 const ORG_VILLE = /"ville"\s*:\s*"([^"]{1,60})"/;
-const ORG_CP = /"cp"\s*:\s*"(\d{5})"/;
 export function buyerCommune(o: { ville_avis?: string | null; organisme?: string | null; buyer_name?: string | null; location_city?: string | null }): string | null {
   const clean = (v: string) => v.replace(/\s+cedex.*$/i, '').replace(/\s+\d+$/, '').trim();
   const cands: string[] = [];
@@ -95,63 +105,73 @@ export function buyerCommune(o: { ville_avis?: string | null; organisme?: string
   for (const c of cands) { const v = clean(c); if (isCommuneName(v)) return v; }
   return null;
 }
-function deptFromCp(raw: string | null | undefined): string | null {
-  const org = orgBlock(raw);
-  const m = org ? ORG_CP.exec(org) : null; if (!m) return null;
-  const cp = m[1]; if (cp.startsWith('97')) return DEPARTMENTS[cp.slice(0, 3)] ? cp.slice(0, 3) : null;
-  if (cp.startsWith('20')) return Number(cp) < 20200 ? '2A' : '2B';
-  return DEPARTMENTS[cp.slice(0, 2)] ? cp.slice(0, 2) : null;
-}
+
+const BASE_SQL = (withLoc: boolean) => `
+    SELECT o.id, o.title, o.location_city, o.location_department, o.deadline, o.buyer_name, ot.code AS journey, o.source_reference,
+           o.estimated_value, o.trade_id, o.created_at, COALESCE(o.is_cancelled, false) AS is_cancelled,
+           COALESCE(o.updated_at, o.created_at) AS updated_at
+           ${withLoc ? `, l.exec_status, l.exec_communes, l.exec_departments, l.exec_text, l.buyer_city, l.buyer_department,
+           l.publication_departments, l.notice_deadline, l.diffusion_end` : ''}
+      FROM opportunities o
+      JOIN opportunity_types ot ON ot.id = o.opportunity_type_id
+      LEFT JOIN data_sources ds ON ds.id = o.source_id
+      ${withLoc ? 'LEFT JOIN opportunity_locations l ON l.opportunity_id = o.id' : ''}
+     WHERE o.deleted_at IS NULL AND COALESCE(o.status, '') = 'active'
+       AND COALESCE(ds.code, '') <> 'editorial_catalog'
+       AND (ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))
+       AND (o.deadline >= NOW() - INTERVAL '180 days' OR (o.deadline IS NULL AND o.created_at >= NOW() - INTERVAL '180 days'))
+     LIMIT 120000`;
+
+const betterName = (a: string | undefined, b: string) => {
+  if (!a) return b;
+  const score = (x: string) => (/[a-zà-ÿ]/.test(x) ? 2 : 0) + (/[à-ÿ]/i.test(x) ? 1 : 0) + (/-/.test(x) ? 1 : 0);
+  return score(b) > score(a) ? b : a;
+};
 
 async function load(): Promise<Snapshot> {
   const t = await db.query('SELECT id, name, slug FROM trades WHERE slug IS NOT NULL');
   const tradeById = new Map<string, string>(t.rows.map((r: any) => [String(r.id), String(r.slug)]));
   const trades = new Map<string, string>(t.rows.map((r: any) => [String(r.slug), String(r.name)]));
-  const RICH = `
-    SELECT o.id, o.title, o.location_city, o.location_department, o.deadline, o.buyer_name, ot.code AS journey, o.source_reference,
-           o.estimated_value, o.trade_id, COALESCE(o.updated_at, o.created_at) AS updated_at,
-           o.raw_data->>'ville_avis' AS ville_avis,
-           NULLIF(substring(o.raw_data->>'donnees', strpos(o.raw_data->>'donnees', '"organisme"'), 1200), '') AS organisme
-      FROM opportunities o
-      JOIN opportunity_types ot ON ot.id = o.opportunity_type_id
-      LEFT JOIN data_sources ds ON ds.id = o.source_id
-     WHERE o.deleted_at IS NULL AND COALESCE(o.status, '') = 'active'
-       AND COALESCE(ds.code, '') <> 'editorial_catalog'
-       AND (ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))
-       AND (o.deadline >= NOW() OR (o.deadline IS NULL AND o.created_at >= NOW() - INTERVAL '45 days'))
-     LIMIT 60000`;
-  const PLAIN = `
-    SELECT o.id, o.title, o.location_city, o.location_department, o.deadline, o.buyer_name, ot.code AS journey, o.source_reference,
-           o.estimated_value, o.trade_id, COALESCE(o.updated_at, o.created_at) AS updated_at
-      FROM opportunities o
-      JOIN opportunity_types ot ON ot.id = o.opportunity_type_id
-      LEFT JOIN data_sources ds ON ds.id = o.source_id
-     WHERE o.deleted_at IS NULL AND COALESCE(o.status, '') = 'active'
-       AND COALESCE(ds.code, '') <> 'editorial_catalog'
-       AND (ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))
-       AND (o.deadline >= NOW() OR (o.deadline IS NULL AND o.created_at >= NOW() - INTERVAL '45 days'))
-     LIMIT 60000`;
-  // La lecture de la commune dans l'avis (raw_data) est un plus : si elle échoue ou dépasse le délai, on garde les pages.
-  const r = await db.query(RICH).catch(async (e: unknown) => { logger.error('[SEO v2] lecture des avis impossible, repli :', e); return db.query(PLAIN); });
+  let withLocations = true;
+  const r = await db.query(BASE_SQL(true)).catch(async (e: unknown) => { withLocations = false; logger.error('[SEO v2] table des lieux indisponible, repli :', e); return db.query(BASE_SQL(false)); });
   const cityNames = new Map<string, string>();
-  const items: OpenItem[] = r.rows.map((o: any) => {
-    // Commune = commune de l'ACHETEUR (adresse de l'organisme dans l'avis), jamais présentée comme lieu d'exécution :
-    // le BOAMP ne donne le lieu d'exécution qu'au niveau du département dans la plupart des avis.
-    const city = buyerCommune(o);
-    const citySlug = city ? slugify(city) : null;
-    if (citySlug && (!cityNames.has(citySlug) || /^[^a-zà-ÿ]*$/.test(cityNames.get(citySlug)!))) cityNames.set(citySlug, displayCity(city!));
+  const now = Date.now(); const today = new Date().toISOString().slice(0, 10);
+  const items: Item[] = [];
+  for (const o of r.rows as any[]) {
+    const title = String(o.title || '').trim(); if (!title) continue;
+    const dl = o.deadline ? new Date(o.deadline) : o.notice_deadline ? new Date(o.notice_deadline) : null;
+    const diffEnd = o.diffusion_end ? new Date(o.diffusion_end).toISOString().slice(0, 10) : null;
+    let state: Item['state'];
+    if (o.is_cancelled) state = 'closed';
+    else if (dl) state = dl.getTime() >= now ? 'open' : 'closed';
+    else if (diffEnd && diffEnd < today) state = 'closed';
+    else if (new Date(o.created_at).getTime() >= now - 60 * 86400000) state = 'verify';
+    else continue; // sans date ni signe de vie depuis 60 jours : ni ouverte, ni datée — on ne l'affiche pas
+    const execCommunes: Place[] = (Array.isArray(o.exec_communes) ? o.exec_communes : []).map((c: any) => ({ slug: String(c.slug), name: String(c.name), dept: c.department || null }))
+      .filter((c: Place) => c.slug);
+    const execDepts: string[] = [...new Set<string>([...(o.exec_departments || []), ...execCommunes.map(c => c.dept).filter(Boolean) as string[]])];
+    let buyerPlace: Place | null = null;
+    if (withLocations && o.buyer_city) buyerPlace = { slug: slugify(o.buyer_city), name: displayCity(o.buyer_city), dept: o.buyer_department || null };
+    else if (!withLocations) { const c = buyerCommune(o); if (c) buyerPlace = { slug: slugify(c), name: displayCity(c), dept: normDept(o.location_department) }; }
+    for (const p of [...execCommunes, ...(buyerPlace ? [buyerPlace] : [])]) cityNames.set(p.slug, betterName(cityNames.get(p.slug), p.name));
     const ts = new Set<string>();
     if (o.trade_id && tradeById.has(String(o.trade_id))) ts.add(tradeById.get(String(o.trade_id))!);
-    for (const s of extractTradeSlugs(o.title)) if (trades.has(s)) ts.add(s);
-    return { id: String(o.id), title: String(o.title || '').trim(), city, citySlug, dept: normDept(o.location_department) || deptFromCp(o.organisme), deadline: o.deadline ? new Date(o.deadline).toISOString() : null,
-      buyer: o.buyer_name && !/^\s*\d[\d\s]*$/.test(String(o.buyer_name)) ? String(o.buyer_name).trim() : null, journey: String(o.journey), reference: o.source_reference || null, value: o.estimated_value != null && Number.isFinite(Number(o.estimated_value)) ? Number(o.estimated_value) : null,
-      trades: [...ts], updatedAt: new Date(o.updated_at).toISOString() };
-  }).filter((i: OpenItem) => i.title);
-  return { at: Date.now(), items, trades, cityNames };
+    for (const sl of extractTradeSlugs(title)) if (trades.has(sl)) ts.add(sl);
+    items.push({
+      id: String(o.id), title, journey: String(o.journey), reference: o.source_reference || null,
+      value: o.estimated_value != null && Number.isFinite(Number(o.estimated_value)) ? Number(o.estimated_value) : null,
+      trades: [...ts], updatedAt: new Date(o.updated_at).toISOString(),
+      buyer: o.buyer_name && !/^\s*\d[\d\s]*$/.test(String(o.buyer_name)) ? String(o.buyer_name).trim() : null,
+      state, deadline: dl ? dl.toISOString() : null,
+      exec: { status: o.exec_status || 'inconnu', communes: execCommunes, depts: execDepts, text: o.exec_text || null },
+      buyerPlace, pubDepts: (o.publication_departments || []).map((d: string) => normDept(d)).filter(Boolean) as string[],
+    });
+  }
+  return { at: Date.now(), items, trades, cityNames, withLocations };
 }
 export async function snapshot(): Promise<Snapshot> {
   if (snap && Date.now() - snap.at < 15 * 60000) return snap;
-  if (!loading) loading = load().then(s => { snap = s; return s; }).finally(() => { loading = null; });
+  if (!loading) loading = load().then(x => { snap = x; return x; }).finally(() => { loading = null; });
   try { return await loading; } catch (e) { logger.error('[SEO v2] chargement impossible:', e); if (snap) return snap; throw e; }
 }
 
@@ -164,16 +184,44 @@ export function resolveTrade(raw: string, trades: Map<string, string>): string |
   return syn && trades.has(syn) ? syn : null;
 }
 
-const byDeadline = (a: OpenItem, b: OpenItem) => (a.deadline ? Date.parse(a.deadline) : 9e15) - (b.deadline ? Date.parse(b.deadline) : 9e15);
-const view = (i: OpenItem, trades: Map<string, string>) => ({ id: i.id, title: i.title, city: i.city, department: i.dept, deadline: i.deadline, buyer: i.buyer,
-  reference: i.reference, estimatedValue: i.value, trades: i.trades.map(s => trades.get(s) || s), path: `/opportunites/${i.id}` });
+// Appartenance d'une annonce à une zone, par rôle. « main » = lieu d'exécution dans la zone ; « buyer » = seul
+// l'acheteur y est situé et l'avis ne précise pas de lieu d'exécution au même niveau.
+type Zone = { type: 'city' | 'department'; slug: string; name: string; department: string | null; departmentName: string | null };
+export function roleIn(i: Item, z: { type: 'city' | 'department'; slug: string; department: string | null }): 'main' | 'buyer' | 'dept' | null {
+  if (z.type === 'city') {
+    if (i.exec.communes.some(c => c.slug === z.slug)) return 'main';
+    if (i.buyerPlace?.slug === z.slug && !i.exec.communes.length) return 'buyer';
+    if (z.department && i.exec.depts.includes(z.department)) return 'dept';
+    return null;
+  }
+  if (i.exec.depts.includes(z.department!)) return 'main';
+  if (!i.exec.depts.length && i.buyerPlace?.dept === z.department) return 'buyer';
+  return null;
+}
+const MIN_HISTORY = 3; const PAGE_SIZE = 30;
+export const indexRule = (openMain: number, openBuyer: number, closedRecent: number) =>
+  openMain + openBuyer > 0 ? { indexable: true, reason: 'au moins une annonce ouverte dans la zone' }
+    : closedRecent >= MIN_HISTORY ? { indexable: true, reason: `aucune annonce ouverte aujourd’hui, mais ${closedRecent} consultations clôturées depuis moins de 180 jours : page utile, conservée dans l’index` }
+      : { indexable: false, reason: 'ni annonce ouverte, ni historique récent suffisant : page servie en noindex, jamais supprimée' };
 
-export async function buildPage(args: { base: string; city?: string; trade?: string; department?: string }) {
+const byDeadline = (a: Item, b: Item) => (a.deadline ? Date.parse(a.deadline) : 9e15) - (b.deadline ? Date.parse(b.deadline) : 9e15);
+const byRecent = (a: Item, b: Item) => (b.deadline ? Date.parse(b.deadline) : 0) - (a.deadline ? Date.parse(a.deadline) : 0);
+const view = (i: Item, trades: Map<string, string>) => ({
+  id: i.id, title: i.title, deadline: i.deadline, state: i.state, buyer: i.buyer, reference: i.reference, estimatedValue: i.value,
+  trades: i.trades.map(x => trades.get(x) || x), path: `/opportunites/${i.id}`,
+  // Trois informations distinctes ; null = inconnu (jamais deviné)
+  execution: { status: i.exec.status, communes: i.exec.communes.map(c => c.name), departments: i.exec.depts, text: i.exec.text },
+  buyerCity: i.buyerPlace?.name || null, buyerDepartment: i.buyerPlace?.dept || null, publicationDepartments: i.pubDepts,
+  // compatibilité : « city » = commune d'exécution si connue
+  city: i.exec.communes[0]?.name || null, department: i.exec.depts[0] || null,
+});
+
+export async function buildPage(args: { base: string; city?: string; trade?: string; department?: string; page?: string | number }) {
   const journey = BASE_JOURNEY[args.base];
   if (!journey) return { status: 404 as const };
   const s = await snapshot();
   const pool = s.items.filter(i => i.journey === journey);
-  let zone: { type: 'city' | 'department'; slug: string; name: string; department: string | null; departmentName: string | null };
+  let zone: Zone;
   if (args.department) {
     const d = normDept(args.department); if (!d) return { status: 404 as const };
     zone = { type: 'department', slug: d.toLowerCase(), name: DEPARTMENTS[d], department: d, departmentName: DEPARTMENTS[d] };
@@ -182,7 +230,6 @@ export async function buildPage(args: { base: string; city?: string; trade?: str
     if (!cs) return { status: 404 as const };
     let name = s.cityNames.get(cs);
     if (!name) {
-      // Commune sans annonce ouverte aujourd'hui : on la reconnaît si elle a déjà eu une page ou une annonce (pas de page inventée).
       const known = await db.query(`SELECT location_city AS c, location_department AS d FROM opportunities WHERE location_city IS NOT NULL
         AND regexp_replace(lower(unaccent(location_city)), '[^a-z0-9]+', '-', 'g') = $1 LIMIT 1`, [cs]).catch(() => ({ rows: [] as any[] }));
       const legacy = known.rows[0] ? null : await db.query(`SELECT filter_city AS c, filter_department AS d FROM seo_pages WHERE filter_city IS NOT NULL
@@ -190,13 +237,16 @@ export async function buildPage(args: { base: string; city?: string; trade?: str
       const row = known.rows[0] || legacy?.rows[0];
       if (!row) return { status: 404 as const };
       if (!isCommuneName(row.c)) {
-        // Un acheteur pris pour une ville : on renvoie vers son département s'il est connu, sinon page introuvable.
         const d = normDept(row.d);
         return d ? { status: 301 as const, location: `/${args.base}/departement/${d.toLowerCase()}` } : { status: 404 as const };
       }
-      name = String(row.c).trim();
+      name = displayCity(String(row.c).trim());
     }
-    const deptCounts = new Map<string, number>(); for (const i of s.items) if (i.citySlug === cs && i.dept) deptCounts.set(i.dept, (deptCounts.get(i.dept) || 0) + 1);
+    const deptCounts = new Map<string, number>();
+    for (const i of s.items) {
+      for (const c of i.exec.communes) if (c.slug === cs && c.dept) deptCounts.set(c.dept, (deptCounts.get(c.dept) || 0) + 2);
+      if (i.buyerPlace?.slug === cs && i.buyerPlace.dept) deptCounts.set(i.buyerPlace.dept, (deptCounts.get(i.buyerPlace.dept) || 0) + 1);
+    }
     const dept = [...deptCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
     zone = { type: 'city', slug: cs, name, department: dept, departmentName: dept ? DEPARTMENTS[dept] : null };
   }
@@ -207,51 +257,130 @@ export async function buildPage(args: { base: string; city?: string; trade?: str
     trade = { slug: t, name: s.trades.get(t)! };
   }
   const canonicalPath = zone.type === 'city' ? `/${args.base}/${zone.slug}${trade ? `/${trade.slug}` : ''}` : `/${args.base}/departement/${zone.slug}${trade ? `/${trade.slug}` : ''}`;
-  const inZoneAll = pool.filter(i => (zone.type === 'city' ? i.citySlug === zone.slug : i.dept === zone.department));
-  const inZone = (trade ? inZoneAll.filter(i => i.trades.includes(trade!.slug)) : inZoneAll).sort(byDeadline);
-  const nearbyPool = zone.type === 'city' && zone.department ? pool.filter(i => i.dept === zone.department && i.citySlug !== zone.slug && (!trade || i.trades.includes(trade.slug))) : [];
-  const tradeCounts = new Map<string, number>(); for (const i of inZoneAll) for (const t of i.trades) tradeCounts.set(t, (tradeCounts.get(t) || 0) + 1);
+  const withTrade = (i: Item) => !trade || i.trades.includes(trade.slug);
+  const groups = { main: [] as Item[], buyer: [] as Item[], dept: [] as Item[], verify: [] as Item[], closed: [] as Item[] };
+  const zoneAll: Item[] = [];
+  for (const i of pool) {
+    const role = roleIn(i, zone); if (!role) continue;
+    if (role !== 'dept') zoneAll.push(i);
+    if (!withTrade(i)) continue;
+    if (i.state === 'open') groups[role].push(i);
+    else if (role === 'dept') continue;
+    else if (i.state === 'verify') groups.verify.push(i);
+    else groups.closed.push(i);
+  }
+  groups.main.sort(byDeadline); groups.buyer.sort(byDeadline); groups.dept.sort(byDeadline); groups.closed.sort(byRecent);
+  const publishedOnly = zone.type === 'department'
+    ? pool.filter(i => i.state === 'open' && withTrade(i) && i.pubDepts.includes(zone.department!) && !roleIn(i, zone)).length : 0;
+  // Pagination de la liste principale (30 par page) ; une page au-delà de la dernière n'existe pas.
+  const pages = Math.max(1, Math.ceil(groups.main.length / PAGE_SIZE));
+  const page = Math.max(1, Math.floor(Number(args.page) || 1));
+  if (page > pages) return { status: 404 as const };
+  const tradeCounts = new Map<string, number>(); for (const i of zoneAll) if (i.state === 'open') for (const t of i.trades) tradeCounts.set(t, (tradeCounts.get(t) || 0) + 1);
   const cityCounts = new Map<string, number>();
-  for (const i of pool) if (i.citySlug && i.dept && i.dept === zone.department && i.citySlug !== (zone.type === 'city' ? zone.slug : '')) cityCounts.set(i.citySlug, (cityCounts.get(i.citySlug) || 0) + 1);
-  const buyerCounts = new Map<string, number>(); for (const i of inZone) if (i.buyer) buyerCounts.set(i.buyer, (buyerCounts.get(i.buyer) || 0) + 1);
+  if (zone.department) for (const i of pool) if (i.state === 'open') for (const c of i.exec.communes) if (c.dept === zone.department && c.slug !== zone.slug) cityCounts.set(c.slug, (cityCounts.get(c.slug) || 0) + 1);
+  const buyerCounts = new Map<string, number>(); for (const i of [...groups.main, ...groups.buyer]) if (i.buyer) buyerCounts.set(i.buyer, (buyerCounts.get(i.buyer) || 0) + 1);
   const otherTypes = Object.entries(JOURNEY_BASE).filter(([j]) => j !== journey).map(([j, b]) => ({ base: b, journey: j,
-    count: s.items.filter(i => i.journey === j && (zone.type === 'city' ? i.citySlug === zone.slug : i.dept === zone.department) && (!trade || i.trades.includes(trade.slug))).length }));
-  const indexable = inZone.length > 0;
-  const lastmod = inZone.reduce<string | null>((m, i) => (!m || i.updatedAt > m ? i.updatedAt : m), null);
+    count: s.items.filter(i => i.journey === j && i.state === 'open' && withTrade(i) && (roleIn(i, zone) === 'main' || roleIn(i, zone) === 'buyer')).length }));
+  const rule = indexRule(groups.main.length, groups.buyer.length, groups.closed.length);
+  const lastmod = [...groups.main, ...groups.buyer, ...groups.closed].reduce<string | null>((m, i) => (!m || i.updatedAt > m ? i.updatedAt : m), null);
+  const v = (i: Item) => view(i, s.trades);
   return {
-    status: 200 as const, journey, base: args.base, zone, trade, canonicalPath, indexable,
-    indexReason: indexable ? 'au moins une annonce ouverte dans la zone' : 'aucune annonce ouverte dans la zone aujourd’hui (page conservée, non indexée)',
-    count: inZone.length, items: inZone.slice(0, 60).map(i => view(i, s.trades)), nearbyCount: nearbyPool.length, nearby: nearbyPool.sort(byDeadline).slice(0, 8).map(i => view(i, s.trades)),
+    status: 200 as const, journey, base: args.base, zone, trade, canonicalPath, indexable: rule.indexable, indexReason: rule.reason,
+    locationsReady: s.withLocations,
+    count: groups.main.length, items: groups.main.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map(v), page, pages, pageSize: PAGE_SIZE,
+    buyerCount: groups.buyer.length, buyerItems: groups.buyer.slice(0, 20).map(v),
+    verifyCount: groups.verify.length, verifyItems: groups.verify.slice(0, 10).map(v),
+    nearbyCount: groups.dept.length, nearby: groups.dept.slice(0, 8).map(v),
+    closedCount: groups.closed.length, closedItems: groups.closed.slice(0, 6).map(v),
+    publishedOnlyCount: publishedOnly,
     trades: [...tradeCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([slug, n]) => ({ slug, name: s.trades.get(slug) || slug, count: n })),
     cities: [...cityCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([slug, n]) => ({ slug, name: s.cityNames.get(slug) || slug, count: n })),
     buyers: [...buyerCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([name, n]) => ({ name, count: n })),
-    otherTypes, nextDeadline: inZone.find(i => i.deadline)?.deadline || null, lastmod, generatedAt: new Date(s.at).toISOString(),
+    otherTypes, nextDeadline: [...groups.main, ...groups.buyer].sort(byDeadline).find(i => i.deadline)?.deadline || null, lastmod, generatedAt: new Date(s.at).toISOString(),
   };
 }
 
-/** Pages indexables (sitemap) : seules les zones/métiers avec au moins une annonce ouverte. */
+/** Pages indexables (sitemap) : même règle que buildPage (ouverte, ou historique récent ≥ 3). */
 export async function indexablePaths(): Promise<{ path: string; lastmod: string; count: number }[]> {
   const s = await snapshot();
-  const acc = new Map<string, { lastmod: string; count: number }>();
-  const add = (p: string, i: OpenItem) => { const a = acc.get(p); if (!a) acc.set(p, { lastmod: i.updatedAt, count: 1 }); else { a.count++; if (i.updatedAt > a.lastmod) a.lastmod = i.updatedAt; } };
+  type Acc = { open: number; closed: number; lastmod: string };
+  const acc = new Map<string, Acc>();
+  const add = (p: string, i: Item) => {
+    let a = acc.get(p); if (!a) { a = { open: 0, closed: 0, lastmod: i.updatedAt }; acc.set(p, a); }
+    if (i.state === 'open') a.open++; else if (i.state === 'closed') a.closed++;
+    if (i.updatedAt > a.lastmod) a.lastmod = i.updatedAt;
+  };
   for (const i of s.items) {
-    const base = JOURNEY_BASE[i.journey]; if (!base) continue;
-    if (i.dept) { add(`/${base}/departement/${i.dept.toLowerCase()}`, i); for (const t of i.trades) add(`/${base}/departement/${i.dept.toLowerCase()}/${t}`, i); }
-    if (i.citySlug) { add(`/${base}/${i.citySlug}`, i); for (const t of i.trades) add(`/${base}/${i.citySlug}/${t}`, i); }
+    const base = JOURNEY_BASE[i.journey]; if (!base || i.state === 'verify') continue;
+    const depts = i.exec.depts.length ? i.exec.depts : i.buyerPlace?.dept ? [i.buyerPlace.dept] : [];
+    for (const d of depts) { add(`/${base}/departement/${d.toLowerCase()}`, i); for (const t of i.trades) add(`/${base}/departement/${d.toLowerCase()}/${t}`, i); }
+    const cities = i.exec.communes.length ? i.exec.communes.map(c => c.slug) : i.buyerPlace ? [i.buyerPlace.slug] : [];
+    for (const c of new Set(cities)) { add(`/${base}/${c}`, i); for (const t of i.trades) add(`/${base}/${c}/${t}`, i); }
   }
-  return [...acc.entries()].map(([path, v]) => ({ path, ...v })).sort((a, b) => b.count - a.count);
+  return [...acc.entries()].filter(([, a]) => indexRule(a.open, 0, a.closed).indexable)
+    .map(([path, a]) => ({ path, lastmod: a.lastmod, count: a.open })).sort((a, b) => b.count - a.count);
 }
 
-/** Liens de navigation pour l'accueil et les pages catégories : zones les plus fournies, chiffres réels. */
+/** Liens de navigation pour l'accueil et les pages catégories : zones les plus fournies, annonces ouvertes, lieu d'exécution. */
 export async function topLinks(journey?: string) {
   const s = await snapshot();
-  const pool = journey ? s.items.filter(i => i.journey === journey) : s.items;
+  const pool = (journey ? s.items.filter(i => i.journey === journey) : s.items).filter(i => i.state === 'open');
   const depts = new Map<string, number>(); const cities = new Map<string, number>(); const trades = new Map<string, number>();
-  for (const i of pool) { if (i.dept) depts.set(i.dept, (depts.get(i.dept) || 0) + 1); if (i.citySlug) cities.set(i.citySlug, (cities.get(i.citySlug) || 0) + 1); for (const t of i.trades) trades.set(t, (trades.get(t) || 0) + 1); }
-  const byType = Object.fromEntries(Object.keys(JOURNEY_BASE).map(j => [j, s.items.filter(i => i.journey === j).length]));
+  for (const i of pool) {
+    for (const d of i.exec.depts) depts.set(d, (depts.get(d) || 0) + 1);
+    for (const c of new Set(i.exec.communes.map(x => x.slug))) cities.set(c, (cities.get(c) || 0) + 1);
+    for (const t of i.trades) trades.set(t, (trades.get(t) || 0) + 1);
+  }
+  const byType = Object.fromEntries(Object.keys(JOURNEY_BASE).map(j => [j, s.items.filter(i => i.journey === j && i.state === 'open').length]));
   return { total: pool.length, byType,
     departments: [...depts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 30).map(([code, n]) => ({ code, slug: code.toLowerCase(), name: DEPARTMENTS[code] || code, count: n })),
     cities: [...cities.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40).map(([slug, n]) => ({ slug, name: s.cityNames.get(slug) || slug, count: n })),
     trades: [...trades.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([slug, n]) => ({ slug, name: s.trades.get(slug) || slug, count: n })),
     generatedAt: new Date(s.at).toISOString() };
+}
+
+// ── Anciennes adresses (6 nov.) ────────────────────────────────────────────────────────────────────────────────
+// Les 8 464 pages seo_pages générées automatiquement ont des adresses /pages/:slug et des « villes » qui sont souvent
+// des noms d'acheteurs. Correspondance proposée, sans rien supprimer : commune réelle → page commune ; acheteur pris pour
+// une ville → page département ; rien d'exploitable → page catégorie. La table seo_pages n'est pas modifiée.
+export async function legacyTargets(opts: { slug?: string; limit?: number; offset?: number }) {
+  const r = await db.query(`
+    SELECT sp.page_slug, sp.page_type, sp.filter_city, sp.filter_department, t.slug AS trade_slug, ot.code AS journey
+      FROM seo_pages sp
+      LEFT JOIN trades t ON t.id = sp.filter_trade_id
+      LEFT JOIN opportunity_types ot ON ot.id = sp.filter_opportunity_type_id
+     WHERE ($1::text IS NULL OR sp.page_slug = $1)
+     ORDER BY sp.page_slug
+     LIMIT $2 OFFSET $3`, [opts.slug || null, Math.min(opts.limit || 200, 1000), opts.offset || 0]);
+  const total = opts.slug ? r.rows.length : Number((await db.query('SELECT COUNT(*)::int AS n FROM seo_pages')).rows[0].n);
+  const rows = r.rows.map((p: any) => {
+    const base = JOURNEY_BASE[p.journey] || 'marches-publics';
+    const trade = p.trade_slug ? `/${p.trade_slug}` : '';
+    const dept = normDept(p.filter_department);
+    let target: string; let reason: string;
+    if (p.filter_city && isCommuneName(p.filter_city)) { target = `/${base}/${slugify(p.filter_city)}${trade}`; reason = 'commune'; }
+    else if (p.filter_city && dept) { target = `/${base}/departement/${dept.toLowerCase()}${trade}`; reason = 'acheteur pris pour une ville → département'; }
+    else if (!p.filter_city && dept) { target = `/${base}/departement/${dept.toLowerCase()}${trade}`; reason = 'département'; }
+    else { target = `/${base}`; reason = 'aucune zone exploitable → page catégorie'; }
+    return { from: `/pages/${p.page_slug}`, legacyCity: p.filter_city || null, legacyDepartment: p.filter_department || null, target, reason };
+  });
+  return { total, rows };
+}
+
+/** Localisation lue pour un avis (contrôle, rapport de tests) : par référence source (ex. 26-11675) ou par id. */
+export async function locationOf(ref: string) {
+  const r = await db.query(`
+    SELECT o.id, o.source_reference, o.title, o.deadline, o.buyer_name, l.*
+      FROM opportunities o LEFT JOIN opportunity_locations l ON l.opportunity_id = o.id
+     WHERE o.source_reference = $1 OR o.id::text = $1
+     ORDER BY o.updated_at DESC NULLS LAST LIMIT 1`, [ref]);
+  const o = r.rows[0]; if (!o) return null;
+  return {
+    id: o.id, reference: o.source_reference, title: o.title, buyer: o.buyer_name, deadline: o.deadline || o.notice_deadline || null,
+    computed: !!o.computed_at,
+    execution: { status: o.exec_status || 'inconnu', source: o.exec_source || null, communes: o.exec_communes || [], departments: o.exec_departments || [], text: o.exec_text || null },
+    buyerAddress: { city: o.buyer_city || null, postalCode: o.buyer_postal || null, department: o.buyer_department || null },
+    publicationDepartments: o.publication_departments || [], diffusionEnd: o.diffusion_end || null,
+  };
 }

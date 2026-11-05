@@ -624,6 +624,7 @@ const startServer = async () => {
         ['documentExpiry', 'startExpiryCheck', 'document expiry'],
         ['crmRetry', 'startCrmRetrySchedule', 'CRM retry'],
         ['dossierFollowupJob', 'startDossierFollowupJob', 'dossier follow-up sync'],
+        ['noticeLocationJob', 'startNoticeLocationJob', 'notice locations (SEO v2)'],
         ['followUps', 'startFollowUpsSchedule', 'follow-ups and alerts'],
         ['backupManagement', 'startBackupSchedule', 'backups'],
         ['factsBackfillJob', 'startFactsBackfillJob', 'facts backfill'],
