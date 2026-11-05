@@ -40,7 +40,7 @@ export const DEPARTMENTS: Record<string, string> = {
 export const slugify = (s: string | null | undefined): string => fold(String(s || '')).replace(/['’]/g, '-').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 
 // Une « ville » qui est en réalité un acheteur (« Bordeaux Métropole », « Office public de l'habitat… ») n'est pas une zone.
-const NOT_A_COMMUNE = /(communaut|metropole|agglomeration|agglo\b|syndicat|office|\bspl\b|\bsem\b|\bgie\b|\bsivom\b|\bsivu\b|\bsiv\b|conseil|departement|\bregion\b|centre hospitalier|\bchu\b|\bch\b|hopital|universite|lycee|college|habitat|groupement|coordonnateur|pour le compte|\bpetr\b|\bccas\b|\bsdis\b|\bepci\b|\bsmic|etablissement|direction|ministere|prefecture|mairie|ville de|commune de|port\b|aeroport|\bcrous\b|\bopac\b|\boph\b|logement|sa d|\bsas\b|\bsarl\b)/;
+const NOT_A_COMMUNE = /(communaut|metropole|agglomeration|agglo\b|syndicat|office|\bspl\b|\bsem\b|\bgie\b|\bsivom\b|\bsivu\b|\bsiv\b|conseil|departement|\bregion\b|centre hospitalier|\bchu\b|\bch\b|hopital|universite|lycee|college|habitat|groupement|coordonnateur|pour le compte|\bpetr\b|\bccas\b|\bsdis\b|\bepci\b|\bsmic|etablissement|direction|ministere|prefecture|mairie|ville de|ville d'|ville d’|commune de|commune d'|commune d’|port\b|aeroport|\bcrous\b|\bopac\b|\boph\b|logement|sa d|\bsas\b|\bsarl\b)/;
 export function isCommuneName(name: string | null | undefined): boolean {
   const f = fold(String(name || '')).trim();
   if (!f || f.length > 40 || /\d/.test(f) || /[()\/,;:]/.test(f)) return false;
@@ -73,13 +73,36 @@ export type OpenItem = { id: string; title: string; city: string | null; citySlu
 type Snapshot = { at: number; items: OpenItem[]; trades: Map<string, string>; cityNames: Map<string, string> };
 let snap: Snapshot | null = null; let loading: Promise<Snapshot> | null = null;
 
+/** Commune de l'acheteur : ville_avis du BOAMP, sinon la ville de l'organisme dans les données de l'avis, sinon
+ *  « Mairie / Commune / Ville de X » dans le nom de l'acheteur. Les noms d'organismes sont rejetés. */
+const ORG_VILLE = /"ville"\s*:\s*"([^"]{1,60})"/;
+const ORG_CP = /"cp"\s*:\s*"(\d{5})"/;
+export function buyerCommune(o: { ville_avis?: string | null; organisme?: string | null; buyer_name?: string | null; location_city?: string | null }): string | null {
+  const clean = (v: string) => v.replace(/\s+cedex.*$/i, '').replace(/\s+\d+$/, '').trim();
+  const cands: string[] = [];
+  if (o.ville_avis) cands.push(String(o.ville_avis));
+  const m = o.organisme ? ORG_VILLE.exec(o.organisme) : null; if (m) cands.push(m[1]);
+  const b = String(o.buyer_name || '').match(/^\s*(?:mairie|commune|ville)\s+(?:de\s+|d['’]\s*)(.{2,40})$/i); if (b) cands.push(b[1]);
+  if (o.location_city) cands.push(String(o.location_city));
+  for (const c of cands) { const v = clean(c); if (isCommuneName(v)) return v; }
+  return null;
+}
+function deptFromCp(org: string | null | undefined): string | null {
+  const m = org ? ORG_CP.exec(org) : null; if (!m) return null;
+  const cp = m[1]; if (cp.startsWith('97')) return DEPARTMENTS[cp.slice(0, 3)] ? cp.slice(0, 3) : null;
+  if (cp.startsWith('20')) return Number(cp) < 20200 ? '2A' : '2B';
+  return DEPARTMENTS[cp.slice(0, 2)] ? cp.slice(0, 2) : null;
+}
+
 async function load(): Promise<Snapshot> {
   const t = await db.query('SELECT id, name, slug FROM trades WHERE slug IS NOT NULL');
   const tradeById = new Map<string, string>(t.rows.map((r: any) => [String(r.id), String(r.slug)]));
   const trades = new Map<string, string>(t.rows.map((r: any) => [String(r.slug), String(r.name)]));
   const r = await db.query(`
     SELECT o.id, o.title, o.location_city, o.location_department, o.deadline, o.buyer_name, ot.code AS journey, o.source_reference,
-           o.estimated_value, o.trade_id, COALESCE(o.updated_at, o.created_at) AS updated_at
+           o.estimated_value, o.trade_id, COALESCE(o.updated_at, o.created_at) AS updated_at,
+           o.raw_data->>'ville_avis' AS ville_avis,
+           substring(o.raw_data->>'donnees' from '"organisme"\s*:\s*\{[^}]{0,1200}\}') AS organisme
       FROM opportunities o
       JOIN opportunity_types ot ON ot.id = o.opportunity_type_id
       LEFT JOIN data_sources ds ON ds.id = o.source_id
@@ -90,14 +113,16 @@ async function load(): Promise<Snapshot> {
      LIMIT 60000`);
   const cityNames = new Map<string, string>();
   const items: OpenItem[] = r.rows.map((o: any) => {
-    const city = o.location_city && isCommuneName(o.location_city) ? String(o.location_city).trim() : null;
+    // Commune = commune de l'ACHETEUR (adresse de l'organisme dans l'avis), jamais présentée comme lieu d'exécution :
+    // le BOAMP ne donne le lieu d'exécution qu'au niveau du département dans la plupart des avis.
+    const city = buyerCommune(o);
     const citySlug = city ? slugify(city) : null;
     if (citySlug && (!cityNames.has(citySlug) || /^[^a-zà-ÿ]*$/.test(cityNames.get(citySlug)!))) cityNames.set(citySlug, displayCity(city!));
     const ts = new Set<string>();
     if (o.trade_id && tradeById.has(String(o.trade_id))) ts.add(tradeById.get(String(o.trade_id))!);
     for (const s of extractTradeSlugs(o.title)) if (trades.has(s)) ts.add(s);
-    return { id: String(o.id), title: String(o.title || '').trim(), city, citySlug, dept: normDept(o.location_department), deadline: o.deadline ? new Date(o.deadline).toISOString() : null,
-      buyer: o.buyer_name || null, journey: String(o.journey), reference: o.source_reference || null, value: o.estimated_value != null && Number.isFinite(Number(o.estimated_value)) ? Number(o.estimated_value) : null,
+    return { id: String(o.id), title: String(o.title || '').trim(), city, citySlug, dept: normDept(o.location_department) || deptFromCp(o.organisme), deadline: o.deadline ? new Date(o.deadline).toISOString() : null,
+      buyer: o.buyer_name && !/^\s*\d[\d\s]*$/.test(String(o.buyer_name)) ? String(o.buyer_name).trim() : null, journey: String(o.journey), reference: o.source_reference || null, value: o.estimated_value != null && Number.isFinite(Number(o.estimated_value)) ? Number(o.estimated_value) : null,
       trades: [...ts], updatedAt: new Date(o.updated_at).toISOString() };
   }).filter((i: OpenItem) => i.title);
   return { at: Date.now(), items, trades, cityNames };
