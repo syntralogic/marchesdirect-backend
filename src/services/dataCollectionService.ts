@@ -1004,17 +1004,26 @@ export const collectTedData = async (sourceId: number) => {
     ];
     const results: any[] = [];
     for (let page = 1; results.length < TED_MAX_RECORDS_PER_RUN; page++) {
-      const response = await axios.post(
-        'https://api.ted.europa.eu/v3/notices/search',
-        {
-          query: `buyer-country=FRA AND publication-date>=${sinceStr}`,
-          fields: tedFields,
-          page,
-          limit: TED_PAGE,
-          scope: 'ALL',
-        },
-        { timeout: 60000, headers: { 'Content-Type': 'application/json' } }
-      );
+      // 6 nov. : TED répondait « 429 Too Many Requests » à chaque passage depuis le 1er octobre. On respecte
+      // désormais son délai (Retry-After, sinon 20 s, 40 s, 80 s) et on espace les pages d'1,5 s.
+      if (page > 1) await new Promise(r => setTimeout(r, 1500));
+      let response: any;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          response = await axios.post(
+            'https://api.ted.europa.eu/v3/notices/search',
+            { query: `buyer-country=FRA AND publication-date>=${sinceStr}`, fields: tedFields, page, limit: TED_PAGE, scope: 'ALL' },
+            { timeout: 60000, headers: { 'Content-Type': 'application/json' } }
+          );
+          break;
+        } catch (e: any) {
+          if (e?.response?.status !== 429 || attempt >= 3) throw e;
+          const ra = Number(e.response.headers?.['retry-after']);
+          const wait = Number.isFinite(ra) && ra > 0 ? Math.min(ra, 300) * 1000 : 20000 * 2 ** attempt;
+          logger.warn(`[TED] 429 page ${page}, nouvel essai dans ${Math.round(wait / 1000)} s`);
+          await new Promise(r => setTimeout(r, wait));
+        }
+      }
       const batch: any[] = response.data?.notices || response.data?.results || response.data?.items || [];
       logger.info(`[TED] Page ${page}: ${batch.length} notices (${response.data?.totalNoticeCount ?? '?'} total matching)`);
       const nowMs = Date.now();
@@ -1589,9 +1598,11 @@ export const scheduleDataCollection = async (force: boolean = false) => {
   // "still only ~50 listings" persisting even after that fix + the boot-time
   // trigger were both live - the boot-time call was running, just no-oping
   // every time because next_run hadn't caught up yet.
+  // 6 nov. : au démarrage, on ne relance pas une source importée il y a moins de la moitié de sa fréquence.
+  // Chaque redéploiement relançait tout, ce qui faisait refuser TED (429) et interrompait BOAMP en cours de route.
   const sources = await db.query(
     force
-      ? `SELECT * FROM data_sources WHERE active = true`
+      ? `SELECT * FROM data_sources WHERE active = true AND (last_run IS NULL OR last_run <= NOW() - (GREATEST(COALESCE(frequency_hours, 6), 2) / 2.0 || ' hours')::interval)`
       : `SELECT * FROM data_sources WHERE active = true AND (next_run IS NULL OR next_run <= NOW())`
   );
 
