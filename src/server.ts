@@ -634,7 +634,11 @@ const startServer = async () => {
         ['seoGeneration', 'startSEOGeneration', 'SEO generation'],
       ];
       startups.forEach(([mod, fn, label], i) => {
-        const heavyJobs=['searchIndexRefresh','locationRegionBackfillJob','geocodingBackfillJob','natureBackfillJob','legacyRepairJob','documentIngestion','dataCollection','seoGeneration'];
+        // 6 nov. (à valider) : l'import des annonces ne dépend plus du mode maintenance. Il tourne toutes les 2 heures
+// (chaque source respecte sa fréquence : BOAMP 6 h, TED 12 h, DECP 24 h) et se coupe avec DATA_COLLECTION_ENABLED=false.
+// Il n'appelle ni l'IA ni Pappers : lecture des flux publics, écriture en base, dédoublonnage.
+        const heavyJobs=['searchIndexRefresh','locationRegionBackfillJob','geocodingBackfillJob','natureBackfillJob','legacyRepairJob','documentIngestion','seoGeneration'];
+        if(mod==='dataCollection'&&process.env.DATA_COLLECTION_ENABLED==='false'){logger.info('[Jobs] Data collection disabled (DATA_COLLECTION_ENABLED=false)');return;}
         if(heavyJobs.includes(mod)&&process.env.BOOT_MAINTENANCE_ENABLED!=='true'){
           logger.info(`[Jobs] Heavy maintenance paused: ${mod}`);return;
         }
