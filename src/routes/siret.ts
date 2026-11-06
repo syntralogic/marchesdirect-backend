@@ -455,8 +455,10 @@ async function getCompanyWithProtection(
     }
   }
 
+  // 7 nov. (audit) : la limite par adresse IP porte sur 24 h glissantes au lieu d'être définitive (avant, une IP
+  // partagée — entreprise, réseau mobile — restait bloquée à vie après 2 entreprises).
   if (!isAuthenticated && ip) {
-    const existing = await db.query('SELECT siren FROM siret_ip_throttle WHERE ip_address = $1', [ip]);
+    const existing = await db.query(`SELECT siren FROM siret_ip_throttle WHERE ip_address = $1 AND first_seen > NOW() - INTERVAL '24 hours'`, [ip]);
     const knownSirens = new Set(existing.rows.map(r => r.siren));
     if (!knownSirens.has(siren) && knownSirens.size >= THROTTLE_MAX_COMPANIES_PER_IP) {
       throw new SiretThrottleError();
@@ -1052,6 +1054,17 @@ router.post(
 );
 
 // Shared by /lookup's direct-SIRET path and /confirm: does the actual
+const PAPPERS_DAILY_MAX = Number(process.env.PAPPERS_DAILY_MAX) > 0 ? Number(process.env.PAPPERS_DAILY_MAX) : 400;
+let pappersCapCache: { at: number; over: boolean } | null = null;
+async function pappersOverDailyCap(): Promise<boolean> {
+  if (pappersCapCache && Date.now() - pappersCapCache.at < 60000) return pappersCapCache.over;
+  try {
+    const r = await db.query(`SELECT COUNT(*)::int AS n FROM pappers_api_calls WHERE endpoint = 'entreprise' AND called_at >= date_trunc('day', NOW() AT TIME ZONE 'Europe/Paris') AT TIME ZONE 'Europe/Paris'`);
+    pappersCapCache = { at: Date.now(), over: Number(r.rows[0]?.n || 0) >= PAPPERS_DAILY_MAX };
+  } catch { pappersCapCache = { at: Date.now(), over: false }; }
+  return pappersCapCache.over;
+}
+
 // Pappers-primary/INSEE-fallback fetch, wrapped in the SIREN cache + IP
 // throttle protection (getCompanyWithProtection above).
 async function resolveAndCacheCompany(
@@ -1064,6 +1077,9 @@ async function resolveAndCacheCompany(
 ): Promise<{ company: CompanyData | null; notFound: boolean }> {
   let lastError: any = null;
   let notFound = false;
+  // 7 nov. (audit) : plafond quotidien des appels payants à Pappers (PAPPERS_DAILY_MAX, 400 par défaut, le seuil
+  // rouge du tableau de santé). Au-delà, la fiche est lue gratuitement à l'INSEE quand la clé existe.
+  if (pappersKey && await pappersOverDailyCap()) { logger.warn('[Pappers] plafond quotidien atteint : bascule sur l’INSEE'); pappersKey = undefined; }
 
   const company = await getCompanyWithProtection(siret, ip, sessionId, isAuthenticated, async () => {
     if (pappersKey) {

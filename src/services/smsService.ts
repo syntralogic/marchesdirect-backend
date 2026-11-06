@@ -44,8 +44,29 @@ export function toE164French(phone: string): string {
   return digits;
 }
 
+// Plafonds (7 nov., audit) : un SMS est payant ; sans plafond, un robot qui saisit des numéros en boucle fait payer
+// chaque envoi. Au plus SMS_PER_NUMBER_24H envois par numéro sur 24 h glissantes et SMS_DAILY_MAX par jour (heure
+// de Paris) pour tout le site. Compteurs en mémoire du serveur : remis à zéro au redémarrage, ce qui reste un garde-fou
+// suffisant contre une rafale. Au-delà : erreur « sms_cap_reached », que l'appelant affiche comme un échec d'envoi.
+const SMS_DAILY_MAX = Number(process.env.SMS_DAILY_MAX) > 0 ? Number(process.env.SMS_DAILY_MAX) : 100;
+const SMS_PER_NUMBER_24H = Number(process.env.SMS_PER_NUMBER_24H) > 0 ? Number(process.env.SMS_PER_NUMBER_24H) : 3;
+const smsByNumber = new Map<string, number[]>();
+let smsDay = ''; let smsToday = 0;
+export function smsCapCheck(e164: string, now = Date.now()): string | null {
+  const day = new Date(now).toLocaleDateString('fr-FR', { timeZone: 'Europe/Paris' });
+  if (day !== smsDay) { smsDay = day; smsToday = 0; }
+  if (smsToday >= SMS_DAILY_MAX) return 'plafond quotidien atteint';
+  const recent = (smsByNumber.get(e164) || []).filter(t => now - t < 86400000);
+  if (recent.length >= SMS_PER_NUMBER_24H) return 'plafond par numéro atteint';
+  recent.push(now); smsByNumber.set(e164, recent); smsToday++;
+  if (smsByNumber.size > 5000) for (const [k, v] of smsByNumber) if (!v.some(t => now - t < 86400000)) smsByNumber.delete(k);
+  return null;
+}
+
 export async function sendSms(to: string, body: string): Promise<SmsSendResult> {
   const e164 = toE164French(to);
+  const capped = smsCapCheck(e164);
+  if (capped) { logger.warn(`[SMS] envoi refusé (${capped}) pour ${e164.slice(0, 6)}…`); throw new Error(`sms_cap_reached: ${capped}`); }
 
   const sid = process.env.TWILIO_ACCOUNT_SID;
   const token = process.env.TWILIO_AUTH_TOKEN;
