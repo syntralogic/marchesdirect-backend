@@ -26,6 +26,7 @@ export async function runHealthChecks(): Promise<{ at: string; overall: Check['s
     SELECT ds.id, ds.code, ds.name, ds.frequency_hours,
            (SELECT MAX(completed_at) FROM connector_logs c WHERE c.source_id = ds.id AND c.status = 'success') AS last_ok,
            (SELECT status FROM connector_logs c WHERE c.source_id = ds.id ORDER BY started_at DESC NULLS LAST LIMIT 1) AS last_status,
+           (SELECT error_message FROM connector_logs c WHERE c.source_id = ds.id AND c.status = 'failed' ORDER BY started_at DESC NULLS LAST LIMIT 1) AS last_error,
            (SELECT COUNT(*) FROM connector_logs c WHERE c.source_id = ds.id AND c.status = 'failed' AND c.started_at >= NOW() - INTERVAL '24 hours') AS fails24,
            (SELECT COUNT(*) FROM opportunities o WHERE o.source_id = ds.id AND o.created_at >= NOW() - INTERVAL '24 hours') AS new24
       FROM data_sources ds WHERE ds.active = true AND COALESCE(ds.code, '') <> 'editorial_catalog' ORDER BY ds.code`), [] as any[]);
@@ -34,6 +35,8 @@ export async function runHealthChecks(): Promise<{ at: string; overall: Check['s
     const status = h == null ? 'ko' : h > f * 4 ? 'ko' : h > f * 2 ? 'warn' : s.last_status === 'failed' ? 'warn' : 'ok';
     add({ id: `import.${s.code}`, group: 'Import des annonces', label: `Source ${s.name || s.code}`, status,
       value: `dernier import réussi ${fmtH(h)} · ${n(s.new24)} nouvelles en 24 h${n(s.fails24) ? ` · ${n(s.fails24)} échec(s) en 24 h` : ''}`,
+      // Cause technique courte (ex. « status code 400 »), sans adresse ni clé : de quoi diagnostiquer.
+      detail: s.last_error ? String(s.last_error).replace(/https?:\/\/\S+/g, '[url]').replace(/[A-Za-z0-9_-]{24,}/g, '[…]').slice(0, 160) : undefined,
       rule: `vert si importée depuis moins de ${f * 2} h (2 × sa fréquence de ${f} h), rouge au-delà de ${f * 4} h` });
     metrics[`new24_${s.code}`] = n(s.new24);
   }
