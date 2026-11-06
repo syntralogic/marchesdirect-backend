@@ -202,11 +202,12 @@ export const DEFAULT_RADIUS_KM = 80;
 //  - zone : 1 / (1 + (d / R)²) — 12 km ≈ 0,98 ; 28 km ≈ 0,89 ; 80 km = 0,5 ; 150 km ≈ 0,22 (R = rayon, 80 km par défaut) ;
 //  - moyens : r = montant / CA, 1 / (1 + (r / 0,9)³) — r 0,5 (CA = 2× le montant, plafond légal d'exigence) ≈ 0,85 ;
 //  - calendrier : (jours − 2) / 19, borné 0..1 — J-21 et plus = 1 ; J-7 ≈ 0,26 ; J-2 = 0 ;
-//  - donnée inconnue : 0,5 (neutre, affichée « en attendant »), jamais 0 ni 1.
+//  - donnée inconnue : 0 point (règle de Hedi, 6 nov. : « une inconnue reste inconnue », jamais une valeur flatteuse par
+//    défaut). Elle reste dans le dénominateur et n'est jamais un refus ; un « oui » du visiteur la fait passer en déclaration.
 export const zoneValue = (km: number, radius: number) => 1 / (1 + (km / radius) ** 2);
 export const capacityValue = (ratio: number) => 1 / (1 + (ratio / 0.9) ** 3);
 export const calendarValue = (days: number) => Math.max(0, Math.min(1, (days - 2) / 19));
-const UNKNOWN_VALUE = 0.5;
+const UNKNOWN_VALUE = 0;
 const DECLARED_VALUE = 0.85;   // un « oui » du visiteur : déclaration, pas une preuve
 const DECLARED_NO_VALUE = 0.1; // un « non » du visiteur sur ce chantier
 
@@ -354,11 +355,14 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
     const days = Math.ceil((new Date(market.deadline).getTime() - now.getTime()) / 86400000);
     factDays = days;
     const v = calendarValue(days);
+    // Le délai est un fait sur le marché ; la disponibilité de l'entreprise, elle, reste inconnue tant qu'elle ne l'a
+    // pas confirmée : aucun point d'office (6 nov.). Le délai reste visible dans le texte et dans facts.daysLeft.
     if (days <= 0) dispo = { ...dispo, status: 'mismatch', factor: 0, value: 0, detail: 'La date limite de remise est dépassée.' };
-    else if (days <= 3) dispo = { ...dispo, value: v, detail: `Échéance dans ${days} jour${days > 1 ? 's' : ''} : confirmez que vous pouvez répondre dans ce délai.` };
-    else if (days <= 10) dispo = { ...dispo, value: v, detail: `J-${days} : délai serré pour préparer un mémoire technique (environ 10 jours ouvrés).` };
-    else if (days < 21) dispo = { ...dispo, value: v, detail: `J-${days} : délai correct, à organiser dès maintenant.` };
-    else dispo = { ...dispo, value: v, detail: `J-${days} : délai confortable pour préparer votre réponse.` };
+    else if (days <= 3) dispo = { ...dispo, detail: `Échéance dans ${days} jour${days > 1 ? 's' : ''} : confirmez que vous pouvez répondre dans ce délai.` };
+    else if (days <= 10) dispo = { ...dispo, detail: `J-${days} : délai serré pour préparer un mémoire technique (environ 10 jours ouvrés). Confirmez votre disponibilité.` };
+    else if (days < 21) dispo = { ...dispo, detail: `J-${days} : délai correct, à organiser dès maintenant. Confirmez votre disponibilité.` };
+    else dispo = { ...dispo, detail: `J-${days} : délai confortable pour préparer votre réponse. Confirmez votre disponibilité.` };
+    void v;
   }
   dispo = apply(dispo, answers.calendar, {
     oui: 'Vous indiquez être disponible sur ce calendrier : déclaration à confirmer.',
@@ -387,7 +391,7 @@ export function evaluateMatch(company: CompanyProfile | null, market: MarketInpu
   }
 
   const mandatoryKeys = new Set(market.mandatoryCriteria || []);
-  // v28 : facteur continu. Preuve des données -> valeur mesurée ; « oui » -> au moins 0,85 ; « non » -> 0,1 ; inconnu -> 0,5.
+  // v28 : facteur continu. Preuve des données -> valeur mesurée ; « oui » -> au moins 0,85 ; « non » -> 0,1 ; inconnu -> 0.
   const continuous = (c: MatchCriterion, evidence: EvidenceState): number => {
     if (evidence === 'not_applicable') return 0;
     if (c.answered && evidence === 'mismatch' && !c.conflict) return DECLARED_NO_VALUE;
