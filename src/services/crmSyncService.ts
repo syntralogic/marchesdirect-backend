@@ -111,7 +111,7 @@ async function syncToPipedrive(lead: LeadRow): Promise<{ contactId: string }> {
     // rendez-vous and the opportunity concerned are now part of the lead.
     lead.opportunity_title ? `Opportunité: ${lead.opportunity_title}` : null,
     lead.lot_label ? `Lot: ${lead.lot_label}` : null,
-    lead.appointment_mode === 'slot' && lead.appointment_slot_at
+    (lead.appointment_mode === 'slot' || lead.appointment_mode === 'request') && lead.appointment_slot_at
       ? `Rendez-vous demandé: ${new Date(lead.appointment_slot_at).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })}`
       : lead.appointment_mode === 'callback' ? 'Demande: être rappelé' : null,
     lead.message ? `Message: ${lead.message}` : null,

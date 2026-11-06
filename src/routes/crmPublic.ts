@@ -72,6 +72,8 @@ router.post(
       .custom((v) => isValidLeadPhone(v)).withMessage('Le numéro de téléphone n\'est pas valide.'),
     body('sessionId').optional({ checkFalsy: true }).isString().trim().isLength({ max: 100 }),
     body('slotAt').optional({ checkFalsy: true }).isISO8601().withMessage('Créneau invalide.'),
+    // v26 (4.3): a DESIRED slot, never a reservation - the team confirms by phone (HubSpot task). No agenda is involved.
+    body('slotRequestAt').optional({ checkFalsy: true }).isISO8601().withMessage('Créneau invalide.'),
     // The market (and optional lot) the request was made from, so the HubSpot deal carries md_market_* / md_lot_reference.
     body('opportunityId').optional({ checkFalsy: true }).isUUID().withMessage('Marché invalide.'),
     body('lotLabel').optional({ checkFalsy: true }).isString().trim().isLength({ max: 200 }),
@@ -117,7 +119,7 @@ router.post(
       // row exists. Without a client key, a derived key (same visitor, same content, same 20 s window) lets the
       // unique index decide atomically which one is recorded.
       const insertKey = idempotencyKey || (sessionId
-        ? 'auto:' + createHash('sha1').update([brandId, sessionId, leadSource || 'website_form', email || '', phone || '', message || '', req.body.slotAt || '', Math.floor(Date.now() / 20000)].join('|')).digest('hex')
+        ? 'auto:' + createHash('sha1').update([brandId, sessionId, leadSource || 'website_form', email || '', phone || '', message || '', req.body.slotAt || '', req.body.slotRequestAt || '', Math.floor(Date.now() / 20000)].join('|')).digest('hex')
         : null);
       if (idempotencyKey) {
         const prior = await db.query('SELECT id, created_at, appointment_slot_at FROM crm_leads WHERE brand_id = $1 AND idempotency_key = $2 LIMIT 1', [brandId, idempotencyKey]);
@@ -172,7 +174,16 @@ router.post(
         if (!r.ok) return res.status(r.status).json(r.body);
         bookingId = r.bookingId; slotDate = r.slotDate;
       }
-      const slotNote = slotDate ? `Rendez-vous confirmé : ${slotInfo(slotDate).slotLabel}` : null;
+      // A desired slot is only a request: it must be in the future and reasonably close. Nothing is reserved or promised.
+      let requestedSlot: Date | null = null;
+      if (!slotDate && req.body.slotRequestAt) {
+        const d = new Date(req.body.slotRequestAt);
+        const inDays = (d.getTime() - Date.now()) / 86400000;
+        if (!(inDays > 0) || inDays > 45) return res.status(400).json({ error: 'Ce créneau n’est pas valide. Choisissez un autre créneau.' });
+        requestedSlot = d;
+      }
+      const slotNote = slotDate ? `Rendez-vous confirmé : ${slotInfo(slotDate).slotLabel}`
+        : requestedSlot ? `Créneau souhaité (30 minutes, par téléphone) : ${slotInfo(requestedSlot).slotLabel} - à confirmer par téléphone, rien n’est réservé.` : null;
       const finalMessage = slotNote ? [message, slotNote].filter(Boolean).join('\n') : message;
       let result: any;
       try {
@@ -185,7 +196,7 @@ router.post(
         [
           brandId, firstName, lastName, email, phone, companyName,
           industryTrade, locationCity, locationRegion, leadSource || 'website_form', finalMessage, sessionId || null, insertKey,
-          slotDate ? 'slot' : null, slotDate ? slotDate.toISOString() : null,
+          slotDate ? 'slot' : requestedSlot ? 'request' : null, (slotDate || requestedSlot) ? (slotDate || requestedSlot)!.toISOString() : null,
           opportunityId, lotLabel, utmSource, utmCampaign,
         ]
       ).catch(async (e: any) => {
