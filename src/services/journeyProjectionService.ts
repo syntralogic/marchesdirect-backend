@@ -5,7 +5,7 @@ import { buildCompanyProfile,buildCompanyScore,isTestCompany } from './companyPr
 import { hubspotRequest,journeySchemaReady } from './hubspotJourneySchema';
 export const STEP_LABELS:Record<string,string>={arrival:'Arrivée',search:'Recherche',offer_view:'Annonce consultée',view_opportunity:'Annonce consultée',company_selected:'SIRET saisi',company_identified:'Entreprise identifiée',analysis_started:'Analyse commencée',analysis_completed:'Analyse réalisée',retour_arriere:'Retour arrière',coordonnees_saisies:'Coordonnées laissées',contact_details:'Coordonnées laissées',demande_info:'Simple renseignement demandé',dossier_preview:'Aperçu du dossier',dossier_requested:'Dossier demandé',callback_requested:'Rappel demandé',appointment_booked:'Rendez-vous demandé',
  // 5 Nov (poste de travail HubSpot) : codes v26 jusque-là affichés « Étape enregistrée ».
- ranked_list_shown:'Liste de marchés affichée',concordance_shown:'Pourcentage affiché',alert_requested:'Alerte nouveaux marchés demandée',invitation_30min_clicked:'Invitation 30 minutes acceptée',view_seo_page:'Page consultée',
+ ranked_list_shown:'Liste de marchés affichée',concordance_shown:'Pourcentage affiché',alert_requested:'Alerte nouveaux marchés demandée',invitation_30min_clicked:'Invitation 30 minutes acceptée',view_seo_page:'Page consultée',view_guide:'Guide consulté',view_buyer_page:'Page acheteur consultée',
  // 5 nov. (suivi complet) : nouvelles actions, toutes rattachées à l'annonce concernée.
  dossier_downloaded:'Dossier PDF téléchargé',favorite_added:'Mis en favori',dossier_entrusted:'Dossier confié à Elena',message_sent:'Message envoyé à Elena'};
 // Actions qui portent sur une annonce : la ligne du résumé donne toujours le titre, la référence et le lien.

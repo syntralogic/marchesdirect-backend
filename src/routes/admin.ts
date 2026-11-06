@@ -994,7 +994,9 @@ router.patch('/opportunities/:id/status', async (req: AuthRequest, res: Response
     }
 
     const result = await db.query(
-      `UPDATE opportunities SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING id, status`,
+      // 7 nov. : le statut choisi par l'administrateur est verrouillé (status_locked_at) pour que l'import suivant ne
+      // le remplace pas ; remettre « active » le déverrouille.
+      `UPDATE opportunities SET status = $1, status_locked_at = CASE WHEN $1 = 'active' THEN NULL ELSE NOW() END, updated_at = NOW() WHERE id = $2 RETURNING id, status`,
       [status, req.params.id]
     );
     if (result.rows.length === 0) {

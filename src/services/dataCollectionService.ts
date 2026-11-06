@@ -1525,6 +1525,7 @@ async function upsertOpportunityChunk(sourceId: number, opportunityTypeId: strin
     );
   });
 
+  const locked = await hasStatusLockColumn();
   return db.transaction(async (client) => {
     await client.query(`SET LOCAL statement_timeout = ${BULK_UPSERT_TIMEOUT_MS}`);
     const result = await client.query(
@@ -1538,7 +1539,7 @@ async function upsertOpportunityChunk(sourceId: number, opportunityTypeId: strin
          deadline = EXCLUDED.deadline,
          estimated_value = EXCLUDED.estimated_value,
          raw_data = EXCLUDED.raw_data,
-         status = EXCLUDED.status,
+         status = ${locked ? 'CASE WHEN o.status_locked_at IS NOT NULL THEN o.status ELSE EXCLUDED.status END' : 'EXCLUDED.status'}, -- statut fixé par un administrateur conservé (7 nov.)
          official_url = COALESCE(EXCLUDED.official_url, o.official_url),
          location_department = COALESCE(EXCLUDED.location_department, o.location_department),
          location_country = COALESCE(EXCLUDED.location_country, o.location_country),
@@ -1547,7 +1548,7 @@ async function upsertOpportunityChunk(sourceId: number, opportunityTypeId: strin
           OR o.deadline IS DISTINCT FROM EXCLUDED.deadline
           OR o.estimated_value IS DISTINCT FROM EXCLUDED.estimated_value
           OR o.raw_data IS DISTINCT FROM EXCLUDED.raw_data
-          OR o.status IS DISTINCT FROM EXCLUDED.status
+          OR (${locked ? 'o.status_locked_at IS NULL AND ' : ''}o.status IS DISTINCT FROM EXCLUDED.status)
           OR o.official_url IS DISTINCT FROM COALESCE(EXCLUDED.official_url, o.official_url)
           OR o.location_department IS DISTINCT FROM COALESCE(EXCLUDED.location_department, o.location_department)
           OR o.location_country IS DISTINCT FROM COALESCE(EXCLUDED.location_country, o.location_country)
@@ -1671,3 +1672,16 @@ export const scheduleDataCollection = async (force: boolean = false) => {
     }
   }
 };
+
+
+// 7 nov. : la colonne status_locked_at est ajoutée au démarrage (database.ts). Si cet ajout n'a pas pu se faire
+// (verrou), l'import continue à l'ancienne plutôt que d'échouer : vérifié une fois puis toutes les 10 minutes.
+let statusLockCheck: { at: number; ok: boolean } | null = null;
+async function hasStatusLockColumn(): Promise<boolean> {
+  if (statusLockCheck && (statusLockCheck.ok || Date.now() - statusLockCheck.at < 600000)) return statusLockCheck.ok;
+  try {
+    const r = await db.query(`SELECT 1 FROM information_schema.columns WHERE table_name = 'opportunities' AND column_name = 'status_locked_at'`);
+    statusLockCheck = { at: Date.now(), ok: r.rows.length > 0 };
+  } catch { statusLockCheck = { at: Date.now(), ok: false }; }
+  return statusLockCheck.ok;
+}

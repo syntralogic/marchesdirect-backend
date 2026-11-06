@@ -1467,6 +1467,8 @@ const applyIncrementalMigrations = async (): Promise<void> => {
   // so a source whose URL scheme changes later doesn't silently break old
   // rows, and so it's backfillable independently of a redeploy.
   await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS official_url TEXT`);
+  // 7 nov. (audit) : statut fixé à la main par un administrateur — l'import ne l'écrase plus (dataCollectionService).
+  await step(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS status_locked_at TIMESTAMP`);
 
   // Client's 10 Sep ask: the opportunity page's AI analysis renders as one
   // dense text block (visible proof: a fully-populated fiche - Saint-

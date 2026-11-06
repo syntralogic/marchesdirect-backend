@@ -43,7 +43,7 @@ router.post(
   '/',
   [
     body('sessionId').isString().trim().isLength({ min: 8, max: 100 }),
-    body('eventType').isString().trim().isIn(['search', 'view_opportunity', 'view_seo_page', 'company_identified', 'concordance_shown', 'form_started', 'request_submitted', ...HUBSPOT_EVENT_CODES, ...RANKED_LIST_EVENT_CODES]),
+    body('eventType').isString().trim().isIn(['search', 'view_opportunity', 'view_seo_page', 'view_guide', 'view_buyer_page', 'company_identified', 'concordance_shown', 'form_started', 'request_submitted', ...HUBSPOT_EVENT_CODES, ...RANKED_LIST_EVENT_CODES]),
     body('eventId').optional({ checkFalsy: true }).isString().trim().isLength({ min: 8, max: 100 }),
     body('occurredAt').optional({ checkFalsy: true }).isISO8601(),
     body('siret').optional({ checkFalsy: true }).matches(/^\d{14}$/),
