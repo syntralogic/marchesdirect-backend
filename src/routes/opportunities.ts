@@ -373,6 +373,23 @@ const searchCacheKey = (...parts: unknown[]): string =>
 const TRADE_LOOKUP_TTL_MS = 10 * 60 * 1000;
 
 let locationTableReady: boolean | null = null; let locationTableCheckedAt = 0;
+// Requête de recherche avec durée maximale (8 s) : une recherche trop longue est abandonnée proprement (erreur 57014,
+// « Recherche trop longue ») au lieu de retenir une des 8 connexions et de bloquer tous les autres visiteurs (6 nov.).
+const SEARCH_STATEMENT_TIMEOUT_MS = 8000;
+async function timedQuery(sql: string, params: any[]): Promise<{ rows: any[] }> {
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL statement_timeout = ${SEARCH_STATEMENT_TIMEOUT_MS}`);
+    const r = await client.query(sql, params);
+    await client.query('COMMIT');
+    return r;
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch { /* connexion rendue telle quelle */ }
+    throw e;
+  } finally { client.release(); }
+}
+
 async function hasLocationTable(): Promise<boolean> {
   if (locationTableReady !== null && Date.now() - locationTableCheckedAt < 10 * 60000) return locationTableReady;
   try { await require('../jobs/noticeLocationJob').ensureLocationSchema(); locationTableReady = true; } // une seule fois par processus (voir noticeLocationJob)
@@ -1293,7 +1310,7 @@ async function searchOpportunities(req: Request, res: Response) {
        ${naturePrestationLateral('o')}
        ORDER BY pg.ord`;
       }
-      const result = await db.query(listSql, listParams);
+      const result = await timedQuery(listSql, listParams);
       for (const row of result.rows) {
         try {
           reconcileOfficialFields(row);
@@ -1309,7 +1326,7 @@ async function searchOpportunities(req: Request, res: Response) {
     const loadCount = async (): Promise<number> => {
       // Same joins and WHERE as the list; the nature LATERAL is only joined
       // when the WHERE reads it (explicit nature filter).
-      const countResult = await db.query(
+      const countResult = await timedQuery(
         `SELECT COUNT(*) as total
        FROM opportunities o
        ${SCOPE_JOINS}
@@ -1325,21 +1342,25 @@ async function searchOpportunities(req: Request, res: Response) {
     // v2 : décompte par état et par niveau de lieu, sur exactement le même périmètre que la liste.
     const loadBreakdown = async () => {
       if (!v2) return null;
-      const r = await db.query(`SELECT ${v2Select.replace(/^,/, '').split(' AS state_rank')[0]} AS state_rank${locLevelExpr ? `, ${locLevelExpr} AS lvl` : ', 0 AS lvl'}, COUNT(*)::int AS n
+      const r = await timedQuery(`SELECT ${v2Select.replace(/^,/, '').split(' AS state_rank')[0]} AS state_rank${locLevelExpr ? `, ${locLevelExpr} AS lvl` : ', 0 AS lvl'}, COUNT(*)::int AS n
         FROM opportunities o ${SCOPE_JOINS} ${natureInWhere ? naturePrestationLateral('o') : ''} WHERE ${whereClause} GROUP BY 1, 2`, params);
       const b = { open: 0, verify: 0, closed: 0, execution: 0, buyerOnly: 0, notYetRead: 0 };
       for (const x of r.rows) { const n = Number(x.n); if (x.state_rank === 0) b.open += n; else if (x.state_rank === 1) b.verify += n; else b.closed += n;
         if (locLevelExpr) { if (x.lvl === 0) b.execution += n; else if (x.lvl === 1) b.buyerOnly += n; else b.notYetRead += n; } }
       return b;
     };
-    // Liste, total et décompte par état en parallèle (le décompte attendait la fin des deux autres).
-    const [rows, total, breakdown] = await Promise.all([
-      countOnly
-        ? Promise.resolve([] as any[])
-        : searchListCache(searchCacheKey('list', whereClause, orderClause, listParams), SEARCH_LIST_TTL_MS, loadList),
-      searchCountCache(searchCacheKey('count', whereClause, params), SEARCH_COUNT_TTL_MS, loadCount),
-      v2 && !countOnly ? searchCountCache(searchCacheKey('breakdown', whereClause, params), SEARCH_COUNT_TTL_MS, loadBreakdown as any).catch(() => null) : Promise.resolve(null),
-    ]);
+    // 6 nov. (panne du soir) : la base n'offre que 8 connexions à ce serveur. Une recherche n'en occupe plus qu'une à la
+    // fois (liste, puis décompte), et en v2 le total est déduit du décompte par état (même périmètre) : plus de
+    // requête COUNT séparée. Chaque requête renonce au bout de 8 s (statement_timeout) au lieu de bloquer la file.
+    const rows: any[] = countOnly ? [] : await searchListCache(searchCacheKey('list', whereClause, orderClause, listParams), SEARCH_LIST_TTL_MS, loadList);
+    let breakdown: Awaited<ReturnType<typeof loadBreakdown>> = null;
+    let total: number;
+    if (v2) {
+      breakdown = await searchCountCache(searchCacheKey('breakdown', whereClause, params), SEARCH_COUNT_TTL_MS, loadBreakdown as any).catch(() => null) as any;
+      total = breakdown ? breakdown.open + breakdown.verify + breakdown.closed : await searchCountCache(searchCacheKey('count', whereClause, params), SEARCH_COUNT_TTL_MS, loadCount);
+    } else {
+      total = await searchCountCache(searchCacheKey('count', whereClause, params), SEARCH_COUNT_TTL_MS, loadCount);
+    }
 
     res.json({
       results: rows,
@@ -1360,6 +1381,7 @@ async function searchOpportunities(req: Request, res: Response) {
     // verbatim when no `message` is present, so a visitor whose results
     // page failed to load saw "Failed to search opportunities" rather than
     // French copy.
+    if (err?.code === '57014') return res.status(503).json({ error: 'search_timeout', message: 'La recherche a pris trop de temps. Précisez un métier ou un département, ou réessayez dans un instant.' });
     res.status(500).json({ error: 'search_failed', message: 'Impossible de charger les opportunités. Réessayez.' });
   }
 }
