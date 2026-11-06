@@ -825,28 +825,15 @@ async function handleLeadCapture(
     let dossierEmailed = false;
     if (opportunityId) {
       try {
-        const oppFactsResult = await db.query(
-          `SELECT o.title, o.buyer_name, o.source_reference, o.location_city, o.deadline, o.estimated_value, o.currency, o.status, ot.code AS journey
-           FROM opportunities o LEFT JOIN opportunity_types ot ON ot.id = o.opportunity_type_id WHERE o.id = $1 AND o.deleted_at IS NULL`,
-          [opportunityId]
-        );
-        // Without an e-mail address nothing is sent: the visitor downloads the PDF on the confirmation screen instead.
-        if (oppFactsResult.rows.length > 0 && companyName && email) {
-          const o = oppFactsResult.rows[0];
-          dossierEmailed = await sendPrefilledDossierEmail(email, {
-            companyName,
-            siret: companySiret,
-            opportunityTitle: o.title,
-            lotLabel: lotLabel || null,
-            buyerName: o.buyer_name,
-            reference: o.source_reference,
-            locationCity: o.location_city,
-            submissionDeadline: o.deadline ? new Date(o.deadline).toLocaleDateString('fr-FR') : null,
-            estimatedValue: o.estimated_value ? Number(o.estimated_value) : null,
-            currency: o.currency,
-            isClosed: isOpportunityClosed({ status: o.status, deadline: o.deadline }),
-            journey: o.journey || null, deadlineAt: o.deadline ? new Date(o.deadline) : null, opportunityId,
-          }, { sessionId, opportunityId, siret: companySiret });
+        // 6 nov. : même document que « Télécharger mon exemplaire » (lieu d'exécution relu dans l'avis, date limite à
+        // l'heure de Paris, montant sans « HT » inventé). Avant, la pièce jointe lisait les anciennes colonnes et
+        // pouvait annoncer un autre lieu et une autre date que la fiche.
+        // Sans adresse e-mail, rien n'est envoyé : le visiteur télécharge le PDF sur l'écran de confirmation.
+        if (companyName && email) {
+          const prepared = await loadPrefilledDossierInput(sessionId, opportunityId);
+          if (!('error' in prepared)) {
+            dossierEmailed = await sendPrefilledDossierEmail(email, { ...prepared.input, lotLabel: lotLabel || prepared.input.lotLabel || null }, { sessionId, opportunityId, siret: companySiret });
+          }
         }
       } catch (err) {
         // Non-fatal, same reasoning as the CRM linking block below.
@@ -923,7 +910,7 @@ async function handleLeadCapture(
 // someone skip straight to the document without capturing contact details
 // first, it only lets an already-captured visitor retrieve what they were
 // already sent.
-async function loadPrefilledDossierInput(sessionId: string, opportunityId: string, v2 = false) {
+async function loadPrefilledDossierInput(sessionId: string, opportunityId: string, v2 = true) {
   const lookup = await db.query(
     'SELECT siret, company_data, email, lead_captured_at FROM siret_lookups WHERE session_id = $1',
     [sessionId]
@@ -945,7 +932,7 @@ async function loadPrefilledDossierInput(sessionId: string, opportunityId: strin
   if (oppResult.rows.length === 0) {
     return { error: 'opportunity_not_found' as const };
   }
-  // v2 (aperçu, ?loc=2) : date limite relue dans l'avis à l'heure de Paris, lieu d'exécution au lieu de l'ancienne colonne.
+  // v2 (par défaut depuis la mise en production du 6 nov.) : date limite relue dans l'avis à l'heure de Paris, lieu d'exécution au lieu de l'ancienne colonne.
   if (v2 && oppResult.rows[0]) {
     const l = (await db.query(`SELECT exec_communes, exec_departments, exec_status, notice_deadline FROM opportunity_locations WHERE opportunity_id = $1`, [opportunityId]).catch(() => ({ rows: [] as any[] }))).rows[0];
     if (l) {
@@ -977,7 +964,7 @@ async function loadPrefilledDossierInput(sessionId: string, opportunityId: strin
       opportunityId,
       lotLabel: lot.rows[0]?.lot_label || null,
       company: company_data ? { legal: company_data.legal || null, created: company_data.created || null, address: company_data.address || null, city: company_data.city || null,
-        postal: company_data.postal || null, director: company_data.director || null, employees: company_data.employees || null, ape: company_data.ape || null, activity: company_data.activity || null } : null,
+        postal: company_data.postal || null, director: company_data.director || null, employees: company_data.employees || null, ape: company_data.ape || null, activity: company_data.activity || null, source: company_data.source || null } : null,
     },
   };
 }
@@ -1000,7 +987,7 @@ router.get('/lead/dossier-pdf', async (req: AuthRequest, res: Response) => {
   // (same class of bug as /siret/lookup and /siret/confirm above). Only
   // the PDF-generation step itself had a safety net.
   try {
-    const result = await loadPrefilledDossierInput(sessionId, opportunityId, String(req.query.loc || '') === '2');
+    const result = await loadPrefilledDossierInput(sessionId, opportunityId);
     if ('error' in result) {
       return res.status(409).json({ error: result.error, message: "Confirmez d'abord vos coordonnées pour accéder à ce document." });
     }
