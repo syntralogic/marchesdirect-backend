@@ -378,18 +378,21 @@ let locationTableReady: boolean | null = null; let locationTableCheckedAt = 0;
 // Requête de recherche avec durée maximale (20 s) : une recherche trop longue est abandonnée proprement (erreur 57014,
 // « Recherche trop longue ») au lieu de retenir une des 8 connexions et de bloquer tous les autres visiteurs (6 nov.).
 const SEARCH_STATEMENT_TIMEOUT_MS = 20000; // 20 s tant que la recherche par mot-clé n'est pas accélérée (mesuré : ~10 s)
+// 7 nov. (mesure en production : liste 630 ms dont ~560 ms de trajets réseau, serveur aux États-Unis et base en
+// Irlande) : 2 allers-retours attendus au lieu de 4. BEGIN et SET LOCAL partent en une seule fois (requête simple
+// sans paramètre) ; le COMMIT n'est plus attendu avant de répondre, la connexion est rendue au pool après lui.
 async function timedQuery(sql: string, params: any[]): Promise<{ rows: any[] }> {
   const client = await db.getClient();
+  let r: { rows: any[] };
   try {
-    await client.query('BEGIN');
-    await client.query(`SET LOCAL statement_timeout = ${SEARCH_STATEMENT_TIMEOUT_MS}`);
-    const r = await client.query(sql, params);
-    await client.query('COMMIT');
-    return r;
+    await client.query(`BEGIN; SET LOCAL statement_timeout = ${SEARCH_STATEMENT_TIMEOUT_MS}`);
+    r = await client.query(sql, params);
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch { /* connexion rendue telle quelle */ }
+    client.query('ROLLBACK').then(() => client.release(), () => client.release(true)); // connexion abîmée : écartée du pool
     throw e;
-  } finally { client.release(); }
+  }
+  client.query('COMMIT').then(() => client.release(), () => client.release(true));
+  return r;
 }
 
 async function hasLocationTable(): Promise<boolean> {
