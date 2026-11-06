@@ -25,6 +25,8 @@ import {
   FR_PHONE_RE,
 } from '../services/phoneVerificationService';
 
+const NAME_SEARCH_CACHE = new Map<string, { at: number; candidates: any[] }>();
+const NAME_SEARCH_IP = new Map<string, number[]>();
 const router = Router();
 
 // 30 Sep audit (SPIE CITYNETWORKS, 42.22Z): Pappers/INSEE return NAF codes
@@ -1160,9 +1162,21 @@ router.post(
             message: "La recherche par nom d'entreprise n'est pas disponible pour le moment. Indiquez le numéro de SIRET (14 chiffres).",
           });
         }
+        // Protection des coûts (6 nov., à valider) : recherche par nom mise en cache 24 h par requête normalisée et
+        // limitée à 20 recherches par adresse IP sur 10 minutes. Un robot ou une frappe répétée ne coûte plus un jeton
+        // Pappers à chaque fois.
+        const nameKey = query.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+        const hit = NAME_SEARCH_CACHE.get(nameKey);
+        if (hit && Date.now() - hit.at < 24 * 3600000) return res.json({ companyKnown: false, candidates: hit.candidates });
+        const ip = String(req.ip || 'x'); const now = Date.now();
+        const w = (NAME_SEARCH_IP.get(ip) || []).filter(t => now - t < 10 * 60000);
+        if (w.length >= 20) return res.status(429).json({ error: 'too_many_searches', message: 'Trop de recherches en peu de temps. Réessayez dans quelques minutes ou indiquez le SIRET.' });
+        w.push(now); NAME_SEARCH_IP.set(ip, w);
         let candidates: CompanyCandidate[] = [];
         try {
           candidates = await searchCompaniesByName(query, pappersKey);
+          if (NAME_SEARCH_CACHE.size > 2000) NAME_SEARCH_CACHE.clear();
+          NAME_SEARCH_CACHE.set(nameKey, { at: Date.now(), candidates });
         } catch (err: any) {
           logger.error('Pappers company-name search error:', err.response?.data || err.message);
           return res.status(502).json({ error: 'siret_lookup_failed', message: 'La recherche a échoué. Réessayez.' });
