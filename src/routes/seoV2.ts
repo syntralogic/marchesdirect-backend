@@ -83,4 +83,13 @@ router.get('/compteur', async (_req: Request, res: Response) => {
   } catch (err: any) { res.status(503).json({ error: 'unavailable' }); }
 });
 
+// Santé de la chaîne (6 nov.) : résumé public (statuts et nombres), détail complet réservé aux administrateurs.
+router.get('/sante', async (req: Request, res: Response) => {
+  try {
+    const { runHealthChecks } = require('../services/healthService');
+    const r = await runHealthChecks();
+    res.set('Cache-Control', 'no-store').json({ at: r.at, overall: r.overall, checks: r.checks.map((c: any) => ({ id: c.id, group: c.group, label: c.label, status: c.status, value: c.id.startsWith('cost.') ? undefined : c.value, rule: c.rule })) });
+  } catch (err: any) { res.status(503).json({ error: 'unavailable' }); }
+});
+
 export default router;
