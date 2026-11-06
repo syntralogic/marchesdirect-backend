@@ -1,3 +1,4 @@
+import { cached } from '../utils/ttlCache';
 import { Router, Request, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
@@ -39,22 +40,31 @@ router.get('/', async (req: Request, res: Response) => {
 // '/:slug', otherwise Express matches them as slug="lookup" and answers 404 (this made every nested local page
 // - /marches-publics/:city, /:city/:trade, /departement/:d - report "page introuvable").
 
-// GET /api/seo-pages/opportunities-sitemap - ids of the open, non-demo opportunities that deserve a
-// place in sitemap.xml (SEO audit 23 Oct: "aucune URL /opportunites/"). Cheap, no side effects.
-router.get('/opportunities-sitemap', async (_req: Request, res: Response) => {
+// GET /api/seo-pages/opportunities-sitemap - ids of the opportunities listed in sitemap.xml.
+// 7 nov. : TOUTES les annonces publiables (ouvertes, sans date et clôturées), plus seulement les ouvertes : les
+// fiches clôturées restent indexées (seoV2Service.closedIndexPolicy). Hors démonstration, annulées, fusionnées et
+// supprimées. Par pages de 10 000 (?page=1..N, ordre stable : date de création puis id) ; ?page absent = décompte.
+const SITEMAP_CHUNK = 10000;
+const SITEMAP_WHERE = `o.deleted_at IS NULL AND COALESCE(o.status, '') <> 'merged' AND NOT COALESCE(o.is_cancelled, false)
+          AND COALESCE(ds.code, '') <> 'editorial_catalog'`;
+router.get('/opportunities-sitemap', async (req: Request, res: Response) => {
   try {
-    const result = await db.query(
+    const page = Number(req.query.page || 0);
+    res.set('Cache-Control', 'public, max-age=3600');
+    if (!Number.isInteger(page) || page < 1) {
+      const c = await cached('sitemap-count', 3600_000, () => db.query(
+        `SELECT COUNT(*)::int AS n FROM opportunities o LEFT JOIN data_sources ds ON o.source_id = ds.id WHERE ${SITEMAP_WHERE}`));
+      const n = Number(c.rows[0]?.n || 0);
+      return res.json({ total: n, chunk: SITEMAP_CHUNK, pages: Math.ceil(n / SITEMAP_CHUNK) });
+    }
+    const result = await cached(`sitemap-page-${page}`, 3600_000, () => db.query(
       `SELECT o.id, COALESCE(o.updated_at, o.created_at) AS updated_at
          FROM opportunities o
          LEFT JOIN data_sources ds ON o.source_id = ds.id
-        WHERE o.deleted_at IS NULL AND COALESCE(o.status, '') = 'active'
-          AND (o.deadline IS NULL OR o.deadline >= NOW())
-          AND COALESCE(ds.code, '') <> 'editorial_catalog'
-        ORDER BY COALESCE(o.updated_at, o.created_at) DESC
-        LIMIT 40000`
-    );
-    res.set('Cache-Control', 'public, max-age=900');
-    res.json({ opportunities: result.rows });
+        WHERE ${SITEMAP_WHERE}
+        ORDER BY o.created_at, o.id
+        OFFSET $1 LIMIT $2`, [(page - 1) * SITEMAP_CHUNK, SITEMAP_CHUNK]));
+    res.json({ page, opportunities: result.rows });
   } catch (err: any) {
     logger.error('Opportunities sitemap error:', err);
     res.status(500).json({ error: 'Failed to fetch opportunities' });
