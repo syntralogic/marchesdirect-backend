@@ -1007,6 +1007,17 @@ export const collectTedData = async (sourceId: number) => {
     // TED refuse une fenêtre page × taille > 15 000 (SEARCH_WINDOW_TOO_WIDE, vu le 6 nov. à la page 61) : on s'arrête
     // avant, et les annonces déjà lues sont gardées au lieu d'être perdues avec l'erreur.
     const TED_MAX_WINDOW = 15000;
+    // 6 nov. : 90 jours d'avis français dépassent 15 000 résultats, et TED les renvoyait du plus ancien au plus récent :
+    // la fenêtre se remplissait d'avis clos et les plus récents (les seuls encore ouverts) n'étaient jamais lus.
+    // On interroge donc par tranches de 7 jours, de la plus récente à la plus ancienne ; chaque tranche reste sous la limite.
+    const fmtDay = (d: Date) => d.toISOString().slice(0, 10).replace(/-/g, '');
+    const slices: { from: string; to: string }[] = [];
+    for (let k = 0; k < 13; k++) {
+      const to = new Date(Date.now() + 86400000 - k * 7 * 86400000); const from = new Date(to.getTime() - 7 * 86400000);
+      slices.push({ from: fmtDay(from), to: fmtDay(to) });
+    }
+    for (const sl of slices) {
+    if (results.length >= TED_MAX_RECORDS_PER_RUN) break;
     for (let page = 1; results.length < TED_MAX_RECORDS_PER_RUN && page * TED_PAGE <= TED_MAX_WINDOW; page++) {
       // 6 nov. : TED répondait « 429 Too Many Requests » à chaque passage depuis le 1er octobre. On respecte
       // désormais son délai (Retry-After, sinon 20 s, 40 s, 80 s) et on espace les pages d'1,5 s.
@@ -1016,7 +1027,7 @@ export const collectTedData = async (sourceId: number) => {
         try {
           response = await axios.post(
             'https://api.ted.europa.eu/v3/notices/search',
-            { query: `buyer-country=FRA AND publication-date>=${sinceStr}`, fields: tedFields, page, limit: TED_PAGE, scope: 'ALL' },
+            { query: `buyer-country=FRA AND publication-date>=${sl.from} AND publication-date<${sl.to}`, fields: tedFields, page, limit: TED_PAGE, scope: 'ALL' },
             { timeout: 60000, headers: { 'Content-Type': 'application/json' } }
           );
           break;
@@ -1047,6 +1058,8 @@ export const collectTedData = async (sourceId: number) => {
       }
       if (batch.length < TED_PAGE) break;
     }
+    }
+    void sinceStr;
     if (results.length > TED_MAX_RECORDS_PER_RUN) results.length = TED_MAX_RECORDS_PER_RUN;
     logger.info(`[TED] Kept ${results.length} open French notices`);
 
