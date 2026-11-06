@@ -1213,8 +1213,13 @@ async function searchOpportunities(req: Request, res: Response) {
       const DL = 'COALESCE(l.notice_deadline, o.deadline)';
       // Un avis remplacé par un rectificatif ou une annulation publiés ensuite n'apparaît plus : c'est l'avis le plus
       // récent qui porte l'information à jour (et l'annulation rend l'état « annulée »).
-      whereClause += ` AND NOT EXISTS (SELECT 1 FROM opportunity_locations l2 JOIN opportunities o2 ON o2.id = l2.opportunity_id
-        WHERE o.source_reference = ANY(l2.supersedes) AND o2.deleted_at IS NULL AND o2.id <> o.id AND o2.source_id = o.source_id)`;
+      // Écriture « liste des références remplacées calculée une fois, puis exclue » : l'ancienne forme
+      // (o.source_reference = ANY(l2.supersedes)) relisait toute la table pour chaque annonce — plus d'une minute sur
+      // 120 000 annonces en test, contre 67 ms ainsi, pour exactement les mêmes annonces écartées (6 nov.).
+      whereClause += ` AND NOT EXISTS (SELECT 1 FROM (SELECT unnest(l2.supersedes) AS ref, o2.source_id, o2.id
+          FROM opportunity_locations l2 JOIN opportunities o2 ON o2.id = l2.opportunity_id
+         WHERE cardinality(l2.supersedes) > 0 AND o2.deleted_at IS NULL) sup
+        WHERE sup.ref = o.source_reference AND sup.source_id = o.source_id AND sup.id <> o.id)`;
       whereClause = whereClause.replace(/o\.deadline/g, DL);
       orderClause = orderClause.replace(/o\.deadline/g, DL);
       const liveV2 = `(o.status = 'active' AND NOT COALESCE(o.is_cancelled, false) AND COALESCE(l.notice_nature, '') NOT ILIKE '%annul%' AND ${DL} IS NOT NULL AND ${DL} >= NOW() AND ${DL} <= NOW() + INTERVAL '3 years')`;
@@ -1320,13 +1325,14 @@ async function searchOpportunities(req: Request, res: Response) {
         if (locLevelExpr) { if (x.lvl === 0) b.execution += n; else if (x.lvl === 1) b.buyerOnly += n; else b.notYetRead += n; } }
       return b;
     };
-    const [rows, total] = await Promise.all([
+    // Liste, total et décompte par état en parallèle (le décompte attendait la fin des deux autres).
+    const [rows, total, breakdown] = await Promise.all([
       countOnly
         ? Promise.resolve([] as any[])
         : searchListCache(searchCacheKey('list', whereClause, orderClause, listParams), SEARCH_LIST_TTL_MS, loadList),
       searchCountCache(searchCacheKey('count', whereClause, params), SEARCH_COUNT_TTL_MS, loadCount),
+      v2 && !countOnly ? searchCountCache(searchCacheKey('breakdown', whereClause, params), SEARCH_COUNT_TTL_MS, loadBreakdown as any).catch(() => null) : Promise.resolve(null),
     ]);
-    const breakdown = v2 && !countOnly ? await searchCountCache(searchCacheKey('breakdown', whereClause, params), SEARCH_COUNT_TTL_MS, loadBreakdown as any).catch(() => null) : null;
 
     res.json({
       results: rows,
