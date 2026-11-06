@@ -6,7 +6,23 @@ import { buyerCommune } from '../services/seoV2Service';
 // Remplit opportunity_locations (table ajoutée le 6 nov., aucune colonne existante modifiée) : lieu d'exécution,
 // adresse de l'acheteur, départements de publication et dates lues dans l'avis. Lecture du texte uniquement :
 // aucun appel externe, aucune IA. Par lots de 250, toutes les 2 minutes, annonces récentes d'abord.
-export async function ensureLocationSchema(): Promise<void> {
+// Une seule fois par processus. Les « ALTER TABLE … ADD COLUMN IF NOT EXISTS » prennent un verrou exclusif sur la table,
+// même quand la colonne existe déjà : répétés toutes les 2 minutes (tâche) et à chaque expiration du cache (recherche),
+// ils attendaient la fin de toute recherche en cours et bloquaient derrière eux toutes les requêtes suivantes — c'est
+// l'explication la plus probable de l'indisponibilité de l'API du 6 nov. vers 20 h 30.
+let schemaOnce: Promise<void> | null = null;
+export function ensureLocationSchema(): Promise<void> {
+  if (!schemaOnce) schemaOnce = ensureLocationSchemaNow().catch(e => { schemaOnce = null; throw e; });
+  return schemaOnce;
+}
+async function ensureLocationSchemaNow(): Promise<void> {
+  const exists = await db.query(`SELECT to_regclass('public.opportunity_locations') IS NOT NULL AS ok`);
+  if (exists.rows[0]?.ok) {
+    const cols = await db.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'opportunity_locations'`);
+    const have = new Set(cols.rows.map((r: any) => r.column_name));
+    const idx = await db.query(`SELECT 1 FROM pg_indexes WHERE indexname = 'opportunity_locations_supersedes_idx'`);
+    if (['deadline_source', 'notice_nature', 'supersedes'].every(c => have.has(c)) && idx.rows.length) return; // rien à faire : aucun verrou pris
+  }
   await db.query(`CREATE TABLE IF NOT EXISTS opportunity_locations (
     opportunity_id UUID PRIMARY KEY,
     extractor_version INT NOT NULL,
