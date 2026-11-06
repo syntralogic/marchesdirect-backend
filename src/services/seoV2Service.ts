@@ -113,7 +113,7 @@ const BASE_SQL = (withLoc: boolean) => `
     SELECT o.id, o.title, o.location_city, o.location_department, o.deadline, o.buyer_name, ot.code AS journey, o.source_reference,
            o.estimated_value, o.trade_id, o.created_at, COALESCE(o.is_cancelled, false) AS is_cancelled,
            COALESCE(o.updated_at, o.created_at) AS updated_at
-           ${withLoc ? `, l.exec_status, l.exec_communes, l.exec_departments, l.exec_text, l.buyer_city, l.buyer_department,
+           ${withLoc ? `, l.exec_status, l.exec_communes, l.exec_departments, LEFT(l.exec_text, 80) AS exec_text, l.buyer_city, l.buyer_department,
            l.publication_departments, l.notice_deadline, l.diffusion_end` : ''}
       FROM opportunities o
       JOIN opportunity_types ot ON ot.id = o.opportunity_type_id
@@ -176,8 +176,10 @@ async function load(): Promise<Snapshot> {
   }
   return { at: Date.now(), items, trades, cityNames, cityDepts, withLocations };
 }
+// Photographie rechargée toutes les 30 min (15 avant) : chaque chargement lit des dizaines de milliers de lignes, ce qui
+// pèse dans le trafic sortant facturé par Supabase (6 nov.).
 export async function snapshot(): Promise<Snapshot> {
-  if (snap && Date.now() - snap.at < 15 * 60000) return snap;
+  if (snap && Date.now() - snap.at < 30 * 60000) return snap;
   if (!loading) loading = load().then(x => { snap = x; return x; }).finally(() => { loading = null; });
   try { return await loading; } catch (e) { logger.error('[SEO v2] chargement impossible:', e); if (snap) return snap; throw e; }
 }

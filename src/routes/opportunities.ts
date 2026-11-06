@@ -1270,7 +1270,15 @@ async function searchOpportunities(req: Request, res: Response) {
               -- selected only to reconcile estimated_value/buyer_name against
               -- ai_extracted_facts (utils/officialFields.ts), then stripped
               -- before the response goes out.
-              o.ai_extracted_facts, o.raw_data,
+              o.ai_extracted_facts,
+              -- 6 nov. (coût du trafic sortant Supabase) : la liste ne lit plus l'avis brut entier (3,8 Ko en moyenne,
+              -- parfois 50 Ko) mais seulement les 5 clés que reconcileOfficialFields consulte.
+              jsonb_strip_nulls(jsonb_build_object(
+                'procedure', COALESCE(o.raw_data->'fields'->>'procedure', o.raw_data->>'procedure'),
+                'type_procedure', COALESCE(o.raw_data->'fields'->>'type_procedure', o.raw_data->>'type_procedure'),
+                'procedureType', COALESCE(o.raw_data->'fields'->>'procedureType', o.raw_data->>'procedureType'),
+                'datelimitereponse', COALESCE(o.raw_data->'fields'->>'datelimitereponse', o.raw_data->>'datelimitereponse'),
+                'date_limite_reponse', COALESCE(o.raw_data->'fields'->>'date_limite_reponse', o.raw_data->>'date_limite_reponse'))) AS raw_data,
               -- R02: resolved nature, so the card can say "Fournitures" out loud.
               np.nature AS nature_prestation,
               -- 1 Oct client request: templated catalogue rows are demonstration examples.
