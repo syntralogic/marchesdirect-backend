@@ -823,6 +823,7 @@ async function handleLeadCapture(
     // out of the opportunityId-scoped try/catch below since it doesn't
     // depend on CRM linking succeeding.
     let dossierEmailed = false;
+    let requestRecorded = false;
     if (opportunityId) {
       try {
         const oppFactsResult = await db.query(
@@ -873,6 +874,7 @@ async function handleLeadCapture(
             ? await db.query(`SELECT id FROM crm_leads WHERE opportunity_id = $1 AND LOWER(email) = LOWER($2) AND siret=$3 LIMIT 1`, [opportunityId, email, companySiret])
             : await db.query(`SELECT id FROM crm_leads WHERE opportunity_id = $1 AND session_id = $2 AND lead_source = 'analysis_gate' LIMIT 1`, [opportunityId, sessionId]);
           if (dup.rows.length === 0 && brandId) {
+            requestRecorded = true;
             const insertResult = await db.query(
               `INSERT INTO crm_leads
                 (brand_id, email, phone, company_name, lead_source, opportunity_id, session_id, crm_sync_status, lot_label, siret, utm_source, utm_campaign, callback_moment, appointment_mode, appointment_slot_at, is_test)
@@ -902,11 +904,17 @@ async function handleLeadCapture(
             else if (callbackMoment) await recordJourneyEvent({ sessionId, opportunityId, siret: companySiret, eventType: 'callback_requested', eventId: `rappel:${dup.rows[0].id}:${Date.now()}` });
             void syncLeadToCrm(dup.rows[0].id);
           }
+          if (dup.rows.length > 0) requestRecorded = true;
         }
       } catch (err) {
-        // Non-fatal: the session-level lead gate above already succeeded -
-        // a CRM sync hiccup shouldn't block the visitor from proceeding.
-        logger.error('Lead-capture CRM linking error (non-fatal):', err);
+        // 6 nov. : plus de « succès » affiché quand la demande n'existe pas. Les coordonnées sont bien enregistrées sur
+        // l'entreprise (ci-dessus), mais sans demande liée au marché, Elena ne voit rien dans HubSpot : on répond
+        // une erreur franche, le visiteur peut réessayer.
+        logger.error('Lead-capture CRM linking error:', err);
+      }
+      if (!requestRecorded) {
+        if (slotBookingId) await releaseBooking(slotBookingId).catch(() => undefined);
+        return res.status(500).json({ error: 'request_not_recorded', message: 'Votre demande n’a pas pu être enregistrée. Vous pouvez réessayer dans un instant.' });
       }
     }
     // Créneau réservé mais aucune demande n'a pu le porter (marché inconnu, erreur) : on le libère, jamais de créneau fantôme.
