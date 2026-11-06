@@ -363,10 +363,12 @@ const LIST_SCOPE_SQL = `o.deleted_at IS NULL
 // list only needs it for the 20-100 rows it returns. Results change only when a
 // connector run lands (every 6h+), so a short cache is safe; it is bounded and
 // keyed on the exact SQL + params, so two different searches can never collide.
-const searchListCache = createBoundedCache(100);
+const searchListCache = createBoundedCache(300);
 const searchCountCache = createBoundedCache(500);
-const SEARCH_LIST_TTL_MS = 2 * 60 * 1000;
-const SEARCH_COUNT_TTL_MS = 5 * 60 * 1000;
+// 7 nov. : 10 et 15 min (au lieu de 2 et 5) — les annonces ne changent qu'à chaque import (toutes les 6 h et plus) ;
+// l'état ouvert/fermé de chaque fiche reste recalculé à l'ouverture de la fiche.
+const SEARCH_LIST_TTL_MS = 10 * 60 * 1000;
+const SEARCH_COUNT_TTL_MS = 15 * 60 * 1000;
 const searchCacheKey = (...parts: unknown[]): string =>
   createHash('sha1').update(JSON.stringify(parts)).digest('hex');
 // Tiny reference tables (trades): no need to hit the DB on every search.
@@ -398,6 +400,7 @@ async function hasLocationTable(): Promise<boolean> {
 }
 
 async function searchOpportunities(req: Request, res: Response) {
+  const t0 = Date.now();
   try {
     const countOnly = (req as any).__countOnly === true;
     const {
@@ -1361,11 +1364,15 @@ async function searchOpportunities(req: Request, res: Response) {
     // (statement_timeout) au lieu de bloquer la file.
     // Liste et décompte en parallèle (2 connexions, plus 3 : le COUNT séparé est supprimé en v2, le total est la
     // somme du décompte par état, même périmètre).
+    // 7 nov. : temps de chaque étape renvoyé dans la réponse (champ `timing`, ignoré par le site) et dans l'en-tête
+    // Server-Timing, pour savoir où part le temps d'une recherche en production.
+    const tPrep = Date.now(); let tList = 0; let tCount = 0;
     const [rows, breakdown] = await Promise.all([
-      countOnly ? Promise.resolve([] as any[]) : searchListCache(searchCacheKey('list', whereClause, orderClause, listParams), SEARCH_LIST_TTL_MS, loadList),
-      v2 ? (searchCountCache(searchCacheKey('breakdown', whereClause, params), SEARCH_COUNT_TTL_MS, loadBreakdown as any).catch(() => null) as Promise<any>) : Promise.resolve(null),
+      countOnly ? Promise.resolve([] as any[]) : searchListCache(searchCacheKey('list', whereClause, orderClause, listParams), SEARCH_LIST_TTL_MS, loadList).then(r => { tList = Date.now() - tPrep; return r; }),
+      v2 ? (searchCountCache(searchCacheKey('breakdown', whereClause, params), SEARCH_COUNT_TTL_MS, loadBreakdown as any).then(r => { tCount = Date.now() - tPrep; return r; }).catch(() => null) as Promise<any>) : Promise.resolve(null),
     ]);
     const total: number = breakdown ? breakdown.open + breakdown.verify + breakdown.closed : await searchCountCache(searchCacheKey('count', whereClause, params), SEARCH_COUNT_TTL_MS, loadCount);
+    res.set('Server-Timing', `prep;dur=${tPrep - t0}, list;dur=${tList}, count;dur=${tCount}, total;dur=${Date.now() - t0}`);
 
     res.json({
       results: rows,
@@ -1377,6 +1384,7 @@ async function searchOpportunities(req: Request, res: Response) {
         ...(breakdown ? { breakdown } : {}),
       },
       ...(v2 ? { rules: 'v2' } : {}),
+      timing: { prepMs: tPrep - t0, listMs: tList, countMs: tCount, totalMs: Date.now() - t0 },
     });
   } catch (err: any) {
     logger.error('Opportunities search error:', err);
