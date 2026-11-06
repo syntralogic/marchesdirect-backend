@@ -373,9 +373,9 @@ const searchCacheKey = (...parts: unknown[]): string =>
 const TRADE_LOOKUP_TTL_MS = 10 * 60 * 1000;
 
 let locationTableReady: boolean | null = null; let locationTableCheckedAt = 0;
-// Requête de recherche avec durée maximale (8 s) : une recherche trop longue est abandonnée proprement (erreur 57014,
+// Requête de recherche avec durée maximale (20 s) : une recherche trop longue est abandonnée proprement (erreur 57014,
 // « Recherche trop longue ») au lieu de retenir une des 8 connexions et de bloquer tous les autres visiteurs (6 nov.).
-const SEARCH_STATEMENT_TIMEOUT_MS = 8000;
+const SEARCH_STATEMENT_TIMEOUT_MS = 20000; // 20 s tant que la recherche par mot-clé n'est pas accélérée (mesuré : ~10 s)
 async function timedQuery(sql: string, params: any[]): Promise<{ rows: any[] }> {
   const client = await db.getClient();
   try {
@@ -1357,18 +1357,15 @@ async function searchOpportunities(req: Request, res: Response) {
         if (locLevelExpr) { if (x.lvl === 0) b.execution += n; else if (x.lvl === 1) b.buyerOnly += n; else b.notYetRead += n; } }
       return b;
     };
-    // 6 nov. (panne du soir) : la base n'offre que 8 connexions à ce serveur. Une recherche n'en occupe plus qu'une à la
-    // fois (liste, puis décompte), et en v2 le total est déduit du décompte par état (même périmètre) : plus de
-    // requête COUNT séparée. Chaque requête renonce au bout de 8 s (statement_timeout) au lieu de bloquer la file.
-    const rows: any[] = countOnly ? [] : await searchListCache(searchCacheKey('list', whereClause, orderClause, listParams), SEARCH_LIST_TTL_MS, loadList);
-    let breakdown: Awaited<ReturnType<typeof loadBreakdown>> = null;
-    let total: number;
-    if (v2) {
-      breakdown = await searchCountCache(searchCacheKey('breakdown', whereClause, params), SEARCH_COUNT_TTL_MS, loadBreakdown as any).catch(() => null) as any;
-      total = breakdown ? breakdown.open + breakdown.verify + breakdown.closed : await searchCountCache(searchCacheKey('count', whereClause, params), SEARCH_COUNT_TTL_MS, loadCount);
-    } else {
-      total = await searchCountCache(searchCacheKey('count', whereClause, params), SEARCH_COUNT_TTL_MS, loadCount);
-    }
+    // 6 nov. (panne du soir) : la base n'offre que 8 connexions à ce serveur. Chaque requête renonce au bout de 20 s
+    // (statement_timeout) au lieu de bloquer la file.
+    // Liste et décompte en parallèle (2 connexions, plus 3 : le COUNT séparé est supprimé en v2, le total est la
+    // somme du décompte par état, même périmètre).
+    const [rows, breakdown] = await Promise.all([
+      countOnly ? Promise.resolve([] as any[]) : searchListCache(searchCacheKey('list', whereClause, orderClause, listParams), SEARCH_LIST_TTL_MS, loadList),
+      v2 ? (searchCountCache(searchCacheKey('breakdown', whereClause, params), SEARCH_COUNT_TTL_MS, loadBreakdown as any).catch(() => null) as Promise<any>) : Promise.resolve(null),
+    ]);
+    const total: number = breakdown ? breakdown.open + breakdown.verify + breakdown.closed : await searchCountCache(searchCacheKey('count', whereClause, params), SEARCH_COUNT_TTL_MS, loadCount);
 
     res.json({
       results: rows,
