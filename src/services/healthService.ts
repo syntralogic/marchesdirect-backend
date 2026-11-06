@@ -23,7 +23,7 @@ export async function runHealthChecks(): Promise<{ at: string; overall: Check['s
 
   // 1. Import : chaque source active, dernier import réussi au regard de sa fréquence
   const sources = await safe(() => q(`
-    SELECT ds.id, ds.code, ds.name, ds.frequency_hours,
+    SELECT ds.id, ds.code, ds.name, ds.frequency_hours, ds.last_run,
            (SELECT MAX(completed_at) FROM connector_logs c WHERE c.source_id = ds.id AND c.status = 'success') AS last_ok,
            (SELECT status FROM connector_logs c WHERE c.source_id = ds.id ORDER BY started_at DESC NULLS LAST LIMIT 1) AS last_status,
            (SELECT error_message FROM connector_logs c WHERE c.source_id = ds.id AND c.status = 'failed' ORDER BY started_at DESC NULLS LAST LIMIT 1) AS last_error,
@@ -31,10 +31,13 @@ export async function runHealthChecks(): Promise<{ at: string; overall: Check['s
            (SELECT COUNT(*) FROM opportunities o WHERE o.source_id = ds.id AND o.created_at >= NOW() - INTERVAL '24 hours') AS new24
       FROM data_sources ds WHERE ds.active = true AND COALESCE(ds.code, '') <> 'editorial_catalog' ORDER BY ds.code`), [] as any[]);
   for (const s of sources) {
-    const h = ago(s.last_ok); const f = n(s.frequency_hours) || 24;
+    // Un passage sans erreur compte même s'il n'a rien écrit dans connector_logs (ex. DECP : plafond volontaire de
+    // 100 000 attributions atteint, le passage est sauté et seul data_sources.last_run avance).
+    const lastPass = s.last_status === 'failed' ? s.last_ok : (s.last_ok && s.last_run ? (new Date(s.last_ok) > new Date(s.last_run) ? s.last_ok : s.last_run) : s.last_ok || s.last_run);
+    const h = ago(lastPass); const f = n(s.frequency_hours) || 24;
     const status = h == null ? 'ko' : h > f * 4 ? 'ko' : h > f * 2 ? 'warn' : s.last_status === 'failed' ? 'warn' : 'ok';
     add({ id: `import.${s.code}`, group: 'Import des annonces', label: `Source ${s.name || s.code}`, status,
-      value: `dernier import réussi ${fmtH(h)} · ${n(s.new24)} nouvelles en 24 h${n(s.fails24) ? ` · ${n(s.fails24)} échec(s) en 24 h` : ''}`,
+      value: `dernier passage sans erreur ${fmtH(h)} · ${n(s.new24)} nouvelles en 24 h${n(s.fails24) ? ` · ${n(s.fails24)} échec(s) en 24 h` : ''}`,
       // Cause technique courte (ex. « status code 400 »), sans adresse ni clé : de quoi diagnostiquer.
       detail: s.last_error ? String(s.last_error).replace(/https?:\/\/\S+/g, '[url]').replace(/[A-Za-z0-9_-]{24,}/g, '[…]').slice(0, 160) : undefined,
       rule: `vert si importée depuis moins de ${f * 2} h (2 × sa fréquence de ${f} h), rouge au-delà de ${f * 4} h` });
