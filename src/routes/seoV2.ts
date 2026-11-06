@@ -58,4 +58,29 @@ router.get('/diag', async (_req: Request, res: Response) => {
   } catch (err: any) { res.status(503).json({ error: 'unavailable', code: err?.code || null }); }
 });
 
+// Compteur public « marchés ouverts » (6 nov.) : une requête SQL légère, mise en cache 5 minutes (aucun appel
+// externe, aucune IA). « Ouvert » = date limite connue et à venir, non annulée (date relue dans l'avis si disponible).
+// Renvoie aussi la date du dernier import réussi, pour que le chiffre ne soit jamais présenté comme frais s'il ne l'est pas.
+let counterCache: { at: number; body: any } | null = null;
+router.get('/compteur', async (_req: Request, res: Response) => {
+  try {
+    if (!counterCache || Date.now() - counterCache.at > 5 * 60000) {
+      const { db } = require('../config/database');
+      const c = await db.query(`
+        SELECT COUNT(*) FILTER (WHERE COALESCE(l.notice_deadline, o.deadline) >= NOW() AND COALESCE(l.notice_deadline, o.deadline) <= NOW() + INTERVAL '3 years')::int AS open,
+               COUNT(*) FILTER (WHERE COALESCE(l.notice_deadline, o.deadline) IS NULL AND o.created_at >= NOW() - INTERVAL '60 days')::int AS verify,
+               COUNT(*) FILTER (WHERE o.created_at >= NOW() - INTERVAL '24 hours')::int AS new24h
+          FROM opportunities o
+          LEFT JOIN opportunity_locations l ON l.opportunity_id = o.id
+          LEFT JOIN data_sources ds ON ds.id = o.source_id
+         WHERE o.deleted_at IS NULL AND o.status = 'active' AND NOT COALESCE(o.is_cancelled, false)
+           AND COALESCE(ds.code, '') <> 'editorial_catalog' AND (ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))`);
+      const src = await db.query(`SELECT code, name, active AS is_active, last_run, next_run, frequency_hours, total_imports FROM data_sources WHERE COALESCE(code, '') <> 'editorial_catalog' ORDER BY last_run DESC NULLS LAST`);
+      const lastImportAt = src.rows.find((r: any) => r.is_active && r.last_run)?.last_run || null;
+      counterCache = { at: Date.now(), body: { ...c.rows[0], lastImportAt, sources: src.rows.map((r: any) => ({ code: r.code, active: r.is_active, lastRun: r.last_run, nextRun: r.next_run, everyHours: r.frequency_hours, totalImports: r.total_imports })), computedAt: new Date().toISOString() } };
+    }
+    res.set('Cache-Control', 'public, max-age=60, s-maxage=300').json(counterCache.body);
+  } catch (err: any) { res.status(503).json({ error: 'unavailable' }); }
+});
+
 export default router;
