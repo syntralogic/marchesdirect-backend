@@ -102,6 +102,24 @@ const correspondenceNoteFor = (s: number): string =>
 // is instructed never to invent a breakdown) are returned now; when nothing
 // was extracted the list stays empty and the UI asks the visitor to check the
 // règlement de consultation.
+/** Lieu du marché pour le score, d'après opportunity_locations (jamais l'adresse de l'acheteur ni le département de publication). */
+async function marketPlaceV2(opp: any, companyDept: string | null): Promise<{ lat: number | null; lng: number | null; department: string | null }> {
+  const communes: { name?: string; department?: string | null; postalCode?: string | null }[] = Array.isArray(opp.exec_communes) ? opp.exec_communes : [];
+  const depts: string[] = Array.isArray(opp.exec_departments) ? opp.exec_departments.filter(Boolean) : [];
+  if (opp.exec_status === 'inconnu' || opp.exec_status === 'etranger') return { lat: null, lng: null, department: null };
+  const c = communes.find(x => x && x.name);
+  if (c && c.name) {
+    const key = `${c.name}|${c.department || ''}`;
+    if (!geocodeCache.has(key)) geocodeCache.set(key, await geocodeCity(c.name, c.department || null).catch(() => null));
+    const g = geocodeCache.get(key);
+    return { lat: g ? g.lat : null, lng: g ? g.lng : null, department: c.department || (companyDept && depts.includes(companyDept) ? companyDept : depts[0]) || null };
+  }
+  // Plusieurs départements d'exécution : celui de l'entreprise s'il en fait partie (le marché s'y exécute aussi).
+  if (depts.length) return { lat: null, lng: null, department: companyDept && depts.includes(companyDept) ? companyDept : depts[0] };
+  // Pas encore relu (annonce très récente) : on n'invente rien.
+  return { lat: null, lng: null, department: null };
+}
+
 export function criteriaFromFacts(facts: any): CriterionWeight[] {
   let f = facts;
   if (typeof f === 'string') {
@@ -334,10 +352,12 @@ export const computeMatchScore = async (
   options: { siret?: string | null; sessionId?: string | null; answers?: RefineAnswers; lot?: string | null } = {}
 ): Promise<MatchScoreResult> => {
   const oppResult = await db.query(
-    `SELECT o.*, ot.code as journey, t.name as trade_name, t.slug as trade_slug
+    `SELECT o.*, ot.code as journey, t.name as trade_name, t.slug as trade_slug,
+            l.exec_status, l.exec_communes, l.exec_departments, l.notice_deadline
      FROM opportunities o
      LEFT JOIN opportunity_types ot ON o.opportunity_type_id = ot.id
      LEFT JOIN trades t ON o.trade_id = t.id
+     LEFT JOIN opportunity_locations l ON l.opportunity_id = o.id
      WHERE o.id = $1 AND o.deleted_at IS NULL`,
     [opportunityId]
   );
@@ -362,12 +382,18 @@ export const computeMatchScore = async (
   const isPublic = journey === 'public_procurement';
   const facts = opp.ai_extracted_facts;
 
-  const daysToDeadline = opp.deadline
-    ? Math.ceil((new Date(opp.deadline).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+  // 6 nov. : même lieu et même date limite que la fiche (lieu d'exécution relu dans l'avis ; date relue à l'heure de
+  // Paris). L'ancienne colonne location_city contenait souvent le nom de l'acheteur, et location_department le
+  // département de publication : le score affirmait « dans votre département » pour un chantier situé ailleurs.
+  // Lieu inconnu dans l'avis → zone « inconnue », jamais un repli sur l'acheteur ou la publication.
+  const effectiveDeadline: string | null = opp.notice_deadline || opp.deadline || null;
+  const daysToDeadline = effectiveDeadline
+    ? Math.ceil((new Date(effectiveDeadline).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
     : null;
 
   const lotTitle = String(options.lot || '').trim().slice(0, 200) || null;
   const company = await loadCompanyProfile(companyId, options.sessionId, options.siret);
+  const market = await marketPlaceV2(opp, company?.department || null);
   const evaluation = evaluateMatch(
     company,
     {
@@ -378,10 +404,10 @@ export const computeMatchScore = async (
         const lotSlugs = lotTitle ? extractTradeSlugs(lotTitle) : [];
         return lotSlugs.length > 0 ? lotSlugs : marketTradeSlugs(opp, facts);
       })(),
-      latitude: toNumber(opp.location_latitude), longitude: toNumber(opp.location_longitude),
-      department: opp.location_department || null,
+      latitude: market.lat, longitude: market.lng,
+      department: market.department,
       estimatedValue: toNumber(opp.estimated_value),
-      deadline: opp.deadline || null,
+      deadline: effectiveDeadline,
       // Falls back to what the notice text itself states when the extracted
       // fact is missing (30 Sep audit: IRVE/Qualifelec shown as "aucune").
       requiredQualifications: facts?.required_qualifications?.available
@@ -445,7 +471,8 @@ export const computeMatchScore = async (
 
   // 20 Sep client audit: every clause below is conditional on the data
   // actually being there (no "Budget cadré" when no amount is given).
-  const euro = (n: number) => `${new Intl.NumberFormat('fr-FR').format(Math.round(n))} € HT`;
+  // « HT » seulement quand la source le dit : les montants des avis sont souvent sans précision HT/TTC (6 nov.).
+  const euro = (n: number) => `${new Intl.NumberFormat('fr-FR').format(Math.round(n))} €`;
   const publicFacts = [
     opp.estimated_value ? `budget estimé à ${euro(Number(opp.estimated_value))}` : 'montant non communiqué dans l’avis',
     opp.trade_name ? `lot ${String(opp.trade_name).toLowerCase()} identifié` : null,
