@@ -11,7 +11,7 @@
 // Rien n'est deviné : sans source, l'exécution vaut « inconnue ». Aucun appel externe, aucune IA : lecture pure du texte.
 import { DEPARTMENTS, slugify, isCommuneName, displayCity } from './seoV2Service';
 
-export const LOCATION_EXTRACTOR_VERSION = 4; // 4 : liens vers les avis antérieurs (rectificatifs, annulations) // 3 : date limite avec son vrai fuseau horaire // 2 : entités HTML décodées, lieu lu dans le titre « (17) ROCHEFORT - … »
+export const LOCATION_EXTRACTOR_VERSION = 5; // 5 : « Tulle (19 - Corrèze) ». // 4 : liens vers les avis antérieurs (rectificatifs, annulations) // 3 : date limite avec son vrai fuseau horaire // 2 : entités HTML décodées, lieu lu dans le titre « (17) ROCHEFORT - … »
 
 export type ExecCommune = { name: string; slug: string; postalCode: string | null; department: string | null };
 export type NoticeLocation = {
@@ -53,7 +53,8 @@ export function normDeptCode(v: unknown): string | null {
   const d = /^\d$/.test(s) ? `0${s}` : s;
   return DEPARTMENTS[d] ? d : null;
 }
-const decodeEntities = (v: string) => v.replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+/** Entités HTML laissées dans certains textes sources (« d&#039;Aquitaine ») → caractères. */
+export const decodeEntities = (v: string) => v.replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
 const uniq = <T>(a: T[]) => [...new Set(a)];
 
 /** Débuts d'adresse (voie, zone, bâtiment) : jamais une commune. */
@@ -102,8 +103,8 @@ export function parseExecutionText(raw: string): { communes: ExecCommune[]; depa
     const seg = (m[1].split(/[,;\n]| - /).pop() || '').trim();
     const c = cleanCommune(seg); if (c && !communes.some(x => x.slug === slugify(c))) communes.push(commune(c, m[2]));
   }
-  // « Pessac (33) »
-  for (const m of t.matchAll(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’ -]{1,40}?)\s*\((\d{2}|2[AB])\)/g)) {
+  // « Pessac (33) », « Tulle (19 - Corrèze) », « Tulle (19 – Corrèze) »
+  for (const m of t.matchAll(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’ -]{1,40}?)\s*\((\d{2}|2[AB])(?:\s*[-–]\s*[A-Za-zÀ-ÿ'’ -]{2,40})?\)/g)) {
     const c = cleanCommune(m[1].split(/[,;\n]| - /).pop()); const d = normDeptCode(m[2]);
     if (c && d && !communes.some(x => x.slug === slugify(c))) communes.push({ ...commune(c, null), department: d });
   }

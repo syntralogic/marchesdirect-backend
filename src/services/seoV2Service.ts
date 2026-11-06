@@ -2,6 +2,9 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { fold, KEYWORD_TRADE_SLUG, extractTradeSlugs } from './tradeResolver';
 
+// Entités HTML laissées par certaines sources dans les noms d'acheteurs et les titres (« d&#039;Aquitaine »).
+const decodeEntities = (v: string) => v.replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+
 // ============================================================================
 // SEO v2 (5 nov., mandat référencement) — AJOUTS SEULEMENT : les routes existantes ne changent pas.
 //
@@ -162,12 +165,12 @@ async function load(): Promise<Snapshot> {
     if (o.trade_id && tradeById.has(String(o.trade_id))) ts.add(tradeById.get(String(o.trade_id))!);
     for (const sl of extractTradeSlugs(title)) if (trades.has(sl)) ts.add(sl);
     items.push({
-      id: String(o.id), title, journey: String(o.journey), reference: o.source_reference || null,
+      id: String(o.id), title: decodeEntities(title), journey: String(o.journey), reference: o.source_reference || null,
       value: o.estimated_value != null && Number.isFinite(Number(o.estimated_value)) ? Number(o.estimated_value) : null,
       trades: [...ts], updatedAt: new Date(o.updated_at).toISOString(),
-      buyer: o.buyer_name && !/^\s*\d[\d\s]*$/.test(String(o.buyer_name)) ? String(o.buyer_name).trim() : null,
+      buyer: o.buyer_name && !/^\s*\d[\d\s]*$/.test(String(o.buyer_name)) ? decodeEntities(String(o.buyer_name)).trim() : null,
       state, deadline: dl ? dl.toISOString() : null,
-      exec: { status: o.exec_status || 'inconnu', communes: execCommunes, depts: execDepts, text: o.exec_text || null },
+      exec: { status: o.exec_status || 'inconnu', communes: execCommunes, depts: execDepts, text: o.exec_text ? decodeEntities(o.exec_text) : null },
       buyerPlace, pubDepts: (o.publication_departments || []).map((d: string) => normDept(d)).filter(Boolean) as string[],
     });
   }
@@ -420,7 +423,7 @@ export async function locationOf(ref: string) {
       publication_departments: l.publicationDepartments, notice_deadline: d.deadline, diffusion_end: d.diffusionEnd });
   }
   return {
-    id: o.id, reference: o.source_reference, title: o.title, buyer: o.buyer_name, deadline: o.deadline || o.notice_deadline || null,
+    id: o.id, reference: o.source_reference, title: decodeEntities(String(o.title || '')), buyer: o.buyer_name ? decodeEntities(o.buyer_name) : null, deadline: o.deadline || o.notice_deadline || null,
     computed: o.computed_at ? 'table opportunity_locations' : 'lecture directe de l’avis',
     execution: { status: o.exec_status || 'inconnu', source: o.exec_source || null, communes: o.exec_communes || [], departments: o.exec_departments || [], text: o.exec_text || null },
     buyerAddress: { city: o.buyer_city || null, postalCode: o.buyer_postal || null, department: o.buyer_department || null },
@@ -482,7 +485,7 @@ export async function noticeForSeo(id: string) {
     .sort((a, b) => Number(b.buyer === o.buyer_name) - Number(a.buyer === o.buyer_name)).slice(0, 5)
     .map(i => ({ id: i.id, title: i.title, deadline: i.deadline, path: `/opportunites/${i.id}` }));
   return {
-    id: o.id, title: o.title, journey: o.journey, tradeName: o.trade_name || null, buyer: o.buyer_name || null, reference: o.source_reference || null,
+    id: o.id, title: decodeEntities(String(o.title || '')), journey: o.journey, tradeName: o.trade_name || null, buyer: o.buyer_name ? decodeEntities(o.buyer_name) : null, reference: o.source_reference || null,
     deadline, state, demo: !!o.is_demo, indexable: policy.indexable, indexReason: policy.reason, keepUntil: policy.keepUntil,
     execution: { status: o.exec_status || 'inconnu', communes, departments: execDepts, text: o.exec_text || null },
     buyerCity: o.buyer_city || null, buyerDepartment: o.buyer_department || null, publicationDepartments: o.publication_departments || [],
