@@ -143,7 +143,8 @@ async function load(): Promise<Snapshot> {
   const items: Item[] = [];
   for (const o of r.rows as any[]) {
     const title = String(o.title || '').trim(); if (!title) continue;
-    const dl = o.deadline ? new Date(o.deadline) : o.notice_deadline ? new Date(o.notice_deadline) : null;
+    // Même date que la recherche : celle relue dans l'avis à l'heure de Paris d'abord, sinon celle de la source.
+    const dl = o.notice_deadline ? new Date(o.notice_deadline) : o.deadline ? new Date(o.deadline) : null;
     const diffEnd = o.diffusion_end ? new Date(o.diffusion_end).toISOString().slice(0, 10) : null;
     let state: Item['state'];
     if (o.is_cancelled) state = 'closed';
