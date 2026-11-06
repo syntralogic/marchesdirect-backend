@@ -995,7 +995,8 @@ export const collectTedData = async (sourceId: number) => {
     // publication window (TED deadlines run 30-90 days), paged 250 at a time
     // up to TED_MAX_RECORDS_PER_RUN (pagination mode allows 15,000 in total).
     // Rows whose deadline already passed are dropped before insert.
-    const since = new Date(Date.now() - 120 * 24 * 60 * 60 * 1000);
+    // 90 jours suffisent : les délais de réponse TED vont de 30 à 90 jours ; au-delà, les avis sont clos.
+    const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
     const sinceStr = since.toISOString().slice(0, 10).replace(/-/g, '');
     const TED_PAGE = 250;
     const tedFields = [
@@ -1003,7 +1004,10 @@ export const collectTedData = async (sourceId: number) => {
       'deadline-date-lot', 'publication-date', 'description-proc', 'classification-cpv',
     ];
     const results: any[] = [];
-    for (let page = 1; results.length < TED_MAX_RECORDS_PER_RUN; page++) {
+    // TED refuse une fenêtre page × taille > 15 000 (SEARCH_WINDOW_TOO_WIDE, vu le 6 nov. à la page 61) : on s'arrête
+    // avant, et les annonces déjà lues sont gardées au lieu d'être perdues avec l'erreur.
+    const TED_MAX_WINDOW = 15000;
+    for (let page = 1; results.length < TED_MAX_RECORDS_PER_RUN && page * TED_PAGE <= TED_MAX_WINDOW; page++) {
       // 6 nov. : TED répondait « 429 Too Many Requests » à chaque passage depuis le 1er octobre. On respecte
       // désormais son délai (Retry-After, sinon 20 s, 40 s, 80 s) et on espace les pages d'1,5 s.
       if (page > 1) await new Promise(r => setTimeout(r, 1500));
