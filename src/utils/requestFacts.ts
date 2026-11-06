@@ -42,7 +42,7 @@ const TYPE_LABEL: Record<VisitRequest['type'], string> = {
 };
 
 export function requestTypeOfLead(l: { lead_source?: string | null; appointment_mode?: string | null; message?: string | null }): VisitRequest['type'] {
-  if (l.lead_source === 'alert_request') return 'alert';
+  if (l.lead_source === 'alert_request' || l.lead_source === 'alert_signup') return 'alert'; // alert_signup : bouton « alerte » du site (6 nov.)
   if (l.appointment_mode === 'slot' || l.lead_source === 'appointment_modal') return 'appointment';
   if (l.appointment_mode === 'callback' || l.lead_source === 'callback_modal') return 'callback';
   if (l.lead_source === 'analysis_gate') return 'dossier';
@@ -67,6 +67,7 @@ export function buildVisitNote(args: {
     if (moment) lines.push(`Moment de rappel choisi : ${moment}`);
     if (r.type === 'appointment' && r.slotAt) lines.push(`Créneau souhaité : ${frDateTime(r.slotAt)} — à confirmer par téléphone`);
     if (r.type === 'question' && r.message) lines.push(`Question : « ${r.message.replace(/\s+/g, ' ').trim()} »`);
+    else if ((r.type === 'alert' || r.type === 'callback') && r.message) lines.push(`Précision : ${r.message.replace(/\s+/g, ' ').trim().slice(0, 300)}`); // 6 nov. : texte de l'alerte ou du rappel visible
     if (r.phone) lines.push(`Téléphone : ${r.phone}`);
   }
   return lines.join('\n');
