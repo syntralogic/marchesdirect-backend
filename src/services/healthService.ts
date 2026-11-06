@@ -13,6 +13,20 @@ const n = (v: unknown) => Number(v || 0);
 const q = async (sql: string, p: any[] = []) => (await db.query(sql, p)).rows;
 const safe = async <T>(f: () => Promise<T>, fallback: T): Promise<T> => { try { return await f(); } catch (e: any) { logger.warn(`[Santé] contrôle impossible : ${e?.code || e?.message}`); return fallback; } };
 
+// 5. Vitesse de la recherche (6 nov., recherche lente remarquée par Hedi avant la surveillance) : une recherche réelle,
+// comme celle du site (moteur v2, mot-clé, annonces ouvertes), mesurée par la tâche de santé (au démarrage puis toutes
+// les 6 h) — jamais à chaque lecture de /sante, pour ne pas charger la base. Mot-clé changeant pour éviter le cache.
+const PROBE_WORDS = ['peinture', 'electricite', 'plomberie', 'menuiserie', 'nettoyage', 'couverture', 'isolation', 'carrelage'];
+let lastProbe: { at: string; ms: number; word: string; ok: boolean } | null = null;
+export async function probeSearch(): Promise<void> {
+  const word = PROBE_WORDS[Math.floor(Date.now() / 3600000) % PROBE_WORDS.length];
+  const t0 = Date.now();
+  try {
+    const r = await fetch(`http://127.0.0.1:${process.env.PORT || 5000}/api/opportunities?loc=2&status=active&limit=20&q=${word}`, { signal: AbortSignal.timeout(60000) });
+    lastProbe = { at: new Date().toISOString(), ms: Date.now() - t0, word, ok: r.ok };
+  } catch { lastProbe = { at: new Date().toISOString(), ms: Date.now() - t0, word, ok: false }; }
+}
+
 export async function ensureHealthSchema() {
   await db.query(`CREATE TABLE IF NOT EXISTS health_snapshots (day DATE PRIMARY KEY, metrics JSONB NOT NULL, checks JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
 }
@@ -88,12 +102,19 @@ export async function runHealthChecks(): Promise<{ at: string; overall: Check['s
     value: pap?.n == null ? 'non mesuré' : `${n(pap.n)}`, rule: 'orange au-delà de 150 par jour, rouge au-delà de 400' });
   metrics.pappersToday = n(pap?.n); metrics.aiUsdToday = aiUsd;
 
+  // 5. Vitesse de la recherche
+  add(lastProbe ? { id: 'perf.search', group: 'Vitesse', label: 'Temps de réponse d’une recherche par mot-clé', status: !lastProbe.ok ? 'ko' : lastProbe.ms < 3000 ? 'ok' : lastProbe.ms < 8000 ? 'warn' : 'ko',
+      value: `${(lastProbe.ms / 1000).toFixed(1)} s pour « ${lastProbe.word} » (${fmtH(ago(lastProbe.at))})${lastProbe.ok ? '' : ' · en erreur'}`, rule: 'vert sous 3 s, orange sous 8 s, rouge au-delà ou en erreur' }
+    : { id: 'perf.search', group: 'Vitesse', label: 'Temps de réponse d’une recherche par mot-clé', status: 'unknown', value: 'pas encore mesuré depuis le démarrage', rule: 'mesuré au démarrage puis toutes les 6 h' });
+  if (lastProbe) metrics.searchMs = lastProbe.ms;
+
   const overall: Check['status'] = checks.some(c => c.status === 'ko') ? 'ko' : checks.some(c => c.status === 'warn') ? 'warn' : 'ok';
   return { at: new Date().toISOString(), overall, checks, metrics };
 }
 
 export async function snapshotHealth() {
   await ensureHealthSchema();
+  await probeSearch();
   const r = await runHealthChecks();
   await db.query(`INSERT INTO health_snapshots (day, metrics, checks) VALUES (CURRENT_DATE, $1, $2)
     ON CONFLICT (day) DO UPDATE SET metrics = EXCLUDED.metrics, checks = EXCLUDED.checks, created_at = NOW()`, [JSON.stringify(r.metrics), JSON.stringify(r.checks)]);
