@@ -29,6 +29,9 @@ describe('lieu d’exécution, acheteur et publication séparés', () => {
     expect(parseExecutionText('ENSMAC 16 Avenue Pey-Berland 33600 Pessac').communes.map(c => c.name)).toEqual(['Pessac']);
     expect(parseExecutionText('7 rue de Montaudon 33500 LIBOURNE').communes.map(c => c.name)).toEqual(['Libourne']);
   });
+  it('commune suivie de « (19 - Corrèze) »', () => {
+    expect(parseExecutionText('Tulle (19 - Corrèze)')).toEqual({ communes: [{ name: 'Tulle', slug: 'tulle', postalCode: null, department: '19' }], departments: ['19'] });
+  });
   it('multisite', () => {
     expect(parseExecutionText('Siège du Syndicat, 33120 Arcachon ; Pôle Assainissement, 33380 Biganos').communes.map(c => c.slug)).toEqual(['arcachon', 'biganos']);
     expect(parseExecutionText('Libourne/ Coutras/ Saint-Denis-de-Pile / Les Billaux').communes.length).toBe(4);
