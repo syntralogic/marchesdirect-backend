@@ -873,11 +873,11 @@ async function handleLeadCapture(
           if (dup.rows.length === 0 && brandId) {
             const insertResult = await db.query(
               `INSERT INTO crm_leads
-                (brand_id, email, phone, company_name, lead_source, opportunity_id, session_id, crm_sync_status, lot_label, siret, utm_source, utm_campaign, callback_moment, appointment_mode, appointment_slot_at)
-               VALUES ($1, $2, $3, $4, 'analysis_gate', $5, $6, 'pending', $7, $8, $9, $10, $11, $12, $13)
+                (brand_id, email, phone, company_name, lead_source, opportunity_id, session_id, crm_sync_status, lot_label, siret, utm_source, utm_campaign, callback_moment, appointment_mode, appointment_slot_at, is_test)
+               VALUES ($1, $2, $3, $4, 'analysis_gate', $5, $6, 'pending', $7, $8, $9, $10, $11, $12, $13, $14)
                RETURNING id`,
               [brandId, email || null, phone, companyName, opportunityId, sessionId, lotLabel || null, companySiret, cleanUtm(req.body?.utmSource, 100), cleanUtm(req.body?.utmCampaign, 150),
-               callbackMoment, slotDate ? 'slot' : null, slotDate ? slotDate.toISOString() : null]
+               callbackMoment, slotDate ? 'slot' : null, slotDate ? slotDate.toISOString() : null, isTestRequest(req.body?.isTest)]
             );
             if (slotBookingId) { await attachBooking(slotBookingId, insertResult.rows[0].id); slotBookingId = null; }
             await recordJourneyEvent({ sessionId, opportunityId, siret: companySiret, eventType: 'dossier_requested', eventId: `dossier:${insertResult.rows[0].id}` });
