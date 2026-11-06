@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { logger } from '../utils/logger';
-import { noticeForSeo, legacyTargets, locationOf, buildPage, indexablePaths, topLinks, BASE_JOURNEY, barometer } from '../services/seoV2Service';
+import { noticeForSeo, legacyTargets, locationOf, buildPage, indexablePaths, topLinks, BASE_JOURNEY, barometer, buyerPage, buyerPaths, buyersOfDepartment } from '../services/seoV2Service';
 
 // /api/seo/v2 — lecture seule, publique, mise en cache (5 nov., mandat référencement). Aucune route existante modifiée.
 const router = Router();
@@ -31,6 +31,20 @@ router.get('/links', async (req: Request, res: Response) => {
 router.get('/barometre', async (_req: Request, res: Response) => {
   try { cache(res, 900); res.json(await barometer()); }
   catch (err) { logger.error('[SEO v2] baromètre:', err); res.status(503).json({ error: 'unavailable' }); }
+});
+
+// Pages acheteurs (7 nov.) : données d'une page, liste pour le plan du site, acheteurs d'un département.
+router.get('/acheteur/:slug', async (req: Request, res: Response) => {
+  try { const out = await buyerPage(String(req.params.slug)); if (!out) return res.status(404).json({ error: 'not_found' }); cache(res, 900); res.json(out); }
+  catch (err) { logger.error('[SEO v2] acheteur:', err); res.status(503).json({ error: 'unavailable' }); }
+});
+router.get('/acheteurs', async (_req: Request, res: Response) => {
+  try { cache(res, 1800); res.json({ pages: await buyerPaths() }); }
+  catch (err) { logger.error('[SEO v2] acheteurs:', err); res.status(503).json({ error: 'unavailable' }); }
+});
+router.get('/acheteurs/departement/:d', async (req: Request, res: Response) => {
+  try { cache(res, 1800); res.json({ buyers: await buyersOfDepartment(String(req.params.d).toUpperCase(), Math.min(100, Number(req.query.limit) || 30)) }); }
+  catch (err) { logger.error('[SEO v2] acheteurs du département:', err); res.status(503).json({ error: 'unavailable' }); }
 });
 
 router.get('/legacy', async (req: Request, res: Response) => {
