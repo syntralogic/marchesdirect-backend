@@ -446,6 +446,7 @@ async function searchOpportunities(req: Request, res: Response) {
     // Recherche v2 (6 nov., mandat qualité) : activée seulement par ?loc=2, que seul l'aperçu envoie. Le site en
     // production garde exactement l'ancien comportement tant que Hedi n'a pas validé. Voir RECHERCHE_V2 plus bas.
     const v2 = String((req.query as any).loc || '') === '2' && await hasLocationTable();
+    let v2ActiveOnly = false;
     let locLevelExpr: string | null = null;
     const conditions: string[] = ["o.deleted_at IS NULL", "COALESCE(o.status, '') != 'merged'"];
     // 27 Sep client report, point 5: "France entière" surfacing
@@ -1013,6 +1014,7 @@ async function searchOpportunities(req: Request, res: Response) {
         params.push(statuses);
         // v2 : « active » veut dire candidatures possibles — ni annulée, ni date limite passée (date relue dans l'avis).
         if (v2 && statuses.length === 1 && statuses[0] === 'active') conditions.push(`NOT COALESCE(o.is_cancelled, false) AND (o.deadline IS NULL OR o.deadline >= NOW())`);
+        if (v2 && statuses.length === 1 && statuses[0] === 'active') v2ActiveOnly = true;
       }
     } else {
       // Client audit (25 Sep): "Tous" on the public search was labelled
@@ -1221,6 +1223,11 @@ async function searchOpportunities(req: Request, res: Response) {
          WHERE cardinality(l2.supersedes) > 0 AND o2.deleted_at IS NULL) sup
         WHERE sup.ref = o.source_reference AND sup.source_id = o.source_id AND sup.id <> o.id)`;
       whereClause = whereClause.replace(/o\.deadline/g, DL);
+      // Préfiltre indexable (6 nov., recherche lente) : pour « annonces ouvertes », écarter d'abord par l'index des dates
+      // celles dont la date limite de la source est passée depuis plus de 7 jours. La date relue dans l'avis ne s'écarte
+      // de celle de la source que de quelques heures (fuseau horaire) : aucune annonce ouverte n'est perdue, et la
+      // comparaison du texte (coûteuse) ne porte plus que sur les annonces encore vivantes.
+      if (v2ActiveOnly) whereClause = `(o.deadline IS NULL OR o.deadline >= NOW() - INTERVAL '7 days') AND ${whereClause}`;
       orderClause = orderClause.replace(/o\.deadline/g, DL);
       const liveV2 = `(o.status = 'active' AND NOT COALESCE(o.is_cancelled, false) AND COALESCE(l.notice_nature, '') NOT ILIKE '%annul%' AND ${DL} IS NOT NULL AND ${DL} >= NOW() AND ${DL} <= NOW() + INTERVAL '3 years')`;
       const verifyV2 = `(o.status = 'active' AND NOT COALESCE(o.is_cancelled, false) AND (${DL} IS NULL OR ${DL} > NOW() + INTERVAL '3 years'))`;
