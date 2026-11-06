@@ -14,6 +14,7 @@ import { notifyTeamOfNewLead } from '../services/leadNotificationService';
 import { isValidLeadPhone } from '../utils/leadValidation';
 import { recordJourneyEvent } from '../services/journeyEventService';
 import { CALLBACK_MOMENTS, parseCallbackMoment, isTestRequest } from '../utils/requestFacts';
+import { tradeSlugsForCompany } from '../services/matchEngine';
 
 // Contre-audit follow-up: crm_leads.phone was stored exactly as typed
 // ("06 00 00 00 00", "0033600000000", "+33 6 00 00 00 00", ...), so the
@@ -222,6 +223,28 @@ router.post(
       if (callbackMoment || isTest) {
         await db.query('UPDATE crm_leads SET callback_moment = $2, is_test = $3 WHERE id = $1', [result.rows[0].id, callbackMoment, isTest])
           .catch((err: any) => logger.error('Lead v26 fields not saved (non-fatal):', err));
+      }
+      // 7 nov. (audit) : le bouton « alerte » de la liste des marchés ne créait qu'une demande, aucune alerte. Il
+      // enregistre maintenant aussi l'alerte (market_alerts, même règle que POST /siret/alert : une par SIRET et
+      // téléphone), pour qu'Elena la retrouve et que les envois automatiques puissent s'appuyer dessus le jour où ils
+      // seront activés. Sans entreprise identifiée dans la visite, seule la demande est enregistrée, comme avant.
+      if (leadSource === 'alert_signup' && sessionId && phone) {
+        try {
+          const look = await db.query('SELECT siret, company_data FROM siret_lookups WHERE session_id = $1', [sessionId]);
+          const siret = look.rows[0]?.siret;
+          const digits = String(phone).replace(/\D/g, '').replace(/^33(\d{9})$/, '0$1');
+          if (/^\d{14}$/.test(siret || '') && /^0[1-9]\d{8}$/.test(digits)) {
+            const c = look.rows[0].company_data || {};
+            const postal = String(c.postal || '');
+            const dept = /^97|^98/.test(postal) ? postal.slice(0, 3) : /^20/.test(postal) ? (Number(postal) < 20200 ? '2A' : '2B') : /^\d{5}$/.test(postal) ? postal.slice(0, 2) : null;
+            await db.query(
+              `INSERT INTO market_alerts (session_id, siret, phone, trade_slug, department, city, is_test)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               ON CONFLICT (siret, phone) DO UPDATE SET active = TRUE, session_id = EXCLUDED.session_id, trade_slug = EXCLUDED.trade_slug,
+                 department = EXCLUDED.department, city = EXCLUDED.city, updated_at = NOW()`,
+              [sessionId, siret, digits, tradeSlugsForCompany(c.ape, c.activity)[0] || null, dept, c.city || null, isTest]);
+          }
+        } catch (err: any) { logger.error('Alerte non enregistrée dans market_alerts (demande conservée) :', err); }
       }
       if(sessionId){
         await recordJourneyEvent({sessionId,opportunityId,eventType:'coordonnees_saisies',eventId:`coordinates:${result.rows[0].id}`});
