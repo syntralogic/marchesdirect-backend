@@ -186,9 +186,34 @@ export const ensureSchema = async (): Promise<void> => {
 // this time, the DECP/TED `active = true` UPDATE near the bottom) quietly
 // never took effect. step() isolates each statement so one failure can't
 // swallow the rest - this is the fix, not a workaround around it.
+// 6 nov. (indisponibilité du soir) : un « ALTER TABLE … ADD COLUMN IF NOT EXISTS » prend un verrou exclusif sur la table
+// même quand la colonne existe déjà. Au démarrage, il attend la fin de toute requête longue encore en cours (y compris
+// celles d'un ancien processus) et bloque derrière lui toutes les requêtes suivantes. Deux garde-fous :
+//  - une colonne ou un index déjà présents ne donnent lieu à aucune instruction (aucun verrou) ;
+//  - sinon, l'instruction renonce au bout de 5 s d'attente de verrou (lock_timeout) au lieu de figer le site ;
+//    elle sera rejouée au prochain démarrage. Les ajouts sont tous idempotents.
+const ADD_COLUMN_RE = /ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?"?([a-z_][a-z0-9_]*)"?\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"?([a-z_][a-z0-9_]*)"?/i;
+const CREATE_INDEX_RE = /CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+"?([a-z_][a-z0-9_]*)"?/i;
 const step = async (sql: string): Promise<void> => {
   try {
-    await pool.query(sql);
+    const col = ADD_COLUMN_RE.exec(sql);
+    if (col) {
+      const r = await pool.query(`SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2`, [col[1], col[2]]);
+      if (r.rows.length) return;
+    }
+    const idx = CREATE_INDEX_RE.exec(sql);
+    if (idx) {
+      const r = await pool.query(`SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1`, [idx[1]]);
+      if (r.rows.length) return;
+    }
+    const client = await pool.connect();
+    try {
+      await client.query(`SET lock_timeout = '5s'`);
+      await client.query(sql);
+    } finally {
+      try { await client.query('RESET lock_timeout'); } catch { /* connexion rendue telle quelle */ }
+      client.release();
+    }
   } catch (err) {
     logger.error(`⚠️ Migration step failed (continuing with the rest): ${sql.trim().slice(0, 120).replace(/\s+/g, ' ')}`, err);
   }

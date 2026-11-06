@@ -22,7 +22,7 @@ export interface DossierV2Input {
   companyName: string;
   siret?: string | null;
   company?: { legal?: string | null; created?: string | null; address?: string | null; city?: string | null; postal?: string | null;
-              director?: string | null; employees?: string | null; ape?: string | null; activity?: string | null } | null;
+              director?: string | null; employees?: string | null; ape?: string | null; activity?: string | null; source?: string | null } | null;
   title: string;
   lotLabel?: string | null;
   buyerName?: string | null;
@@ -41,7 +41,12 @@ export const fdate = (d: Date, day = false) => { const p = paris(d); return `${d
 const fhour = (d: Date) => { const p = paris(d); return p.getHours() === 0 && p.getMinutes() === 0 ? null : `${p.getHours()} h ${String(p.getMinutes()).padStart(2, '0')}`; };
 const fsiret = (s?: string | null) => (s && /^\d{14}$/.test(s) ? s.replace(/(\d{3})(\d{3})(\d{3})(\d{5})/, '$1 $2 $3 $4') : s || '');
 // « HT » n'est écrit que si l'on sait que le montant est hors taxes (v2 : jamais affirmé sans source).
-const money = (v?: number | null, ht = true) => (v ? `${Math.round(v).toLocaleString('fr-FR').replace(/[\u00a0\u202f]/g, ' ')} €${ht ? ' HT' : ' (montant indiqué dans l’avis, HT/TTC non précisé)'}` : null);
+// Provenance réelle des données de l'entreprise (6 nov.) : Pappers (registres officiels) ou INSEE, jamais affirmée d'office.
+const provenance = (input: DossierV2Input) => {
+  const src = input.company?.source || undefined;
+  return src === 'pappers' ? 'registres officiels via Pappers' : src === 'insee' ? 'répertoire SIRENE de l’INSEE' : 'registres publics (Pappers ou INSEE)';
+};
+const money = (v?: number | null, ht = false) => (v ? `${Math.round(v).toLocaleString('fr-FR').replace(/[\u00a0\u202f]/g, ' ')} €${ht ? ' HT' : ' (montant indiqué dans l’avis, HT/TTC non précisé)'}` : null);
 const clean = (s: string) => s.replace(/[  ]/g, ' ');
 
 function fontDir(): string | null {
@@ -253,7 +258,7 @@ function cover(ly: Layout, input: DossierV2Input, qr: Buffer) {
     doc.font(ly.F.r).fontSize(10.4).text('Pièces administratives, pièces techniques et mémoire technique', L, y + 24, { width: CW, align: 'center' });
     y += 62;
     const rows: [string, string][] = [['Date limite de réception des offres', D.txt], ['Mode de transmission', 'Selon l’avis : dépôt électronique sur le profil d’acheteur'], ['Lieu d’exécution', input.locationCity || 'Selon l’avis']];
-    if (input.estimatedValue) rows.push(['Montant estimé', money(input.estimatedValue, !(input as any).amountUnqualified)!]);
+    if (input.estimatedValue) rows.push(['Montant estimé', money(input.estimatedValue)!]);
     rows.forEach(([k, v]) => {
       doc.lineWidth(0.5).rect(L + 22, y, 200, 22).stroke().rect(L + 222, y, CW - 244, 22).stroke();
       doc.font(ly.F.b).fontSize(9).text(k, L + 29, y + 7, { width: 190, lineBreak: false }); doc.font(ly.F.r).fontSize(9.3).text(clean(v), L + 229, y + 7, { width: CW - 258, lineBreak: false, ellipsis: true }); y += 22;
@@ -262,7 +267,7 @@ function cover(ly: Layout, input: DossierV2Input, qr: Buffer) {
     doc.font(ly.F.r).fontSize(9.2).text('•  Partie A — Pièces à remettre au pouvoir adjudicateur (pièces 1 à 6)', L + 32, y).text('•  Partie B — Notice de préparation, document interne au candidat, à ne pas joindre', L + 32, y + 15);
     if (input.isClosed) doc.font(ly.F.b).fontSize(10).text('Consultation clôturée à la date d’établissement : document fourni à titre d’exemple.', L, y + 46, { width: CW, align: 'center' });
     doc.moveTo(L, H - 86).lineTo(W - L, H - 86).lineWidth(0.5).stroke('#111111');
-    doc.font(ly.F.r).fontSize(7.8).fillColor('#555555').text(`Dossier établi le ${fdate(D.now)} — n° ${input.ref}`, L, H - 74).text('Les données du candidat proviennent du répertoire SIRENE (INSEE). Les pièces de la consultation font foi.', L, H - 62);
+    doc.font(ly.F.r).fontSize(7.8).fillColor('#555555').text(`Dossier établi le ${fdate(D.now)} — n° ${input.ref}`, L, H - 74).text(`Les données du candidat proviennent des ${provenance(input)}. Les pièces de la consultation font foi.`, L, H - 62);
     doc.image(qr, W - L - 46, H - 80, { width: 46 }); doc.fontSize(6.4).text('Accès au dossier en ligne', L, H - 50, { width: CW - 52, align: 'right' });
     return;
   }
@@ -306,7 +311,7 @@ function cover(ly: Layout, input: DossierV2Input, qr: Buffer) {
     input.kind === 'prive' ? 'Trame de la note méthodologique' : 'Trame de votre proposition technique', input.kind === 'prive' ? 'Rétroplanning et remise' : 'Rétroplanning et formalités d’agrément'];
   items.forEach((it, i) => { const x = L + (i % 2) * (CW / 2), yy = y + Math.floor(i / 2) * 17; doc.rect(x, yy + 3, 5.5, 5.5).fill('#F97316'); doc.font(ly.F.r).fontSize(9.2).fillColor('#0A1628').text(it, x + 12, yy, { lineBreak: false }); });
   doc.moveTo(L, H - 64).lineTo(W - L, H - 64).lineWidth(0.5).stroke('#D6E0EC');
-  doc.font(ly.F.r).fontSize(7).fillColor('#4B5B70').text('Document préparatoire établi par Marchés Direct à partir de données publiques (avis, répertoire SIRENE de l’INSEE).', L, H - 54)
+  doc.font(ly.F.r).fontSize(7).fillColor('#4B5B70').text(`Document préparatoire établi par Marchés Direct à partir de données publiques (avis, ${provenance(input)}).`, L, H - 54)
     .text('Il ne remplace ni les pièces de la consultation ni les formulaires officiels.', L, H - 44);
 }
 
@@ -335,7 +340,7 @@ function buildPublic(ly: Layout, input: DossierV2Input, _qr: Buffer) {
   ly.small('Les formulaires DC1 et DC2 sont les modèles publiés par la Direction des affaires juridiques du ministère de l’Économie ; le document unique de marché européen (DUME) peut les remplacer. Le règlement de la consultation précise les pièces exigées.');
   ly.space(26); ly.text('Fait à [lieu], le [date]'); ly.space(4); ly.text(`Pour ${name}, [nom et qualité du signataire]`);
 
-  ly.pageBreak(); pieceTitle(ly, 1, 'Identification du candidat', 'Données à reporter dans le formulaire DC1 ou dans la partie II du DUME. Source : répertoire SIRENE de l’INSEE, à vérifier par le candidat.');
+  ly.pageBreak(); pieceTitle(ly, 1, 'Identification du candidat', `Données à reporter dans le formulaire DC1 ou dans la partie II du DUME. Source : ${provenance(input)}, à vérifier par le candidat.`);
   art(ly, '1.1 — Candidat');
   ly.kv([['Dénomination sociale', name], ['Forme juridique', c.legal || FILL], ['Numéro SIRET', fsiret(input.siret) || FILL], ['Code APE (NAF)', [c.ape, c.activity].filter(Boolean).join(' — ') || FILL],
     ['Adresse du siège social', [c.address, [c.postal, c.city].filter(Boolean).join(' ')].filter(Boolean).join(', ') || FILL], ['Date de création', c.created || FILL],
@@ -352,7 +357,7 @@ function buildPublic(ly: Layout, input: DossierV2Input, _qr: Buffer) {
   ly.table(['Exercice', 'Chiffre d’affaires global HT', 'Chiffre d’affaires relatif aux travaux du lot HT', 'Part (%)'], [y, y - 1, y - 2].map(e => [String(e), FILL, FILL, FILL]), [60, 140, CW - 260, 60]);
   art(ly, '2.2 — Effectifs');
   ly.table(['Année', 'Effectif moyen annuel', 'Dont encadrement'], [y, y - 1, y - 2].map(e => [String(e), FILL, FILL]), [80, (CW - 80) / 2, (CW - 80) / 2]);
-  if (c.employees) ly.small(`Tranche d’effectif au répertoire SIRENE : ${c.employees}.`);
+  if (c.employees) ly.small(`Tranche d’effectif (${provenance(input)}) : ${c.employees}.`);
   art(ly, '2.3 — Qualifications et certifications professionnelles');
   ly.table(['Organisme', 'Qualification ou certification', 'N°', 'Validité'], [['Qualibat / Qualifelec / Qualit’EnR / autre', FILL, FILL, FILL], ['Mention RGE', FILL, FILL, FILL], ['Autre habilitation utile au lot', FILL, FILL, FILL]], [130, CW - 310, 80, 100]);
   art(ly, '2.4 — Assurances');
@@ -400,7 +405,7 @@ function buildPublic(ly: Layout, input: DossierV2Input, _qr: Buffer) {
     ['□', 'L’acte d’engagement est complété ; signature électronique si le RC l’exige au stade du dépôt.'], ['□', 'Dépôt effectué avant l’heure limite : une offre reçue hors délai est irrecevable.'], ['□', 'Accusé de réception horodaté téléchargé et conservé.']], [26, CW - 26]);
   ly.space(6);
   ly.small('Repère réglementaire : depuis le décret n° 2025-1386 du 29 décembre 2025, les marchés de travaux inférieurs à 100 000 € HT peuvent être conclus sans publicité ni mise en concurrence ; au-delà et jusqu’à 5 404 000 € HT (seuil européen 2026-2027), la procédure adaptée s’applique.');
-  ly.space(4); ly.small(`Notice établie le ${fdate(D.now)} par Marchés Direct (www.marchesdirect.fr), dossier n° ${input.ref}, à partir de l’avis publié et du répertoire SIRENE. Document préparatoire : les pièces de la consultation font foi.`);
+  ly.space(4); ly.small(`Notice établie le ${fdate(D.now)} par Marchés Direct (www.marchesdirect.fr), dossier n° ${input.ref}, à partir de l’avis publié et des ${provenance(input)}. Document préparatoire : les pièces de la consultation font foi.`);
 }
 
 function plan(D: ReturnType<typeof dl>, steps: [number, string][]): [string, string][] {
@@ -449,7 +454,7 @@ function buildBranded(ly: Layout, input: DossierV2Input, _qr: Buffer) {
   ly.pageBreak(); ly.section('2', 'Identité du marché', 'Les informations essentielles, au même endroit', 'Relevées dans l’annonce. Les lignes « à vérifier » doivent être confirmées avec le donneur d’ordre.');
   const rows: [string, string][] = [['Objet', input.title]]; if (input.lotLabel) rows.push(['Lot / périmètre', input.lotLabel]);
   rows.push([st ? 'Entreprise principale' : 'Donneur d’ordre', input.buyerName || 'Communiqué par Elena']); rows.push(['Cadre', st ? 'Sous-traitance (loi n° 75-1334 du 31 décembre 1975)' : 'Consultation privée, hors Code de la commande publique']);
-  rows.push(['Lieu d’exécution', input.locationCity || 'À vérifier'], ['Montant', money(input.estimatedValue, !(input as any).amountUnqualified) || 'Non communiqué'], ['Date limite', D.txt]); if (input.reference) rows.push(['Référence', input.reference]);
+  rows.push(['Lieu d’exécution', input.locationCity || 'À vérifier'], ['Montant', money(input.estimatedValue) || 'Non communiqué'], ['Date limite', D.txt]); if (input.reference) rows.push(['Référence', input.reference]);
   ly.kv(rows);
   ly.h2(st ? 'Ce qui change en sous-traitance' : 'Ce qui change en privé');
   ly.text(st ? 'Vous ne contractez pas avec l’acheteur public mais avec l’entreprise titulaire du marché. La loi du 31 décembre 1975 impose que l’acheteur vous accepte et agrée vos conditions de paiement. Dans un marché public, cette acceptation ouvre droit au paiement direct par l’acheteur lorsque votre prestation atteint 600 € TTC.'
@@ -489,7 +494,7 @@ function buildBranded(ly: Layout, input: DossierV2Input, _qr: Buffer) {
   ly.table(['Pièce', 'À quoi elle sert', 'Statut', 'Validité'], P5.map(([a, b, s, v]) => [{ bold: a }, b, { pill: s }, v]), [140, CW - 295, 80, 75]);
 
   // 6. Données
-  ly.pageBreak(); ly.section('6', 'Données préremplies', 'Votre entreprise, prête à reporter', `Ces informations proviennent du répertoire SIRENE de l’INSEE. Vérifiez-les, complétez les cases vides : elles servent pour ${st ? 'la déclaration de sous-traitance (DC4) et le contrat.' : 'votre lettre de candidature et votre devis.'}`);
+  ly.pageBreak(); ly.section('6', 'Données préremplies', 'Votre entreprise, prête à reporter', `Ces informations proviennent des ${provenance(input)}. Vérifiez-les, complétez les cases vides : elles servent pour ${st ? 'la déclaration de sous-traitance (DC4) et le contrat.' : 'votre lettre de candidature et votre devis.'}`);
   ly.h2('Identification');
   ly.kv([['Raison sociale', input.companyName], ['Forme juridique', c.legal || FILL], ['SIRET', fsiret(input.siret) || FILL], ['Code NAF', [c.ape, c.activity].filter(Boolean).join(' — ') || FILL],
     ['Adresse du siège', [c.address, [c.postal, c.city].filter(Boolean).join(' ')].filter(Boolean).join(', ') || FILL], ['Création', c.created || FILL], ['Effectif', c.employees || FILL], ['Dirigeant', c.director || FILL]]);
@@ -537,5 +542,5 @@ function buildBranded(ly: Layout, input: DossierV2Input, _qr: Buffer) {
   doc.image(_qr, ly.L + CW - 108, ey + 14, { width: 80 }); doc.font(ly.F.r).fontSize(6.8).fillColor('#B4C1D3').text('Scannez pour retrouver votre dossier', ly.L + CW - 124, ey + 97, { width: 112, align: 'center' });
   doc.y = ey + 122; doc.x = ly.L;
   ly.h2('Mentions');
-  ly.small(`Dossier n° ${input.ref} établi le ${fdate(D.now)} par Marchés Direct (www.marchesdirect.fr) pour ${input.companyName}. Document préparatoire et non contractuel, établi à partir de données publiques : annonce, répertoire SIRENE de l’INSEE. Il ne constitue ni une candidature ni une offre, ne remplace pas les pièces de la consultation et ne garantit pas l’obtention du marché. Les références réglementaires citées sont à jour à sa date d’établissement. Vos données sont traitées de manière confidentielle et ne sont jamais revendues.`);
+  ly.small(`Dossier n° ${input.ref} établi le ${fdate(D.now)} par Marchés Direct (www.marchesdirect.fr) pour ${input.companyName}. Document préparatoire et non contractuel, établi à partir de données publiques : annonce, ${provenance(input)}. Il ne constitue ni une candidature ni une offre, ne remplace pas les pièces de la consultation et ne garantit pas l’obtention du marché. Les références réglementaires citées sont à jour à sa date d’établissement. Vos données sont traitées de manière confidentielle et ne sont jamais revendues.`);
 }

@@ -72,6 +72,9 @@ export function requestTypeForLead(lead: DealLead): RequestType | null {
   if (lead.appointment_mode === 'slot' || lead.lead_source === 'appointment_modal') return 'appointment';
   if (lead.appointment_mode === 'callback' || lead.lead_source === 'callback_modal') return 'callback';
   if (lead.lead_source === 'analysis_gate') return 'dossier';
+  // 6 nov. : une question posée sur un marché (« Elena vous rappelle dans l'heure ») est une demande de rappel à part
+  // entière : elle crée une transaction « à rappeler », comme le bouton Rappel. Sans marché lié (page contact), rien.
+  if (lead.lead_source === 'contact_form' && lead.opportunity_id) return 'callback';
   return null;
 }
 

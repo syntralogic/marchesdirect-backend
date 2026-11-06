@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { logger } from '../utils/logger';
-import { noticeForSeo, legacyTargets, locationOf, buildPage, indexablePaths, topLinks, BASE_JOURNEY } from '../services/seoV2Service';
+import { noticeForSeo, legacyTargets, locationOf, buildPage, indexablePaths, topLinks, BASE_JOURNEY, barometer } from '../services/seoV2Service';
 
 // /api/seo/v2 — lecture seule, publique, mise en cache (5 nov., mandat référencement). Aucune route existante modifiée.
 const router = Router();
@@ -26,6 +26,11 @@ router.get('/links', async (req: Request, res: Response) => {
   const base = String(req.query.base || '');
   try { cache(res); res.json(await topLinks(BASE_JOURNEY[base])); }
   catch (err) { logger.error('[SEO v2] liens:', err); res.status(503).json({ error: 'unavailable' }); }
+});
+
+router.get('/barometre', async (_req: Request, res: Response) => {
+  try { cache(res, 900); res.json(await barometer()); }
+  catch (err) { logger.error('[SEO v2] baromètre:', err); res.status(503).json({ error: 'unavailable' }); }
 });
 
 router.get('/legacy', async (req: Request, res: Response) => {

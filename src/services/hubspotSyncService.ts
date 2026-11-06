@@ -85,7 +85,7 @@ export function buildContactProperties(lead: SyncLead, j: JourneySummary): Recor
     firstname: clean(lead.first_name),
     lastname: clean(lead.last_name),
     email: lead.email ? lead.email.trim().toLowerCase() : null,
-    phone: clean(lead.phone, 40),
+    phone: clean(lead.phone ? phoneVariants(lead.phone)[0] : lead.phone, 40), // écriture unique « +33… » (6 nov.)
     md_search_trade: j.lastTrade,
     md_search_area: j.lastArea,
     md_last_journey_step: j.lastStep ? (STEP_LABELS[j.lastStep] || 'Étape enregistrée') : null,
@@ -279,15 +279,27 @@ export async function upsertCompany(siret: string, name: string | null, agg: Par
   });
 }
 
+/** « 0612345678 » et « +33612345678 » : les deux écritures d'un même numéro français (sans doublon). */
+export function phoneVariants(raw: string): string[] {
+  const d = String(raw || '').replace(/[^\d+]/g, '');
+  if (!d) return [];
+  const e164 = d.startsWith('+') ? d : d.startsWith('0033') ? `+${d.slice(2)}` : d.startsWith('33') && d.length === 11 ? `+${d}` : d.startsWith('0') && d.length === 10 ? `+33${d.slice(1)}` : d;
+  const national = /^\+33[1-9]\d{8}$/.test(e164) ? `0${e164.slice(3)}` : null;
+  return [...new Set([e164, national, raw].filter(Boolean) as string[])];
+}
+
 export async function upsertContact(lead: SyncLead, j: JourneySummary): Promise<string> {
   // A callback request only collects a phone number (no e-mail field in that form): the contact is then identified
   // by that number, still never by the SIRET.
   const email = lead.email ? lead.email.trim().toLowerCase() : '';
   const phone = lead.phone ? String(lead.phone).trim() : '';
-  return withLock(`contact:${email || phone}`, async () => {
+  // 6 nov. : le même artisan devenait deux contacts — numéro enregistré « +33… » par un formulaire et « 06… » par
+  // l'autre, et jamais de recherche par téléphone dès qu'un e-mail était présent. On cherche par e-mail, puis par
+  // téléphone sous ses deux écritures ; le contact trouvé par téléphone reçoit l'e-mail nouvellement donné.
+  return withLock(`contact:${email || phoneVariants(phone)[0] || ''}`, async () => {
     let id: string | null = lead.crm_system === 'hubspot' && lead.crm_contact_id ? String(lead.crm_contact_id) : null;
     if (!id && email) id = await findOne('contacts', 'email', email);
-    if (!id && !email && phone) id = await findOne('contacts', 'phone', phone);
+    if (!id && phone) for (const p of phoneVariants(phone)) { id = await findOne('contacts', 'phone', p); if (id) break; }
     const properties = buildContactProperties(lead, j);
     if (id) {
       await hs({ method: 'PATCH', url: `/crm/v3/objects/contacts/${id}`, data: { properties } });

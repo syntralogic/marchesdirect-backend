@@ -78,7 +78,7 @@ export function displayCity(raw: string): string {
 type Place = { slug: string; name: string; dept: string | null };
 export type Item = {
   id: string; title: string; journey: string; reference: string | null; value: number | null; trades: string[]; updatedAt: string;
-  buyer: string | null; state: 'open' | 'verify' | 'closed'; deadline: string | null;
+  buyer: string | null; state: 'open' | 'verify' | 'closed'; deadline: string | null; publishedAt: string | null;
   exec: { status: string; communes: Place[]; depts: string[]; text: string | null };
   buyerPlace: Place | null; pubDepts: string[];
 };
@@ -111,9 +111,9 @@ export function buyerCommune(o: { ville_avis?: string | null; organisme?: string
 
 const BASE_SQL = (withLoc: boolean) => `
     SELECT o.id, o.title, o.location_city, o.location_department, o.deadline, o.buyer_name, ot.code AS journey, o.source_reference,
-           o.estimated_value, o.trade_id, o.created_at, COALESCE(o.is_cancelled, false) AS is_cancelled,
+           o.estimated_value, o.trade_id, o.created_at, o.publication_date, COALESCE(o.is_cancelled, false) AS is_cancelled,
            COALESCE(o.updated_at, o.created_at) AS updated_at
-           ${withLoc ? `, l.exec_status, l.exec_communes, l.exec_departments, l.exec_text, l.buyer_city, l.buyer_department,
+           ${withLoc ? `, l.exec_status, l.exec_communes, l.exec_departments, LEFT(l.exec_text, 80) AS exec_text, l.buyer_city, l.buyer_department,
            l.publication_departments, l.notice_deadline, l.diffusion_end` : ''}
       FROM opportunities o
       JOIN opportunity_types ot ON ot.id = o.opportunity_type_id
@@ -143,7 +143,8 @@ async function load(): Promise<Snapshot> {
   const items: Item[] = [];
   for (const o of r.rows as any[]) {
     const title = String(o.title || '').trim(); if (!title) continue;
-    const dl = o.deadline ? new Date(o.deadline) : o.notice_deadline ? new Date(o.notice_deadline) : null;
+    // Même date que la recherche : celle relue dans l'avis à l'heure de Paris d'abord, sinon celle de la source.
+    const dl = o.notice_deadline ? new Date(o.notice_deadline) : o.deadline ? new Date(o.deadline) : null;
     const diffEnd = o.diffusion_end ? new Date(o.diffusion_end).toISOString().slice(0, 10) : null;
     let state: Item['state'];
     if (o.is_cancelled) state = 'closed';
@@ -169,15 +170,17 @@ async function load(): Promise<Snapshot> {
       value: o.estimated_value != null && Number.isFinite(Number(o.estimated_value)) ? Number(o.estimated_value) : null,
       trades: [...ts], updatedAt: new Date(o.updated_at).toISOString(),
       buyer: o.buyer_name && !/^\s*\d[\d\s]*$/.test(String(o.buyer_name)) ? decodeEntities(String(o.buyer_name)).trim() : null,
-      state, deadline: dl ? dl.toISOString() : null,
+      state, deadline: dl ? dl.toISOString() : null, publishedAt: o.publication_date ? new Date(o.publication_date).toISOString() : null,
       exec: { status: o.exec_status || 'inconnu', communes: execCommunes, depts: execDepts, text: o.exec_text ? decodeEntities(o.exec_text) : null },
       buyerPlace, pubDepts: (o.publication_departments || []).map((d: string) => normDept(d)).filter(Boolean) as string[],
     });
   }
   return { at: Date.now(), items, trades, cityNames, cityDepts, withLocations };
 }
+// Photographie rechargée toutes les 30 min (15 avant) : chaque chargement lit des dizaines de milliers de lignes, ce qui
+// pèse dans le trafic sortant facturé par Supabase (6 nov.).
 export async function snapshot(): Promise<Snapshot> {
-  if (snap && Date.now() - snap.at < 15 * 60000) return snap;
+  if (snap && Date.now() - snap.at < 30 * 60000) return snap;
   if (!loading) loading = load().then(x => { snap = x; return x; }).finally(() => { loading = null; });
   try { return await loading; } catch (e) { logger.error('[SEO v2] chargement impossible:', e); if (snap) return snap; throw e; }
 }
@@ -491,4 +494,54 @@ export async function noticeForSeo(id: string) {
     buyerCity: o.buyer_city || null, buyerDepartment: o.buyer_department || null, publicationDepartments: o.publication_departments || [],
     similar,
   };
+}
+
+
+// ---------------------------------------------------------------------------------------------------------------
+// Baromètre des marchés publics (6 nov., mandat référencement) : état du jour calculé sur la même photographie que les
+// pages locales (aucune requête supplémentaire, aucun appel externe). Méthode publiée avec les chiffres.
+// ---------------------------------------------------------------------------------------------------------------
+const median = (a: number[]) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : Math.round((s[m - 1] + s[m]) / 2); };
+const top = (m: Map<string, number>, n: number) => [...m.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'fr')).slice(0, n).map(([name, count]) => ({ name, count }));
+const bump = (m: Map<string, number>, k: string | null | undefined) => { if (k) m.set(k, (m.get(k) || 0) + 1); };
+
+let baroCache: { at: number; data: any } | null = null;
+export async function barometer() {
+  const s = await snapshot();
+  if (baroCache && baroCache.at === s.at) return baroCache.data;
+  const now = Date.now(); const d30 = now - 30 * 86400000;
+  const pub = s.items.filter(i => i.journey === 'public_procurement');
+  const open = pub.filter(i => i.state === 'open');
+  const deptOf = (i: Item): string[] => (i.exec.depts.length ? i.exec.depts : i.buyerPlace?.dept ? [i.buyerPlace.dept] : []).filter(d => DEPARTMENTS[d]);
+  const values = open.map(i => i.value).filter((v): v is number => v != null && v > 0 && v < 1e9);
+  const horizon = { under7: 0, d7to14: 0, d15to30: 0, over30: 0 };
+  for (const i of open) { const days = (new Date(i.deadline!).getTime() - now) / 86400000; if (days < 7) horizon.under7++; else if (days < 15) horizon.d7to14++; else if (days <= 30) horizon.d15to30++; else horizon.over30++; }
+
+  type Acc = { open: number; published30: number; buyers: Map<string, number>; trades: Map<string, number>; depts: Map<string, number> };
+  const acc = () => ({ open: 0, published30: 0, buyers: new Map(), trades: new Map(), depts: new Map() }) as Acc;
+  const byDept = new Map<string, Acc>(); const byTrade = new Map<string, Acc>();
+  let noPlace = 0; let noTrade = 0;
+  for (const i of pub) {
+    const isOpen = i.state === 'open'; const recent = i.publishedAt ? new Date(i.publishedAt).getTime() >= d30 : false;
+    if (!isOpen && !recent) continue;
+    const depts = deptOf(i); if (isOpen && !depts.length) noPlace++;
+    if (isOpen && !i.trades.length) noTrade++;
+    for (const d of depts) { const a = byDept.get(d) || acc(); byDept.set(d, a); if (isOpen) { a.open++; bump(a.buyers, i.buyer); for (const t of i.trades) bump(a.trades, s.trades.get(t) || t); } if (recent) a.published30++; }
+    for (const t of i.trades) { const a = byTrade.get(t) || acc(); byTrade.set(t, a); if (isOpen) { a.open++; for (const d of depts) bump(a.depts, d); } if (recent) a.published30++; }
+  }
+  const data = {
+    generatedAt: new Date(s.at).toISOString(),
+    scope: 'Marchés publics (avis BOAMP, JOUE/TED et plateformes importées), hors exemples de démonstration.',
+    national: {
+      open: open.length, published30: pub.filter(i => i.publishedAt && new Date(i.publishedAt).getTime() >= d30).length,
+      withEstimatedValue: values.length, medianEstimatedValue: median(values), horizon, openWithoutPlace: noPlace, openWithoutTrade: noTrade,
+    },
+    departments: [...byDept.entries()].map(([code, a]) => ({ code, name: DEPARTMENTS[code], open: a.open, published30: a.published30, topBuyers: top(a.buyers, 3), topTrades: top(a.trades, 3) }))
+      .sort((a, b) => b.open - a.open || a.code.localeCompare(b.code)),
+    trades: [...byTrade.entries()].map(([slug, a]) => ({ slug, name: s.trades.get(slug) || slug, open: a.open, published30: a.published30,
+      topDepartments: top(a.depts, 3).map(x => ({ code: x.name, name: DEPARTMENTS[x.name], count: x.count })) }))
+      .sort((a, b) => b.open - a.open || a.name.localeCompare(b.name, 'fr')),
+  };
+  baroCache = { at: s.at, data };
+  return data;
 }
