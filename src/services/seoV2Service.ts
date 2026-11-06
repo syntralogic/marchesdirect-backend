@@ -312,7 +312,8 @@ export async function buildPage(args: { base: string; city?: string; trade?: str
   const tradeCounts = new Map<string, number>(); for (const i of zoneAll) if (i.state === 'open') for (const t of i.trades) tradeCounts.set(t, (tradeCounts.get(t) || 0) + 1);
   const cityCounts = new Map<string, number>();
   if (zone.department) for (const i of pool) if (i.state === 'open') for (const c of i.exec.communes) if (c.dept === zone.department && c.slug !== zone.slug) { const k = citySlugFor(s, c.slug, c.dept); cityCounts.set(k, (cityCounts.get(k) || 0) + 1); }
-  const buyerCounts = new Map<string, number>(); for (const i of [...groups.main, ...groups.buyer]) if (i.buyer) buyerCounts.set(i.buyer, (buyerCounts.get(i.buyer) || 0) + 1);
+  const buyerCounts = new Map<string, number>(); const buyerSlugs = new Map<string, string>();
+  for (const i of [...groups.main, ...groups.buyer]) if (i.buyer) { buyerCounts.set(i.buyer, (buyerCounts.get(i.buyer) || 0) + 1); const sl = itemBuyerSlug(i); if (sl && !buyerSlugs.has(i.buyer)) buyerSlugs.set(i.buyer, sl); }
   const otherTypes = Object.entries(JOURNEY_BASE).filter(([j]) => j !== journey).map(([j, b]) => ({ base: b, journey: j,
     count: s.items.filter(i => i.journey === j && i.state === 'open' && withTrade(i) && (roleIn(i, zone) === 'main' || roleIn(i, zone) === 'buyer')).length }));
   const rule = indexRule(groups.main.length, groups.buyer.length, groups.closed.length);
@@ -329,7 +330,7 @@ export async function buildPage(args: { base: string; city?: string; trade?: str
     publishedOnlyCount: publishedOnly,
     trades: [...tradeCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([slug, n]) => ({ slug, name: s.trades.get(slug) || slug, count: n })),
     cities: [...cityCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([slug, n]) => ({ slug, name: s.cityNames.get(slug.replace(/-(\d{2,3}|2a|2b)$/, '')) || slug, count: n })),
-    buyers: [...buyerCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([name, n]) => ({ name, count: n })),
+    buyers: [...buyerCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([name, n]) => ({ name, count: n, path: buyerSlugs.has(name) ? `/acheteurs/${buyerSlugs.get(name)}` : null })),
     otherTypes, nextDeadline: [...groups.main, ...groups.buyer].sort(byDeadline).find(i => i.deadline)?.deadline || null, lastmod, generatedAt: new Date(s.at).toISOString(),
   };
 }
@@ -495,6 +496,11 @@ export async function noticeForSeo(id: string) {
     execution: { status: o.exec_status || 'inconnu', communes, departments: execDepts, text: o.exec_text || null },
     buyerCity: o.buyer_city || null, buyerDepartment: o.buyer_department || null, publicationDepartments: o.publication_departments || [],
     similar,
+    buyerPath: await (async () => {
+      const it = s.items.find(i => i.id === String(o.id));
+      const sl = it ? itemBuyerSlug(it) : (o.buyer_name ? buyerSlug(decodeEntities(String(o.buyer_name)).trim(), o.buyer_department && DEPARTMENTS[o.buyer_department] ? o.buyer_department : null) : null);
+      return sl && (await buyerIndex()).has(sl) ? `/acheteurs/${sl}` : null; // seulement vers une page qui existe
+    })(),
   };
 }
 
@@ -564,17 +570,28 @@ export const buyerSlug = (name: string, dept: string | null) => {
   return dept ? `${base}-${dept.toLowerCase()}` : base;
 };
 
+const itemBuyerDept = (i: Item): string | null => {
+  const d = i.buyerPlace?.dept || (i.exec.depts.length === 1 ? i.exec.depts[0] : null) || deptInName(i.buyer);
+  return d && DEPARTMENTS[d] ? d : null;
+};
+/** Adresse de la page acheteur d'une annonce (null si le nom de l'acheteur est inexploitable). */
+export const itemBuyerSlug = (i: Item): string | null => {
+  if (!i.buyer || i.buyer.length < 3 || BUYER_JUNK.test(i.buyer)) return null;
+  const slug = buyerSlug(i.buyer, itemBuyerDept(i));
+  return slug && slug.length >= 3 ? slug : null;
+};
+
 export async function buyerIndex(): Promise<Map<string, BuyerEntry>> {
   const s = await snapshot();
   if (buyerCache && buyerCache.at === s.at) return buyerCache.bySlug;
   const bySlug = new Map<string, BuyerEntry>();
   for (const i of s.items) {
-    if (!i.buyer || i.buyer.length < 3 || BUYER_JUNK.test(i.buyer)) continue;
-    const dept = i.buyerPlace?.dept || (i.exec.depts.length === 1 ? i.exec.depts[0] : null) || deptInName(i.buyer);
-    const slug = buyerSlug(i.buyer, dept && DEPARTMENTS[dept] ? dept : null);
-    if (!slug || slug.length < 3) continue;
+    if (!i.buyer) continue;
+    const dept = itemBuyerDept(i);
+    const slug = itemBuyerSlug(i);
+    if (!slug) continue;
     let e = bySlug.get(slug);
-    if (!e) { e = { slug, name: i.buyer, dept: dept && DEPARTMENTS[dept] ? dept : null, city: i.buyerPlace?.name || null, items: [], open: 0, lastmod: i.updatedAt }; bySlug.set(slug, e); }
+    if (!e) { e = { slug, name: i.buyer, dept, city: i.buyerPlace?.name || null, items: [], open: 0, lastmod: i.updatedAt }; bySlug.set(slug, e); }
     e.name = betterName(e.name, i.buyer); if (!e.city && i.buyerPlace?.name) e.city = i.buyerPlace.name;
     e.items.push(i); if (i.state === 'open') e.open++; if (i.updatedAt > e.lastmod) e.lastmod = i.updatedAt;
   }
