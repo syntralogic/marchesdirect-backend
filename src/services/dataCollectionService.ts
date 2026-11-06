@@ -1017,7 +1017,12 @@ export const collectTedData = async (sourceId: number) => {
           );
           break;
         } catch (e: any) {
-          if (e?.response?.status !== 429 || attempt >= 3) throw e;
+          if (e?.response?.status !== 429 || attempt >= 3) {
+            // TED explique ses refus 400 dans le corps de la réponse : on le garde (sans données personnelles) pour le
+            // diagnostic de la surveillance, au lieu du seul « status code 400 ».
+            const body = e?.response?.data; const why = body ? (typeof body === 'string' ? body : JSON.stringify(body)).slice(0, 300) : '';
+            throw new Error(`TED ${e?.response?.status || ''} page ${page}: ${why || e?.message}`);
+          }
           const ra = Number(e.response.headers?.['retry-after']);
           const wait = Number.isFinite(ra) && ra > 0 ? Math.min(ra, 300) * 1000 : 20000 * 2 ** attempt;
           logger.warn(`[TED] 429 page ${page}, nouvel essai dans ${Math.round(wait / 1000)} s`);

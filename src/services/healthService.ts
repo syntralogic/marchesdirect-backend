@@ -39,7 +39,7 @@ export async function runHealthChecks(): Promise<{ at: string; overall: Check['s
     add({ id: `import.${s.code}`, group: 'Import des annonces', label: `Source ${s.name || s.code}`, status,
       value: `dernier passage sans erreur ${fmtH(h)} · ${n(s.new24)} nouvelles en 24 h${n(s.fails24) ? ` · ${n(s.fails24)} échec(s) en 24 h` : ''}`,
       // Cause technique courte (ex. « status code 400 »), sans adresse ni clé : de quoi diagnostiquer.
-      detail: s.last_error ? String(s.last_error).replace(/https?:\/\/\S+/g, '[url]').replace(/[A-Za-z0-9_-]{24,}/g, '[…]').slice(0, 160) : undefined,
+      detail: s.last_error ? String(s.last_error).replace(/https?:\/\/\S+/g, '[url]').replace(/[A-Za-z0-9_-]{24,}/g, '[…]').slice(0, 300) : undefined,
       rule: `vert si importée depuis moins de ${f * 2} h (2 × sa fréquence de ${f} h), rouge au-delà de ${f * 4} h` });
     metrics[`new24_${s.code}`] = n(s.new24);
   }
