@@ -448,13 +448,11 @@ export function closedIndexPolicy(o: { cancelled: boolean; demo: boolean; deadli
   if (o.demo) return { indexable: false, reason: 'annonce de démonstration', keepUntil: null as string | null };
   if (o.cancelled) return { indexable: false, reason: 'consultation annulée', keepUntil: null };
   if (!o.deadline || Date.parse(o.deadline) >= now) return { indexable: true, reason: 'candidatures ouvertes ou date à vérifier', keepUntil: null };
-  // 7 nov. (stratégie référencement, accord de Hedi) : une consultation clôturée reste indexée sans limite de durée.
-  // Avant, elle sortait de l'index 14 à 365 jours après la clôture : 103 000 pages perdues pour Google. La page d'une
-  // annonce clôturée garde sa valeur (historique de l'acheteur, recherches sur l'objet du marché) et propose les
-  // consultations ouvertes similaires. Les signaux restent calculés pour information.
   const R = o.buyerHistory >= 3; const C = o.descriptionLength >= 400 || o.estimatedValue != null || o.lots >= 2; const A = o.framework;
-  const signals = [R && 'acheteur récurrent', C && 'contenu substantiel', A && 'accord-cadre ou reconduction'].filter(Boolean).join(', ') || 'aucun signal particulier';
-  return { indexable: true, reason: `clôturée — conservée dans l’index (${signals}), avec les consultations ouvertes similaires`, keepUntil: null as string | null };
+  const days = C && (R || A) ? 365 : (R || C || A) ? 90 : 14;
+  const until = Date.parse(o.deadline) + days * 86400000;
+  const signals = [R && 'acheteur récurrent', C && 'contenu substantiel', A && 'accord-cadre ou reconduction'].filter(Boolean).join(', ') || 'aucun signal de valeur';
+  return { indexable: now < until, reason: `clôturée — ${signals} : conservée ${days} jours après la clôture`, keepUntil: new Date(until).toISOString() };
 }
 
 export async function noticeForSeo(id: string) {
