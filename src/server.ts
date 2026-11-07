@@ -337,6 +337,7 @@ app.use('/api/siret', optionalAuth, require('./routes/siret').default);
 app.use('/api/companies', authenticate, require('./routes/companies').default);
 app.use('/api/dossiers', authenticate, require('./routes/dossiers').default);
 app.use('/api/uploads', authenticate, require('./routes/uploads').default);
+app.use('/api/public/avatars', require('./routes/avatarsPublic').default); // 8 nov. : photos de profil, stockage privé
 // Serves files saved by the local-disk storage fallback (storageService.ts).
 // No-op / unused when AWS_S3_BUCKET is configured, since files then live in S3.
 app.use('/uploads', protectLocalFiles, express.static(process.env.LOCAL_UPLOAD_DIR || path.join(process.cwd(), 'uploads'), { dotfiles: 'deny', index: false }));

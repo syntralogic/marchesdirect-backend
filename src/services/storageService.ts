@@ -268,6 +268,18 @@ export async function uploadTenderDocument(
  * can actually fetch. For S3, that means a short-lived presigned URL since
  * objects are private; for local disk, the static /uploads path already works.
  */
+/** Lecture d'un objet du stockage (photo de profil servie par le serveur quand le bucket est privé). */
+export async function readStoredObject(storedRef: string): Promise<{ body: Buffer; contentType: string } | null> {
+  if (s3 && S3_BUCKET && !storedRef.startsWith('/uploads/')) {
+    try { const o = await s3.getObject({ Bucket: S3_BUCKET, Key: storedRef }).promise(); return { body: o.Body as Buffer, contentType: String(o.ContentType || 'application/octet-stream') }; }
+    catch { return null; }
+  }
+  const p = path.join(LOCAL_UPLOAD_DIR, storedRef.replace(/^\/uploads\//, ''));
+  if (!fs.existsSync(p)) return null;
+  const ext = path.extname(p).toLowerCase();
+  return { body: fs.readFileSync(p), contentType: ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg' };
+}
+
 export async function resolveFileUrl(storedRef: string): Promise<string> {
   if (s3 && S3_BUCKET && !storedRef.startsWith('/uploads/')) {
     return s3.getSignedUrlPromise('getObject', {
@@ -311,8 +323,10 @@ export async function resolveCompanyFileUrl(storedRef: string, companyId: string
  */
 export function resolveAvatarUrl(storedRef: string): string {
   if (s3 && S3_BUCKET && !storedRef.startsWith('/uploads/')) {
-    if (S3_PUBLIC_BASE) return `${S3_PUBLIC_BASE}/${storedRef}`; // Supabase : https://<projet>.supabase.co/storage/v1/object/public/<bucket>
-    if (S3_ENDPOINT) return `${S3_ENDPOINT}/${S3_BUCKET}/${storedRef}`;
+    if (S3_PUBLIC_BASE) return `${S3_PUBLIC_BASE}/${storedRef}`; // bucket public : https://<projet>.supabase.co/storage/v1/object/public/<bucket>
+    // 8 nov. : bucket privé (Supabase) → la photo est servie par le serveur, qui la lit dans le stockage (route publique
+    // GET /api/public/avatars/:userId, mise en cache 1 h). Aucune URL signée à faire expirer côté navigateur.
+    if (S3_ENDPOINT) { const m = /^avatars\/([^/]+)\//.exec(storedRef); if (m) return `${PUBLIC_BACKEND_URL}/api/public/avatars/${m[1]}`; return `${S3_ENDPOINT}/${S3_BUCKET}/${storedRef}`; }
     return `https://${S3_BUCKET}.s3.${S3_REGION}.amazonaws.com/${storedRef}`;
   }
   return toAbsoluteLocalUrl(storedRef);
