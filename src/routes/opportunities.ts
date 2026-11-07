@@ -1846,7 +1846,9 @@ router.get('/ranked/candidates', optionalAuth, async (req: AuthRequest, res: Res
     }
     const v2 = String(req.query.loc || '') === '2' && await hasLocationTable();
     const q = buildCandidatesQuery({ tradeSlugs: trades, department, preferDepartment: homeDepartment, limit: Number(req.query.limit) || 40, v2 });
-    const [list, count] = await Promise.all([db.query(q.listSql, q.params), db.query(q.countSql, q.params)]);
+    // 7 nov. (Hedi : 2-3 s d'attente) : même métiers, même zone → même liste pendant 2 min, sans relancer les deux requêtes.
+    const [list, count] = await cached(`ranked:${trades.slice().sort().join(',')}:${department || ''}:${homeDepartment || ''}:${q.params.length}:${v2}:${Number(req.query.limit) || 40}`, 120_000,
+      () => Promise.all([db.query(q.listSql, q.params), db.query(q.countSql, q.params)]));
     // 7 nov. : le lot qui concerne l'entreprise (« lot plomberie-sanitaire ») ; le texte de l'annonce n'est pas renvoyé.
     const wanted = new Set(trades);
     const items = list.rows.map((r: any) => { const { description, ...rest } = r;
