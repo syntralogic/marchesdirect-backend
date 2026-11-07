@@ -556,7 +556,9 @@ async function searchOpportunities(req: Request, res: Response) {
         // unaccented typed pattern - ILIKE folds case, not accents.
         // unaccent() on the column side + pre-folded patterns on the
         // parameter side make the match accent-insensitive.
-        const tradeCond = `(unaccent(t.name) ILIKE ANY($${nameIdx}::text[]) OR ${ua}(o.ai_matched_trades::text) ILIKE ANY($${matchedIdx}::text[]))`;
+        // 7 nov. (recherche à 5-16 s) : le nom du métier comparé sur la table jointe (t.name) interdisait à PostgreSQL de
+        // combiner les index de la table des annonces ; on compare l'identifiant (index opportunities_trade), même résultat.
+        const tradeCond = `(o.trade_id = ANY(ARRAY(SELECT tr0.id FROM trades tr0 WHERE unaccent(tr0.name) ILIKE ANY($${nameIdx}::text[]))) OR ${ua}(o.ai_matched_trades::text) ILIKE ANY($${matchedIdx}::text[]))`;
 
         if (isTradeWord(w)) {
           const titleIdx = idx++;
