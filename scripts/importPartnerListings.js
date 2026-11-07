@@ -41,7 +41,16 @@ try { regions = require('./_departmentToRegion.json'); } catch { /* région facu
 
 const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
 const slug = s => norm(s).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-const hash = o => crypto.createHash('sha1').update(JSON.stringify(o)).digest('hex').slice(0, 16);
+// Version du traitement : la changer réécrit toutes les annonces une fois (7 nov. : métier CVC reconnu, v2).
+const PROCESS_VERSION = 2;
+const hash = o => crypto.createHash('sha1').update(JSON.stringify({ ...o, _v: PROCESS_VERSION })).digest('hex').slice(0, 16);
+// Métiers reconnus par expression avant la correspondance mot à mot (« CVC » faisait moins de 4 lettres et n'était jamais
+// trouvé : une annonce « plomberie, chauffage, climatisation » partait en plomberie et restait invisible aux climaticiens).
+const TRADE_RULES = [
+  [/\b(climatis\w*|climatiseurs?|pompes? a chaleur|pac|cvc|chauffage|chauffagistes?|chaudieres?|vmc|frigori\w*|genie climatique|ventilation)\b/, 'cvc'],
+  [/\b(electricien\w*|electricite|courants? (forts?|faibles?))\b/, 'electricite'],
+  [/\b(plombier\w*|plomberie|sanitaires?)\b/, 'plomberie'],
+];
 
 // --- Complément de contenu : conseils généraux, vrais pour tout chantier du type, jamais présentés comme des faits
 const TRADE_NOTES = [
@@ -125,7 +134,9 @@ async function main() {
   const sourceId = (await pool.query('SELECT id FROM data_sources WHERE code = $1', [SOURCE_CODE])).rows[0]?.id;
   if (!sourceId) { console.log('[partenaires] source introuvable : import reporté'); return; }
   const types = Object.fromEntries((await pool.query('SELECT id, code FROM opportunity_types')).rows.map(r => [r.code, r.id]));
-  const trades = (await pool.query('SELECT id, name FROM trades')).rows.map(t => ({ id: t.id, key: norm(t.name) })).filter(t => t.key.length >= 4)
+  const tradeRows = (await pool.query('SELECT id, name, slug FROM trades')).rows;
+  const tradeBySlug = Object.fromEntries(tradeRows.map(t => [t.slug, t.id]));
+  const trades = tradeRows.map(t => ({ id: t.id, key: norm(t.name) })).filter(t => t.key.length >= 4)
     .sort((a, b) => b.key.length - a.key.length);
   const existing = new Map((await pool.query(`SELECT source_reference AS ref, raw_data->>'hash' AS hash, status, location_department AS dept,
       location_city AS city, raw_data->>'geo_postal' AS postal FROM opportunities WHERE source_id = $1`, [sourceId])).rows.map(r => [r.ref, r]));
@@ -159,7 +170,9 @@ async function main() {
       }
       const typeId = types[l.journey];
       if (!typeId) continue;
-      const t = norm(`${l.trade || ''}`); const trade = trades.find(x => t.includes(x.key)) || trades.find(x => norm(l.title).includes(x.key));
+      const t = norm(`${l.trade || ''}`); const nt = norm(l.title);
+      const ruled = [t, nt].map(x => TRADE_RULES.find(([re]) => re.test(x))).find(Boolean);
+      const trade = (ruled && tradeBySlug[ruled[1]] ? { id: tradeBySlug[ruled[1]] } : null) || trades.find(x => t.includes(x.key)) || trades.find(x => nt.includes(x.key));
       todo.push({ status, ref: l.reference, type_id: typeId, trade_id: trade ? trade.id : null, title: l.title.slice(0, 900), description: description({ ...l, archived: !!archive }),
         publication: l.publication || null, deadline: l.deadline || null, value: l.amount || null, city: city ? String(city).slice(0, 200) : null, dept, region: dept ? regions[dept] || null : null,
         raw: { partner_feed: true, lot, file, hash: h, kind: l.kind, nature: l.nature || l.category || null, trade_text: l.trade || null,
