@@ -81,16 +81,22 @@ router.get('/', async (req: Request, res: Response) => {
 router.get('/stats', async (_req: Request, res: Response) => {
   try {
     if (!(await hasTable())) return res.json({ total: 0, departments: [], categories: [], lastImport: null, source: SOURCE });
-    const out = await cached('chantiers:stats', 1800_000, async () => {
+    const out = await cached('chantiers:stats', 300_000, async () => {
       const [d, c, t, l] = await Promise.all([
         db.query(`SELECT department, COUNT(*)::int AS n FROM construction_projects WHERE COALESCE(etat, 2) <> 4 GROUP BY 1 ORDER BY 2 DESC`),
         db.query(`SELECT kind, destination, (COALESCE(dwellings, 1) >= 2) AS multi, COUNT(*)::int AS n FROM construction_projects WHERE COALESCE(etat, 2) <> 4 GROUP BY 1, 2, 3`),
         db.query(`SELECT COUNT(*)::int AS n, COUNT(*) FILTER (WHERE authorized_at >= CURRENT_DATE - 30)::int AS last30, MAX(authorized_at) AS latest FROM construction_projects WHERE COALESCE(etat, 2) <> 4`),
         db.query(`SELECT finished_at FROM construction_imports WHERE finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1`).catch(() => ({ rows: [] as any[] })),
       ]);
+      // Avancement de l'import en cours (couples fichier × département traités, erreurs) : sans donnée personnelle.
+      const parts = await db.query(`SELECT COUNT(*) FILTER (WHERE error IS NULL)::int AS done, COUNT(*) FILTER (WHERE error IS NOT NULL)::int AS failed,
+          COALESCE(json_agg(json_build_object('part', kind || ' ' || department, 'error', error)) FILTER (WHERE error IS NOT NULL), '[]') AS errors
+        FROM construction_import_parts WHERE done_at > NOW() - INTERVAL '72 hours'`).catch(() => ({ rows: [] as any[] }));
+      const p = parts.rows[0];
       const cats: Record<string, number> = {};
       for (const r of c.rows) { const k = categoryOf({ kind: r.kind, destination: r.destination, dwellings: r.multi ? 2 : 1 }); cats[k] = (cats[k] || 0) + r.n; }
       return {
+        importProgress: p ? { partsDone: p.done, partsFailed: p.failed, partsTotal: 2 * 101, errors: (p.errors || []).slice(0, 10) } : null,
         total: t.rows[0]?.n || 0, last30: t.rows[0]?.last30 || 0, latestAuthorization: t.rows[0]?.latest || null, lastImport: l.rows[0]?.finished_at || null,
         departments: d.rows.filter((r: any) => DEPARTMENTS[r.department]).map((r: any) => ({ code: r.department, name: DEPARTMENTS[r.department], count: r.n })),
         categories: Object.entries(cats).map(([k, n]) => ({ slug: k, label: CATEGORIES[k]?.label || 'Autres projets', count: n })).sort((a, b) => b.count - a.count),
