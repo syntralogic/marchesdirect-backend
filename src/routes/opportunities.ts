@@ -1376,11 +1376,14 @@ async function searchOpportunities(req: Request, res: Response) {
     if (String(req.query.explain || '') === '1' && !countOnly) {
       const listSqlForPlan = `SELECT o.id FROM opportunities o
          ${SCOPE_JOINS}
+         ${natureInWhere || natureInOrder ? naturePrestationLateral('o') : ''}
          WHERE ${whereClause}
          ORDER BY ${orderClause}
          LIMIT $${limitIdx} OFFSET $${offsetIdx}`;
-      const plan = await db.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) ${listSqlForPlan}`, listParams);
-      return res.json({ plan: plan.rows.map((r: any) => r['QUERY PLAN']), where: whereClause, order: orderClause });
+      try {
+        const plan = await db.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) ${listSqlForPlan}`, listParams);
+        return res.json({ plan: plan.rows.map((r: any) => r['QUERY PLAN']), where: whereClause, order: orderClause });
+      } catch (e: any) { return res.json({ error: String(e?.message || e).slice(0, 500), sql: listSqlForPlan.slice(0, 3000), params: listParams.map(p => Array.isArray(p) ? p : String(p).slice(0, 200)) }); }
     }
     const [rows, breakdown] = await Promise.all([
       countOnly ? Promise.resolve([] as any[]) : searchListCache(searchCacheKey('list', whereClause, orderClause, listParams), SEARCH_LIST_TTL_MS, loadList).then(r => { tList = Date.now() - tPrep; return r; }),
