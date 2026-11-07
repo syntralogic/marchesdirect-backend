@@ -316,6 +316,7 @@ app.use('/api/chantiers', require('./routes/chantiers').default);
 app.use('/api/listing-reports', require('./routes/listingReports').default);
 app.use('/api/needs', require('./routes/needs').default);
 app.use('/api/members', require('./routes/members').default);
+app.use('/api/awards', require('./routes/awards').default);
 app.use('/api/subscriptions', require('./routes/subscriptions').default);
 // Browsing subcontracting needs is public (mirrors opportunities); creating
 // one requires an account, enforced per-route inside the router itself.
@@ -605,6 +606,16 @@ const startServer = async () => {
         });
       setTimeout(runSitadel, 90000).unref();
       setInterval(runSitadel, 24 * 3600 * 1000).unref();
+    }
+
+    // 7 nov. : contrats attribués (DECP, Licence Ouverte). 3 min après le démarrage puis chaque jour ; le script ne refait
+    // l'import complet que si le dernier date de plus de 7 jours (fichier de 430 Mo lu en flux).
+    if (process.env.SKIP_DECP_IMPORT !== 'true') {
+      const decpPath = require('path').resolve(process.cwd(), 'scripts', 'importDecp.js');
+      const runDecp = () => require('child_process').execFile('node', [decpPath], { timeout: 3 * 60 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 },
+        (err: any, stdout: string, stderr: string) => { if (stdout) logger.info(stdout.trim()); if (err) logger.error('[attributions] import en échec (non bloquant) :', stderr || err.message); });
+      setTimeout(runDecp, 180000).unref();
+      setInterval(runDecp, 24 * 3600 * 1000).unref();
     }
 
     if (process.env.SKIP_EDITORIAL_SEED !== 'true') {
