@@ -1,6 +1,5 @@
 import { Express, Request, Response, NextFunction, json, urlencoded } from 'express';
 import rateLimit from 'express-rate-limit';
-import { authenticate, requireRole } from './auth';
 import { verifyPrivateFilePath } from '../utils/privateFileLinks';
 
 const write = (req: Request) => !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
@@ -32,8 +31,8 @@ export function requireDiagnosticAccess(req: Request, res: Response, next: NextF
     res.status(400).json({ error: 'invalid_search', message: 'Limitez votre recherche à 256 caractères.' });
     return;
   }
-  if (req.query.explain === undefined) return next();
-  void authenticate(req, res, () => requireRole(['admin', 'super_admin'])(req, res, next));
+  if (req.query.explain !== undefined) { res.status(404).json({ error: 'not_found' }); return; } // diagnostic retiré (7 nov.)
+  next();
 }
 
 export function protectLocalFiles(req: Request, res: Response, next: NextFunction): void {
