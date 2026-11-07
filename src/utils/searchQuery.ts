@@ -95,6 +95,9 @@ export const TRADE_KEYWORD_SYNONYMS: Record<string, string[]> = {
   vrd: ['voirie', 'reseaux'],
   terrassement: ['vrd'],
   proprete: ['nettoyage'],
+  // 7 nov. : métiers dits comme les artisans les disent.
+  climatiseur: ['climatisation'], climatiseurs: ['climatisation'], frigoriste: ['frigorifique'], plaquiste: ['platrerie'],
+  peintre: ['peinture'], jardinier: ['espaces', 'verts'], elagueur: ['elagage'], vitrier: ['vitrerie'], charpentier: ['charpente'],
   paysagiste: ['espaces', 'verts'],
   paysagisme: ['espaces', 'verts'],
 };
