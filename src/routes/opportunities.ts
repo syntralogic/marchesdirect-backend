@@ -826,8 +826,11 @@ export async function searchOpportunities(req: Request, res: Response) {
         let wordCondition = familyMode ? `(${wordConds.join(' OR ')})` : wordConds.join(' AND ');
         if (familyMode) {
           for (const w of otherWords) {
-            const { wordCondition: c } = buildWordCondition(w);
+            const { wordCondition: c, tradeCond: tc } = buildWordCondition(w);
             wordCondition = `${wordCondition} AND ${c}`;
+            // Les paramètres métier de ce mot (nameIdx/matchedIdx) doivent rester référencés dans la requête, sinon
+            // Postgres refuse (« could not determine data type of parameter ») : « menuiserie alu » renvoyait 500.
+            conditions.push(`((${tc}) OR TRUE)`);
           }
           const boostWords = [...(tradeWords.length > 1 ? tradeWords : []), ...prestationWords, ...focusWords];
           if (boostWords.length > 0) {
