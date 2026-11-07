@@ -78,6 +78,29 @@ async function* csvRows(stream) {
 const num = v => { const n = Number(String(v || '').replace(',', '.')); return Number.isFinite(n) ? n : null; };
 const isoDate = v => (/^\d{4}-\d{2}-\d{2}$/.test(v || '') ? v : null);
 
+// Noms officiels des communes (code INSEE → nom accentué, API Découpage administratif). La localité saisie dans
+// Sitadel est souvent sans accent ou mal encodée (« ATAMPES-SUR-MARNE », « CHATEAU THIERRY ») : elle ne sert qu'en secours.
+async function communeNames() {
+  try {
+    const r = await fetch('https://geo.api.gouv.fr/communes?fields=code,nom&format=json&type=commune-actuelle,arrondissement-municipal', { signal: AbortSignal.timeout(60000) });
+    if (!r.ok) return new Map();
+    return new Map((await r.json()).map(c => [c.code, c.nom]));
+  } catch { return new Map(); }
+}
+
+async function fetchRetry(url) {
+  let last;
+  for (let k = 0; k < 3; k++) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(180000) });
+      if (res.ok) return res;
+      last = new Error(`HTTP ${res.status}`);
+    } catch (e) { last = e; }
+    await new Promise(r => setTimeout(r, 5000 * (k + 1)));
+  }
+  throw last;
+}
+
 async function main() {
   await pool.query(`CREATE TABLE IF NOT EXISTS construction_projects (
       id TEXT PRIMARY KEY, kind TEXT NOT NULL, type_dau TEXT, etat INT, authorized_at DATE, started_at DATE,
@@ -98,14 +121,14 @@ async function main() {
   const sinceIso = since.toISOString().slice(0, 10);
   const maxDate = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10); // dates futures erronées écartées
   let total = 0; const errors = [];
+  const NAMES = await communeNames();
+  console.log(`[chantiers] ${NAMES.size} noms de communes officiels chargés`);
   for (const f of FILES) {
     const cols = [...COLS, f.surf].join(',');
     for (const dep of DEPTS) {
       const url = `${BASE}/${f.rid}/csv?DEP_CODE=eq:${dep}&DATE_REELLE_AUTORISATION=gte:${sinceIso}&columns=${cols}`;
       try {
-        const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 180000);
-        const res = await fetch(url, { signal: ctl.signal });
-        if (!res.ok) { clearTimeout(tm); errors.push(`${f.kind} ${dep}: HTTP ${res.status}`); continue; }
+        const res = await fetchRetry(url);
         let batch = [];
         const flush = async () => {
           if (!batch.length) return;
@@ -127,14 +150,13 @@ async function main() {
           if (!r.NUM_DAU || !auth || auth > maxDate) continue;
           batch.push({ id: `${f.kind === 'logements' ? 'L' : 'N'}${r.NUM_DAU}`, kind: f.kind, type_dau: r.TYPE_DAU || null, etat: num(r.ETAT_DAU),
             authorized_at: auth, started_at: isoDate(r.DATE_REELLE_DOC), department: r.DEP_CODE || dep, commune_insee: r.COMM || null,
-            commune: r.ADR_LOCALITE_TER ? titleCase(r.ADR_LOCALITE_TER) : null, postal_code: /^\d{5}$/.test(r.ADR_CODPOST_TER || '') ? r.ADR_CODPOST_TER : null,
+            commune: NAMES.get(r.COMM) || (r.ADR_LOCALITE_TER ? titleCase(r.ADR_LOCALITE_TER) : null), postal_code: /^\d{5}$/.test(r.ADR_CODPOST_TER || '') ? r.ADR_CODPOST_TER : null,
             nature: r.NATURE_PROJET_DECLAREE === '1' ? 'neuf' : r.NATURE_PROJET_DECLAREE === '2' ? 'existant' : null, destination: num(r.DESTINATION_PRINCIPALE),
             floor_area: num(r[f.surf]), dwellings: num(r.NB_LGT_TOT_CREES), land_area: num(r.SUPERFICIE_TERRAIN), pool: r.I_PISCINE === 'true',
             applicant_name: r.DENOM_DEM ? fixText(r.DENOM_DEM).slice(0, 200) : null, applicant_siren: /^\d{9}$/.test(r.SIREN_DEM || '') ? r.SIREN_DEM : null });
           if (batch.length >= 500) await flush();
         }
         await flush();
-        clearTimeout(tm);
       } catch (e) { errors.push(`${f.kind} ${dep}: ${e.message}`); }
       await new Promise(r => setTimeout(r, 300)); // politesse envers l'API publique
     }
