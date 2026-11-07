@@ -315,6 +315,7 @@ app.use('/api/seo/v2', require('./routes/seoV2').default);
 app.use('/api/chantiers', require('./routes/chantiers').default);
 app.use('/api/listing-reports', require('./routes/listingReports').default);
 app.use('/api/needs', require('./routes/needs').default);
+app.use('/api/members', require('./routes/members').default);
 app.use('/api/subscriptions', require('./routes/subscriptions').default);
 // Browsing subcontracting needs is public (mirrors opportunities); creating
 // one requires an account, enforced per-route inside the router itself.
