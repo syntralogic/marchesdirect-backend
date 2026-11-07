@@ -580,10 +580,14 @@ const startServer = async () => {
     // importées à chaque démarrage (idempotent : rien n'est réécrit si le fichier n'a pas changé).
     if (process.env.SKIP_PARTNER_IMPORT !== 'true') {
       const partnerPath = require('path').resolve(process.cwd(), 'scripts', 'importPartnerListings.js');
-      queueBootScript(partnerPath, (err: any, stdout: string, stderr: string) => {
-        if (stdout) logger.info(stdout.trim());
-        if (err) logger.error('[partenaires] import en échec (non bloquant) :', stderr || err.message);
-      });
+      // Lancé à part (pas via queueBootScript, en pause tant que BOOT_MAINTENANCE_ENABLED n'est pas activé) :
+      // 45 s après le démarrage, une seule fois, avec 2 connexions au plus et sans toucher aux autres scripts.
+      setTimeout(() => {
+        require('child_process').execFile('node', [partnerPath], { timeout: 10 * 60 * 1000 }, (err: any, stdout: string, stderr: string) => {
+          if (stdout) logger.info(stdout.trim());
+          if (err) logger.error('[partenaires] import en échec (non bloquant) :', stderr || err.message);
+        });
+      }, 45000).unref();
     }
 
     if (process.env.SKIP_EDITORIAL_SEED !== 'true') {
