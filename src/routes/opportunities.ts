@@ -1866,6 +1866,12 @@ router.get('/ranked/diag', async (req: Request, res: Response) => {
         pg_size_pretty(pg_relation_size('opportunities')) AS heap, (SELECT pg_size_pretty(SUM(pg_relation_size(indexrelid))) FROM pg_index WHERE indrelid = 'opportunities'::regclass) AS indexes,
         (SELECT COUNT(*)::int FROM opportunities) AS rows, (SELECT ROUND(AVG(length(COALESCE(title,'') || ' ' || COALESCE(description,''))))::int FROM opportunities) AS avg_text`);
       steps.size = sz.rows[0];
+      const st = await db.query(`SELECT (SELECT COUNT(*)::int FROM opportunities WHERE search_text IS NULL) AS todo,
+        (SELECT COUNT(*)::int FROM opportunities WHERE search_text IS NOT NULL) AS done,
+        (SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = 'opportunities_search_text_trgm') AS index_valid,
+        (SELECT COUNT(*)::int FROM pg_trigger WHERE tgname = 'opportunities_search_text') AS trigger_count,
+        (SELECT json_agg(json_build_object('state', state, 'secs', EXTRACT(EPOCH FROM now() - query_start)::int, 'q', left(query, 120))) FROM pg_stat_activity WHERE state <> 'idle' AND query ILIKE '%search_text%' AND pid <> pg_backend_pid()) AS active`).catch((e: any) => ({ rows: [{ error: String(e?.message || e) }] }));
+      steps.searchText = st.rows[0];
     }
     const trades = tradeSlugsForCompany(d.ape, d.activity); steps.trades = trades;
     const department = normaliseZone(req.query.zone); const home = normaliseZone(String(d.postal || '').slice(0, 2));
