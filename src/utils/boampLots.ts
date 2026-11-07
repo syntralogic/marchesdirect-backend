@@ -119,6 +119,24 @@ export function withLotsText(description: string, lotsText: string): string {
 }
 
 /**
+ * 7 nov. : le lot qui concerne l'entreprise, parmi les lots de l'annonce (au moins 2 lots, sinon rien à mettre en avant).
+ * `matches` dit si un texte de lot correspond au métier (mots du métier, ou extraction de métier de la recherche).
+ */
+export function pickRelevantLot(description: string | null | undefined, matches: (lot: string) => boolean): string | null {
+  const lots = lotsFromDescription(description);
+  if (lots.length < 2) return null;
+  const hit = lots.find(matches);
+  if (!hit) return null;
+  // « 05 : Cvc Plomberie. Cvc Plomberie » → « Lot 05 : Cvc Plomberie »
+  let t = hit.replace(/\s+/g, ' ').trim();
+  const num = /^(?:lot\s*)?(\d{1,3})\s*[:\-–.]\s*(.+)$/i.exec(t);
+  let body = num ? num[2] : t;
+  const dup = /^(.{3,120}?)\.\s*\1\.?$/i.exec(body); if (dup) body = dup[1];
+  t = num ? `Lot ${num[1]} : ${body}` : body;
+  return t.length > 140 ? `${t.slice(0, 139).replace(/\s+\S*$/, '')}…` : t;
+}
+
+/**
  * The individual lots appended by withLotsText() ("Lots : a ; b ; c"), so the
  * concordance can read each lot on its own instead of only the global title.
  */
