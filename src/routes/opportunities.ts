@@ -1428,7 +1428,7 @@ async function searchOpportunities(req: Request, res: Response) {
         ...(breakdown ? { breakdown } : {}),
       },
       ...(v2 ? { rules: 'v2' } : {}),
-      timing: { prepMs: tPrep - t0, listMs: tList, countMs: tCount, totalMs: Date.now() - t0 },
+      timing: { prepMs: tPrep - t0, listMs: tList, countMs: tCount, totalMs: Date.now() - t0, text: TXT === 'o.search_text' ? 'colonne' : 'expression' },
     });
   } catch (err: any) {
     logger.error('Opportunities search error:', err);
