@@ -100,6 +100,12 @@ export const TRADE_KEYWORD_SYNONYMS: Record<string, string[]> = {
   peintre: ['peinture'], jardinier: ['espaces', 'verts'], elagueur: ['elagage'], vitrier: ['vitrerie'], charpentier: ['charpente'],
   paysagiste: ['espaces', 'verts'],
   paysagisme: ['espaces', 'verts'],
+  // 7 nov. : familles hors BTP présentes dans le catalogue (métier « Sécurité, gardiennage ») et prestations fréquentes.
+  gardiennage: ['securite', 'surveillance'], securite: ['gardiennage', 'surveillance'], surveillance: ['gardiennage', 'securite'],
+  ascenseur: ['ascenseurs', 'elevateur'], ascenseurs: ['ascenseur'], ascensoriste: ['ascenseur', 'ascenseurs'],
+  desamiantage: ['amiante'], amiante: ['desamiantage'], ravalement: ['facade', 'facades'], facade: ['ravalement'], facades: ['ravalement'],
+  photovoltaique: ['solaire'], solaire: ['photovoltaique'], eclairage: ['luminaires'], chaudiere: ['chauffage'], chaudieres: ['chauffage'],
+  serrurier: ['serrurerie'], metallerie: ['serrurerie'], serrurerie: ['metallerie'],
 };
 
 export const synonymsOf = (w: string): string[] => {
@@ -217,6 +223,15 @@ const TRADE_CONCEPT_TOKENS = new Set(
 // which query words are only allowed to match in the TITLE (or an AI trade
 // match) rather than anywhere in a long description - see opportunities.ts
 // for why a real per-lot data model isn't attempted here.
+// 7 nov. : mots de prestation (« installation de chauffage », « entretien de climatisation ») : dans une recherche
+// par famille de métier ils classent, ils ne filtrent pas.
+const PRESTATION_STEMS = ['install', 'remplac', 'entretien', 'mainten', 'depann', 'pose', 'renov', 'refection', 'repar',
+  'fournitur', 'travaux', 'mise', 'norme', 'conformite', 'creation', 'construction', 'extension', 'rehabilit', 'amenag', 'fin', 'chantier'];
+export const isPrestationWord = (w: string): boolean => {
+  const f = foldAccents(w).toLowerCase();
+  return PRESTATION_STEMS.some(st => f.startsWith(st));
+};
+
 export const isTradeWord = (w: string): boolean => {
   if (synonymsOf(w).length > 0) return true;
   const folded = foldAccents(w).toLowerCase();
