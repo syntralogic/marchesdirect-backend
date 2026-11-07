@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { AuthRequest } from '../middleware/auth';
-import { resolveFileUrl } from '../services/storageService';
+import { resolveCompanyFileUrl, normaliseCompanyFileReference } from '../services/storageService';
 
 const router = Router();
 
@@ -28,7 +28,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     );
 
     const withResolvedUrls = await Promise.all(
-      result.rows.map(async (doc) => ({ ...doc, file_url: await resolveFileUrl(doc.file_url) }))
+      result.rows.map(async (doc) => ({ ...doc, file_url: await resolveCompanyFileUrl(doc.file_url, req.user!.companyId) }))
     );
 
     res.json(withResolvedUrls);
@@ -48,7 +48,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Document not found' });
     }
-    res.json(result.rows[0]);
+    res.json({ ...result.rows[0], file_url: await resolveCompanyFileUrl(result.rows[0].file_url, req.user!.companyId) });
   } catch (err: any) {
     logger.error('Document fetch error:', err);
     res.status(500).json({ error: 'Failed to fetch document' });
@@ -59,6 +59,8 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 router.put('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const { fileUrl, fileSizeBytes, fileMimeType, issuedDate, expiryDate } = req.body;
+    const ownedRef = fileUrl == null ? null : normaliseCompanyFileReference(fileUrl, req.user!.companyId);
+    if (fileUrl != null && !ownedRef) return res.status(400).json({ error: 'Envoyez ce fichier depuis votre espace entreprise.' });
 
     const result = await db.query(
       `UPDATE company_documents SET
@@ -73,14 +75,14 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
          updated_at = NOW()
        WHERE id = $6 AND company_id = $7
        RETURNING *`,
-      [fileUrl, fileSizeBytes, fileMimeType, issuedDate, expiryDate, req.params.id, req.user!.companyId]
+      [ownedRef, fileSizeBytes, fileMimeType, issuedDate, expiryDate, req.params.id, req.user!.companyId]
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Document not found' });
     }
 
-    res.json(result.rows[0]);
+    res.json({ ...result.rows[0], file_url: await resolveCompanyFileUrl(result.rows[0].file_url, req.user!.companyId) });
   } catch (err: any) {
     logger.error('Document update error:', err);
     res.status(500).json({ error: 'Failed to update document' });
@@ -88,3 +90,4 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 });
 
 export default router;
+

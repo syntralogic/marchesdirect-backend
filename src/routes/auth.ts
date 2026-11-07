@@ -214,6 +214,7 @@ router.post('/refresh', async (req: Request, res: Response) => {
 
 // POST /api/auth/password-reset/request
 router.post('/password-reset/request', [body('email').isEmail()], async (req: Request, res: Response) => {
+  if (!validationResult(req).isEmpty()) return res.status(400).json({ error: 'Adresse e-mail invalide.' });
   try {
     const result = await requestPasswordReset(req.body.email);
     res.json(result);
@@ -314,7 +315,10 @@ router.get('/security', authenticate, async (req: AuthRequest, res: Response) =>
 });
 router.post('/logout-everywhere', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const r = await db.query('DELETE FROM user_sessions WHERE user_id = $1', [req.user!.id]);
+    const r = await db.transaction(async client => {
+      await client.query('UPDATE users SET auth_tokens_valid_after = NOW() WHERE id = $1', [req.user!.id]);
+      return client.query('DELETE FROM user_sessions WHERE user_id = $1', [req.user!.id]);
+    });
     await db.query(`INSERT INTO audit_logs (user_id, action, entity_type, entity_id) VALUES ($1, 'logout_everywhere', 'user', $1)`, [req.user!.id]).catch(() => {});
     res.json({ success: true, closed: r.rowCount || 0 });
   } catch (err) { logger.error('logout everywhere error:', err); res.status(500).json({ error: 'logout_failed' }); }
@@ -418,3 +422,4 @@ router.delete('/account', authenticate, async (req: AuthRequest, res: Response) 
 });
 
 export default router;
+

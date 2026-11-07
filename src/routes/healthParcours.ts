@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import axios from 'axios';
+import { createHmac } from 'crypto';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 
@@ -11,7 +12,7 @@ import { logger } from '../utils/logger';
 // Aucun effet de bord : pas d'identification Pappers/INSEE (la session de sonde est insérée depuis le cache
 // d'identification), pas d'événement de parcours, pas de HubSpot.
 const router = Router();
-const PROBE_SESSION = 'health-probe-marches-direct';
+const PROBE_SESSION = 'health-probe-' + createHmac('sha256', process.env.JWT_SECRET!).update('parcours-v1').digest('hex').slice(0, 40);
 const PROBE_SIRET = process.env.HEALTH_PROBE_SIRET || '92939307200012'; // Verifrance Habitat (CVC, 92) : l'entreprise de référence de Hedi
 const PROBE_QUERY = process.env.HEALTH_PROBE_QUERY || 'climatisation';
 const PROBE_DEPT = process.env.HEALTH_PROBE_DEPT || '33';
@@ -27,6 +28,7 @@ async function ensureProbeSession(): Promise<string | null> {
 }
 
 let inflight: Promise<{ ok: boolean; steps: Record<string, unknown> }> | null = null;
+let lastResult: { at: number; value: { ok: boolean; steps: Record<string, unknown> } } | null = null;
 async function runProbe(): Promise<{ ok: boolean; steps: Record<string, unknown> }> {
   const base = `http://127.0.0.1:${process.env.PORT || 5000}/api`;
   const steps: Record<string, unknown> = {};
@@ -53,15 +55,22 @@ async function runProbe(): Promise<{ ok: boolean; steps: Record<string, unknown>
 
 router.get('/parcours', async (_req: Request, res: Response) => {
   try {
-    inflight ||= runProbe().finally(() => { inflight = null; });
-    const r = await inflight;
+    // A public monitor must not become a way to repeat expensive SQL nonstop.
+    const fresh = lastResult && Date.now() - lastResult.at < (lastResult.value.ok ? 60_000 : 10_000);
+    if (!fresh) {
+      inflight ||= runProbe().then(value => { lastResult = { at: Date.now(), value }; return value; })
+        .finally(() => { inflight = null; });
+      await inflight;
+    }
+    const r = lastResult!.value;
     if (!r.ok) logger.error('[sonde parcours] échec', r.steps);
     res.set('Cache-Control', 'no-store');
-    res.status(r.ok ? 200 : 503).json({ status: r.ok ? 'ok' : 'ko', checkedAt: new Date().toISOString(), ...r });
+    res.status(r.ok ? 200 : 503).json({ status: r.ok ? 'ok' : 'ko', checkedAt: new Date(lastResult!.at).toISOString(), ...r });
   } catch (err: any) {
     logger.error('[sonde parcours] erreur', err);
-    res.status(503).json({ status: 'ko', error: String(err?.message || err).slice(0, 300) });
+    res.status(503).json({ status: 'ko', error: 'Vérification du parcours indisponible.' });
   }
 });
 
 export default router;
+

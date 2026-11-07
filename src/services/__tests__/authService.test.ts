@@ -18,6 +18,7 @@ const mockedBcrypt = bcrypt as unknown as { compare: jest.Mock; hash: jest.Mock;
 describe('changePassword', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    (db as any).transaction = jest.fn(async (fn: any) => fn({ query: mockedDb.query }));
   });
 
   it('rejects when the current password does not match the stored hash', async () => {
@@ -65,6 +66,7 @@ describe('changePassword', () => {
     expect(mockedBcrypt.compare).toHaveBeenCalledWith('correct-password', 'stored-hash');
     expect(mockedDb.query).toHaveBeenCalledTimes(3);
     expect(mockedDb.query.mock.calls[1][0]).toMatch(/UPDATE users SET password_hash/);
+    expect(mockedDb.query.mock.calls[1][0]).toContain('auth_tokens_valid_after = NOW()');
     expect(mockedDb.query.mock.calls[2][0]).toMatch(/DELETE FROM user_sessions/);
   });
 });
@@ -93,6 +95,8 @@ describe('registerCompanyAndUser', () => {
     // params order: id, company_id, email, password_hash, first_name, last_name, phone, role, status
     expect(userInsert!.params[7]).toBe('user');
     expect(['admin', 'super_admin']).not.toContain(userInsert!.params[7]);
+    const session = calls.find(c => /INSERT INTO user_sessions/.test(c.sql));
+    expect(session!.params[1]).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 });
 
@@ -189,3 +193,4 @@ describe('MFA (2FA)', () => {
     expect(mockedDb.query.mock.calls[3][0]).toContain('mfa_enabled = false');
   });
 });
+

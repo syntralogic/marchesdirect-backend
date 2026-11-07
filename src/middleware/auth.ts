@@ -1,5 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import { randomUUID } from 'crypto';
+import { isAccessTokenRevoked } from '../utils/tokenSecurity';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { resolveAvatarUrl } from '../services/storageService';
@@ -66,6 +68,9 @@ export const authenticate = async (
     }
 
     const user = result.rows[0];
+    if (isAccessTokenRevoked(decoded.iat, user.auth_tokens_valid_after)) {
+      return res.status(401).json({ error: 'Session revoked' });
+    }
 
     // Attach user to request - first/last name were previously dropped here even
     // though the DB row has them, so GET /api/auth/me (which returns req.user
@@ -160,6 +165,7 @@ export const optionalAuth = async (req: AuthRequest, res: Response, next: NextFu
       );
       if (result.rows.length > 0) {
         const user = result.rows[0];
+        if (isAccessTokenRevoked(decoded.iat, user.auth_tokens_valid_after)) return next();
         req.user = {
           id: user.id,
           email: user.email,
@@ -188,13 +194,13 @@ export const optionalAuth = async (req: AuthRequest, res: Response, next: NextFu
 
 export const generateTokens = (userId: string, email: string) => {
   const accessToken = jwt.sign(
-    { userId, email },
+    { userId, email, jti: randomUUID() },
     JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN || '7d' } as jwt.SignOptions
   );
 
   const refreshToken = jwt.sign(
-    { userId, email },
+    { userId, email, jti: randomUUID() },
     REFRESH_TOKEN_SECRET,
     { expiresIn: process.env.REFRESH_TOKEN_EXPIRES_IN || '30d' } as jwt.SignOptions
   );
@@ -274,3 +280,4 @@ export const verifyMFAToken = (secret: string, token: string) => {
     window: window,
   });
 };
+

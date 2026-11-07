@@ -1,4 +1,4 @@
-import { validateUpload, validateAvatarUpload, UploadValidationError } from "../storageService";
+import { validateUpload, validateAvatarUpload, UploadValidationError, normaliseCompanyFileReference, resolveCompanyFileUrl } from "../storageService";
 
 // Real magic-byte prefixes for each allowed type, so validateUpload's
 // content-signature check (added after the mime-spoofing fix below) sees
@@ -83,3 +83,18 @@ describe("validateAvatarUpload", () => {
     ).toThrow(UploadValidationError);
   });
 });
+
+describe('company document isolation', () => {
+  it('accepts an owned upload and refuses other companies, remote URLs and traversal', () => {
+    expect(normaliseCompanyFileReference('/uploads/companies/company-a/file.pdf', 'company-a')).toBe('/uploads/companies/company-a/file.pdf');
+    expect(normaliseCompanyFileReference('companies/company-a/file.pdf', 'company-a')).toBe('companies/company-a/file.pdf');
+    expect(normaliseCompanyFileReference('/uploads/companies/company-b/file.pdf', 'company-a')).toBeNull();
+    expect(normaliseCompanyFileReference('/uploads/companies/company-a/../company-b/file.pdf', 'company-a')).toBeNull();
+    expect(normaliseCompanyFileReference('https://untrusted.test/document.pdf', 'company-a')).toBeNull();
+  });
+  it('does not sign another company’s document even if its reference was stored previously', async () => {
+    await expect(resolveCompanyFileUrl('/uploads/companies/company-b/file.pdf', 'company-a')).resolves.toBeNull();
+    await expect(resolveCompanyFileUrl('/uploads/companies/company-a/file.pdf', 'company-a')).resolves.toContain('signature=');
+  });
+});
+

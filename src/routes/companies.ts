@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { AuthRequest, checkCompanyAccess } from '../middleware/auth';
-import { resolveFileUrl } from '../services/storageService';
+import { resolveCompanyFileUrl, normaliseCompanyFileReference } from '../services/storageService';
 
 const router = Router();
 
@@ -83,7 +83,7 @@ router.get('/me/documents', async (req: AuthRequest, res: Response) => {
     );
 
     const documentsWithResolvedUrls = await Promise.all(
-      result.rows.map(async (doc) => ({ ...doc, file_url: await resolveFileUrl(doc.file_url) }))
+      result.rows.map(async (doc) => ({ ...doc, file_url: await resolveCompanyFileUrl(doc.file_url, req.user!.companyId) }))
     );
 
     res.json(documentsWithResolvedUrls);
@@ -100,6 +100,8 @@ router.post('/me/documents', async (req: AuthRequest, res: Response) => {
     if (!documentType || !fileUrl) {
       return res.status(400).json({ error: 'documentType and fileUrl are required' });
     }
+    const ownedRef = normaliseCompanyFileReference(fileUrl, req.user!.companyId);
+    if (!ownedRef) return res.status(400).json({ error: 'Envoyez ce fichier depuis votre espace entreprise.' });
 
     const result = await db.query(
       `INSERT INTO company_documents
@@ -108,12 +110,12 @@ router.post('/me/documents', async (req: AuthRequest, res: Response) => {
        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8, $9, $10)
        RETURNING *`,
       [
-        req.user!.companyId, documentType, documentName, description, fileUrl,
+        req.user!.companyId, documentType, documentName, description, ownedRef,
         fileSizeBytes, fileMimeType, issuedDate, expiryDate, req.user!.id,
       ]
     );
 
-    res.status(201).json(result.rows[0]);
+    res.status(201).json({ ...result.rows[0], file_url: await resolveCompanyFileUrl(ownedRef, req.user!.companyId) });
   } catch (err: any) {
     logger.error('Document upload error:', err);
     res.status(500).json({ error: 'Failed to save document' });
@@ -404,3 +406,4 @@ router.get('/:companyId', checkCompanyAccess, async (req: AuthRequest, res: Resp
 });
 
 export default router;
+

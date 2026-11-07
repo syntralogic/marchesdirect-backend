@@ -19,6 +19,12 @@ export const errorHandler = (
   _next: NextFunction
 ) => {
   const requestId = req.id || 'unknown';
+  if (err.type === 'entity.too.large' || err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({ error: 'Requête ou fichier trop volumineux.', requestId });
+  }
+  if (err.type === 'entity.parse.failed' || err.name === 'MulterError') {
+    return res.status(400).json({ error: 'Requête invalide.', requestId });
+  }
 
   // Log error
   logger.error(`[${requestId}] Error: ${err.message}`, {
@@ -51,7 +57,7 @@ export const errorHandler = (
   if (err.code && err.code.startsWith('23')) {
     return res.status(400).json({
       error: 'Database constraint violation',
-      message: err.detail || err.message,
+      message: 'Les données transmises ne peuvent pas être enregistrées.',
       requestId,
     });
   }
@@ -73,7 +79,7 @@ export const errorHandler = (
 
   // Default error
   res.status(err.statusCode || 500).json({
-    error: err.message || 'Internal server error',
+    error: process.env.NODE_ENV === 'development' ? (err.message || 'Internal server error') : 'Une erreur est survenue. Réessayez dans quelques instants.',
     requestId,
     ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
   });
@@ -87,3 +93,4 @@ export const asyncHandler = (fn: any) => (req: Request, res: Response, next: Nex
 export const throwError = (statusCode: number, message: string, details?: any) => {
   throw new ApiError(statusCode, message, details);
 };
+

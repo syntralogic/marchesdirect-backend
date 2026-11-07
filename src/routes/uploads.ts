@@ -16,8 +16,8 @@ const router = Router();
 
 // Memory storage: files are validated and streamed to S3/disk in the handler,
 // never trusted to disk unvalidated first.
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
-const avatarUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024, files: 1, fields: 10, parts: 11, fieldSize: 8192 } });
+const avatarUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 5, parts: 6, fieldSize: 8192 } });
 
 // POST /api/uploads/avatar - profile picture, replaces the previous one.
 // Separate from the generic upload endpoint above because avatars need
@@ -75,3 +75,4 @@ router.post('/', upload.single('file'), async (req: AuthRequest, res: Response) 
 });
 
 export default router;
+
