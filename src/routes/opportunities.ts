@@ -994,8 +994,14 @@ async function searchOpportunities(req: Request, res: Response) {
           // pour les avis pas encore relus. Un avis seulement PUBLIÉ dans le département n'y entre pas.
           const di = idx++; params.push(departments.map(d => (/^\d$/.test(d) ? `0${d}` : d)));
           const vi = idx - 2;
-          departmentCond = `((l.opportunity_id IS NOT NULL AND (l.exec_departments && $${di}::text[] OR (cardinality(l.exec_departments) = 0 AND l.buyer_department = ANY($${di}::text[]))))
-            OR (l.opportunity_id IS NULL AND UPPER(TRIM(o.location_department)) = ANY($${vi}::text[])))`;
+          // 7 nov. (recherche à 5-16 s) : la même condition écrite sur la jointure (OU entre deux tables) forçait la
+          // lecture des 176 000 annonces. Les identifiants candidats sont d'abord réunis par les index (lieu d'exécution,
+          // acheteur, ancienne colonne), puis seuls ces quelques milliers d'annonces sont triés. Même périmètre.
+          departmentCond = `o.id IN (SELECT l3.opportunity_id FROM opportunity_locations l3
+              WHERE l3.exec_departments && $${di}::text[] OR (cardinality(l3.exec_departments) = 0 AND l3.buyer_department = ANY($${di}::text[]))
+            UNION ALL SELECT o3.id FROM opportunities o3
+              WHERE UPPER(TRIM(o3.location_department)) = ANY($${vi}::text[]) AND o3.deleted_at IS NULL
+                AND NOT EXISTS (SELECT 1 FROM opportunity_locations l4 WHERE l4.opportunity_id = o3.id))`;
           locLevelExpr = `(CASE WHEN l.exec_departments && $${di}::text[] THEN 0 WHEN l.opportunity_id IS NOT NULL THEN 1 ELSE 2 END)`;
         }
       }
