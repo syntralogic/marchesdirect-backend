@@ -21,9 +21,17 @@ describe('ranked list candidates', () => {
   });
   it('widening to France drops the department only, never the trade', () => {
     const q = buildCandidatesQuery({ tradeSlugs: ['plomberie'], department: null });
-    expect(q.params).toEqual([['plomberie']]);
+    expect(q.params[0]).toEqual(['plomberie']);
     expect(q.listSql).toContain('t.slug = ANY($1::text[])');
     expect(q.listSql).not.toContain('location_department) ~');
+  });
+  it('7 nov. : un intitulé sans métier classé entre par mot-clé, et le département de l’entreprise passe en tête', () => {
+    const q = buildCandidatesQuery({ tradeSlugs: ['cvc'], department: null, preferDepartment: '92' });
+    expect(q.listSql).toContain("(o.trade_id IS NULL OR COALESCE(ot.code, '') <> 'public_procurement') AND lower(unaccent(o.title)) ~ $2");
+    expect(String(q.params[1])).toContain('climatisation');
+    expect(String(q.params[1])).toContain('pompes? a chaleur');
+    expect(q.params[q.params.length - 1]).toBe('92');
+    expect(q.listSql).toMatch(/ORDER BY \(CASE WHEN .*= \$\d+ THEN 0 ELSE 1 END\) ASC/);
   });
   it('caps the limit', () => {
     expect(buildCandidatesQuery({ tradeSlugs: ['a'], department: null, limit: 9999 }).listSql).toContain(`LIMIT ${MAX_CANDIDATES}`);

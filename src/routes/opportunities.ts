@@ -1827,17 +1827,18 @@ router.get('/ranked/candidates', optionalAuth, async (req: AuthRequest, res: Res
     }
     const profile = await loadCompanyProfile(companyId, sessionId);
     // "zone" = a department code, or "france" to widen; by default the company's own department.
-    const wantsFrance = typeof req.query.zone === 'string' && req.query.zone.trim().toLowerCase() === 'france';
-    const department = wantsFrance ? null : (normaliseZone(req.query.zone) ?? normaliseZone(profile?.department));
+    // 7 nov. (Hedi) : toute la France par défaut, le département de l'entreprise en tête de liste ; zone=<code> restreint.
+    const department = normaliseZone(req.query.zone);
+    const homeDepartment = normaliseZone(profile?.department);
     const trades = profile?.tradeSlugs || [];
     if (trades.length === 0) {
       return res.json({ items: [], total: 0, zone: department || 'france', reason: 'trade_unknown' });
     }
     const v2 = String(req.query.loc || '') === '2' && await hasLocationTable();
-    const q = buildCandidatesQuery({ tradeSlugs: trades, department, limit: Number(req.query.limit) || 40, v2 });
+    const q = buildCandidatesQuery({ tradeSlugs: trades, department, preferDepartment: homeDepartment, limit: Number(req.query.limit) || 40, v2 });
     const [list, count] = await Promise.all([db.query(q.listSql, q.params), db.query(q.countSql, q.params)]);
     res.json({
-      items: list.rows, total: count.rows[0]?.n || 0, zone: department || 'france',
+      items: list.rows, total: count.rows[0]?.n || 0, zone: department || 'france', homeDepartment,
       company: { name: profile?.name || null, activity: profile?.activityText || null, city: profile?.city || null, department: profile?.department || null },
     });
   } catch (err: any) {
