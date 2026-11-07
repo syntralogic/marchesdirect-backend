@@ -10,7 +10,7 @@ import { body, validationResult } from 'express-validator';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { reconcileOfficialFields } from '../utils/officialFields';
-import { tradeSlugsForCompany, type RefineAnswers } from '../services/matchEngine';
+import type { RefineAnswers } from '../services/matchEngine';
 import { naturePrestationLateral, NATURE_VALUES } from '../utils/naturePrestation';
 import { buildSourceAnalysisSections } from '../utils/sourceAnalysisSections';
 import { tokenizeQuery, tsqueryAlternatives, isTradeWord, matchTermsOf, domainMismatchExclusionSqlPattern, lotMatchSqlPattern, canMatchInsideTitle } from '../utils/searchQuery';
@@ -1388,20 +1388,6 @@ async function searchOpportunities(req: Request, res: Response) {
     // 7 nov. : temps de chaque étape renvoyé dans la réponse (champ `timing`, ignoré par le site) et dans l'en-tête
     // Server-Timing, pour savoir où part le temps d'une recherche en production.
     const tPrep = Date.now(); let tList = 0; let tCount = 0;
-    // 7 nov. (recherche à 5-16 s en production, diagnostic temporaire) : ?explain=1 renvoie le plan d'exécution mesuré
-    // de la requête de liste au lieu des résultats. Lecture seule ; à retirer une fois la recherche accélérée.
-    if (['1', '2'].includes(String(req.query.explain || '')) && !countOnly) {
-      const listSqlForPlan = `SELECT o.id FROM opportunities o
-         ${SCOPE_JOINS}
-         ${natureInWhere || natureInOrder ? naturePrestationLateral('o') : ''}
-         WHERE ${whereClause}
-         ORDER BY ${orderClause}
-         LIMIT $${limitIdx} OFFSET $${offsetIdx}`;
-      try {
-        const plan = await db.query(`EXPLAIN (${String(req.query.explain) === '2' ? 'FORMAT TEXT' : 'ANALYZE, BUFFERS, FORMAT TEXT'}) ${listSqlForPlan}`, listParams);
-        return res.json({ plan: plan.rows.map((r: any) => r['QUERY PLAN']), where: whereClause, order: orderClause });
-      } catch (e: any) { return res.json({ error: String(e?.message || e).slice(0, 500), sql: listSqlForPlan.slice(0, 3000), params: listParams.map(p => Array.isArray(p) ? p : String(p).slice(0, 200)) }); }
-    }
     const [rows, breakdown] = await Promise.all([
       countOnly ? Promise.resolve([] as any[]) : searchListCache(searchCacheKey('list', whereClause, orderClause, listParams), SEARCH_LIST_TTL_MS, loadList).then(r => { tList = Date.now() - tPrep; return r; }),
       v2 ? (searchCountCache(searchCacheKey('breakdown', whereClause, params), SEARCH_COUNT_TTL_MS, loadBreakdown as any).then(r => { tCount = Date.now() - tPrep; return r; }).catch(() => null) as Promise<any>) : Promise.resolve(null),
@@ -1848,44 +1834,6 @@ router.get('/appointment-slots', async (_req: Request, res: Response) => {
     logger.error('appointment-slots error:', err);
     res.status(500).json({ error: 'Impossible de charger les créneaux.' });
   }
-});
-
-// GET /api/opportunities/ranked/diag?siret=… — diagnostic temporaire (7 nov.) : rejoue la liste « Vos marchés » pour une
-// entreprise à partir du cache d'identification, et renvoie durées et erreur de chaque étape. Aucune donnée personnelle
-// (l'entreprise est une personne morale déjà publique), aucune écriture. À retirer une fois le délai dépassé compris.
-router.get('/ranked/diag', authenticate, requireRole(['admin', 'super_admin']), async (req: Request, res: Response) => {
-  const siret = typeof req.query.siret === 'string' && /^\d{14}$/.test(req.query.siret) ? req.query.siret : null;
-  if (!siret) return res.status(400).json({ error: 'siret' });
-  const steps: Record<string, unknown> = {}; const t = () => Date.now();
-  try {
-    let t0 = t();
-    const c = await db.query('SELECT company_data FROM company_lookup_cache WHERE siren = $1', [siret.slice(0, 9)]);
-    const d = c.rows[0]?.company_data; steps.cache = { ms: t() - t0, found: !!d, ape: d?.ape || null, postal: d?.postal || null };
-    if (!d) return res.json({ steps });
-    if (String(req.query.size || '') === '1') {
-      const sz = await db.query(`SELECT pg_size_pretty(pg_database_size(current_database())) AS db, pg_size_pretty(pg_total_relation_size('opportunities')) AS opportunities,
-        pg_size_pretty(pg_relation_size('opportunities')) AS heap, (SELECT pg_size_pretty(SUM(pg_relation_size(indexrelid))) FROM pg_index WHERE indrelid = 'opportunities'::regclass) AS indexes,
-        (SELECT COUNT(*)::int FROM opportunities) AS rows, (SELECT ROUND(AVG(length(COALESCE(title,'') || ' ' || COALESCE(description,''))))::int FROM opportunities) AS avg_text`);
-      steps.size = sz.rows[0];
-      const st = await db.query(`SELECT (SELECT COUNT(*)::int FROM opportunities WHERE search_text IS NULL) AS todo,
-        (SELECT COUNT(*)::int FROM opportunities WHERE search_text IS NOT NULL) AS done,
-        (SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = 'opportunities_search_text_trgm') AS index_valid,
-        (SELECT COUNT(*)::int FROM pg_trigger WHERE tgname = 'opportunities_search_text') AS trigger_count,
-        (SELECT json_agg(json_build_object('state', state, 'secs', EXTRACT(EPOCH FROM now() - query_start)::int, 'q', left(query, 120))) FROM pg_stat_activity WHERE state <> 'idle' AND query ILIKE '%search_text%' AND pid <> pg_backend_pid()) AS active`).catch((e: any) => ({ rows: [{ error: String(e?.message || e) }] }));
-      steps.searchText = st.rows[0];
-    }
-    const trades = tradeSlugsForCompany(d.ape, d.activity); steps.trades = trades;
-    const department = normaliseZone(req.query.zone); const home = normaliseZone(String(d.postal || '').slice(0, 2));
-    t0 = t(); const v2 = String(req.query.loc || '2') === '2' && await hasLocationTable(); steps.locationTable = { ms: t() - t0, v2 };
-    t0 = t(); const sv = await hasSearchVectorColumn(); steps.searchVector = { ms: t() - t0, sv };
-    setUnaccentFn(sv ? 'immutable_unaccent' : 'unaccent');
-    const q = buildCandidatesQuery({ tradeSlugs: trades, department, preferDepartment: home, limit: 40, v2 });
-    steps.params = q.params.map(p => Array.isArray(p) ? p : String(p).slice(0, 200));
-    t0 = t(); try { const l = await db.query(q.listSql, q.params); steps.list = { ms: t() - t0, rows: l.rows.length }; } catch (e: any) { steps.list = { ms: t() - t0, error: String(e?.message || e).slice(0, 500) }; }
-    t0 = t(); try { const n = await db.query(q.countSql, q.countParams); steps.count = { ms: t() - t0, n: n.rows[0]?.n }; } catch (e: any) { steps.count = { ms: t() - t0, error: String(e?.message || e).slice(0, 500) }; }
-    if (String(req.query.explain || '') === '1') { try { const ex = await db.query('EXPLAIN ' + q.countSql, q.countParams); steps.plan = ex.rows.map((r: any) => r['QUERY PLAN']); } catch (e: any) { steps.plan = String(e?.message || e).slice(0, 500); } }
-    res.json({ steps });
-  } catch (e: any) { res.status(500).json({ steps, error: String(e?.message || e).slice(0, 500) }); }
 });
 
 // GET /api/opportunities/ranked/candidates - écran 2 « Vos marchés »: markets of the identified company's trade and zone,

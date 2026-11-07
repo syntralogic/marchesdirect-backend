@@ -19,6 +19,8 @@ const connectionString = process.env.DATABASE_URL;
 
 // How long pool.connect() waits for a free/new connection. Default unchanged
 // (10s); raise DB_CONNECT_TIMEOUT_MS on Render if Supabase cold-starts slowly.
+// 7 nov. : taille du pool réglable (DB_POOL_MAX) ; à n'augmenter qu'après avoir relevé pool_size côté Supabase (Session pooler).
+const POOL_MAX = Math.min(50, Math.max(2, parseInt(process.env.DB_POOL_MAX || '8', 10) || 8));
 const CONNECT_TIMEOUT_MS = Math.max(1000, parseInt(process.env.DB_CONNECT_TIMEOUT_MS || '10000', 10) || 10000);
 
 const pool = connectionString
@@ -33,7 +35,7 @@ const pool = connectionString
       // counting any other client (Supabase's own SQL editor, a second
       // psql/pgAdmin session, etc.) sharing the same 15-connection budget.
       // Left real headroom rather than cutting it exactly to 15.
-      max: 8,
+      max: POOL_MAX,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
     })
@@ -44,7 +46,7 @@ const pool = connectionString
       port: parseInt(process.env.DB_PORT || '5432'),
       database: process.env.DB_NAME,
       ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
-      max: 8,
+      max: POOL_MAX,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
     });
