@@ -78,7 +78,7 @@ export async function sendDueAlerts(): Promise<{ sent: number; skipped: number; 
   const out = { sent: 0, skipped: 0, failed: 0 };
   if (!alertEmailsEnabled()) return out;                    // off = nothing happens, nothing is consumed
   const subs = await db.query(
-    `SELECT id, email, trade_id, area, COALESCE(last_alert_at, confirmed_at) AS since
+    `SELECT id, email, trade_id, area, confirmed_at AS since
      FROM alert_subscriptions WHERE confirmed_at IS NOT NULL AND unsubscribed_at IS NULL`);
   for (const s of subs.rows) {
     try {
@@ -94,7 +94,7 @@ export async function sendDueAlerts(): Promise<{ sent: number; skipped: number; 
         const n = params.length;
         where += ` AND (o.location_department = $${n} OR LOWER(o.location_region) = LOWER($${n}) OR LOWER(o.location_city) = LOWER($${n}))`;
       }
-      const m = await db.query(`SELECT o.id, o.title, o.location_city, o.deadline FROM opportunities o WHERE ${where} ORDER BY o.created_at DESC LIMIT ${MAX_PER_DIGEST}`, params);
+      const m = await db.query(`SELECT o.id, o.title, o.location_city, o.deadline FROM opportunities o WHERE ${where} ORDER BY o.created_at ASC LIMIT ${MAX_PER_DIGEST}`, params); // 7 nov. : les plus anciennes d'abord, le reste au passage suivant (rien n'est sauté)
       if (m.rows.length === 0) { out.skipped++; continue; }
       const site = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
       const items = m.rows.map((o: any) =>

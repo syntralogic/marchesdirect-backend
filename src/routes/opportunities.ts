@@ -407,7 +407,7 @@ async function hasLocationTable(): Promise<boolean> {
   locationTableCheckedAt = Date.now(); return locationTableReady;
 }
 
-async function searchOpportunities(req: Request, res: Response) {
+export async function searchOpportunities(req: Request, res: Response) {
   const t0 = Date.now();
   try {
     const countOnly = (req as any).__countOnly === true;
