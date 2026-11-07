@@ -15,19 +15,19 @@ describe('ranked list candidates', () => {
     expect(q.params).toEqual([['climatisation'], '92']);
     expect(q.listSql).toContain("o.status = 'active'");
     expect(q.listSql).toContain('o.deadline >= NOW()');
-    expect(q.listSql).toContain('t.slug = ANY($1::text[])');
+    expect(q.listSql).toContain('o.trade_id = ANY(ARRAY(SELECT id FROM trades WHERE slug = ANY($1::text[])');
     expect(q.listSql).toContain('= $2');
     expect(q.listSql).toContain('LIMIT 40');
   });
   it('widening to France drops the department only, never the trade', () => {
     const q = buildCandidatesQuery({ tradeSlugs: ['plomberie'], department: null });
     expect(q.params[0]).toEqual(['plomberie']);
-    expect(q.listSql).toContain('t.slug = ANY($1::text[])');
+    expect(q.listSql).toContain('o.trade_id = ANY(ARRAY(SELECT id FROM trades WHERE slug = ANY($1::text[])');
     expect(q.listSql).not.toContain('location_department) ~');
   });
   it('7 nov. : un intitulé sans métier classé entre par mot-clé, et le département de l’entreprise passe en tête', () => {
     const q = buildCandidatesQuery({ tradeSlugs: ['cvc'], department: null, preferDepartment: '92' });
-    expect(q.listSql).toContain("(o.trade_id IS NULL OR COALESCE(ot.code, '') <> 'public_procurement') AND lower(unaccent(o.title)) ~ $2");
+    expect(q.listSql).toContain("(o.trade_id IS NULL OR COALESCE(ot.code, '') <> 'public_procurement') AND immutable_unaccent(o.title) ~* $2");
     expect(String(q.params[1])).toContain('climatisation');
     expect(String(q.params[1])).toContain('pompes? a chaleur');
     expect(q.params[q.params.length - 1]).toBe('92');

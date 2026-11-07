@@ -1,4 +1,4 @@
-import { buildCandidatesQuery, normaliseZone } from '../services/rankedListService';
+import { buildCandidatesQuery, normaliseZone, setUnaccentFn } from '../services/rankedListService';
 import { generateSlots, freeSlotDays, isOfferedSlot, formatSlotFr, APPOINTMENT_TZ } from '../utils/appointmentSlots';
 import { cached, createBoundedCache } from '../utils/ttlCache';
 import { createHash } from 'crypto';
@@ -1845,8 +1845,10 @@ router.get('/ranked/candidates', optionalAuth, async (req: AuthRequest, res: Res
       return res.json({ items: [], total: 0, zone: department || 'france', reason: 'trade_unknown' });
     }
     const v2 = String(req.query.loc || '') === '2' && await hasLocationTable();
+    setUnaccentFn((await hasSearchVectorColumn()) ? 'immutable_unaccent' : 'unaccent');
     const q = buildCandidatesQuery({ tradeSlugs: trades, department, preferDepartment: homeDepartment, limit: Number(req.query.limit) || 40, v2 });
     // 7 nov. (Hedi : 2-3 s d'attente) : même métiers, même zone → même liste pendant 2 min, sans relancer les deux requêtes.
+    const t0 = Date.now();
     const [list, count] = await cached(`ranked:${trades.slice().sort().join(',')}:${department || ''}:${homeDepartment || ''}:${q.params.length}:${v2}:${Number(req.query.limit) || 40}`, 120_000,
       () => Promise.all([db.query(q.listSql, q.params), db.query(q.countSql, q.params)]));
     // 7 nov. : le lot qui concerne l'entreprise (« lot plomberie-sanitaire ») ; le texte de l'annonce n'est pas renvoyé.
@@ -1854,7 +1856,7 @@ router.get('/ranked/candidates', optionalAuth, async (req: AuthRequest, res: Res
     const items = list.rows.map((r: any) => { const { description, ...rest } = r;
       return { ...rest, matched_lot: pickRelevantLot(description, (lot) => extractTradeSlugs(lot).some((s: string) => wanted.has(s))) }; });
     res.json({
-      items, total: count.rows[0]?.n || 0, zone: department || 'france', homeDepartment,
+      items, total: count.rows[0]?.n || 0, zone: department || 'france', homeDepartment, timing: { ms: Date.now() - t0 },
       company: { name: profile?.name || null, activity: profile?.activityText || null, city: profile?.city || null, department: profile?.department || null },
     });
   } catch (err: any) {

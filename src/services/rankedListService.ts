@@ -25,6 +25,10 @@ export function normaliseZone(zone: unknown): string | null {
 // sans métier classé entre aussi quand son intitulé contient un mot du métier (« climatisation », « pompe à chaleur »…),
 // avec les mêmes exclusions que la recherche (ex. « chauffage urbain » pour un chauffagiste) : avant, 6 000 annonces
 // ouvertes sans métier reconnu étaient invisibles pour une entreprise identifiée.
+// immutable_unaccent existe dès que search_vector existe (même condition que routes/opportunities.ts) ; on le suppose
+// présent en production, et buildCandidatesQuery accepte `ua: 'unaccent'` pour une base sans ce wrapper.
+let UA = 'immutable_unaccent';
+export function setUnaccentFn(fn: 'immutable_unaccent' | 'unaccent') { UA = fn; }
 export function buildCandidatesQuery(opts: { tradeSlugs: string[]; department: string | null; preferDepartment?: string | null; limit?: number; v2?: boolean }) {
   const limit = Math.min(Math.max(Math.floor(opts.limit || 40), 1), MAX_CANDIDATES);
   const params: unknown[] = [opts.tradeSlugs];
@@ -42,13 +46,18 @@ export function buildCandidatesQuery(opts: { tradeSlugs: string[]; department: s
   if (opts.v2) { where[2] = `(${DL} IS NULL OR ${DL} >= NOW())`; where.push('NOT COALESCE(o.is_cancelled, false)'); }
   const kws = keywordsForSlugs(opts.tradeSlugs).map(k => k.toLowerCase()).filter(k => k.length >= 3);
   const extra = opts.tradeSlugs.flatMap(s => EXTRA_TITLE_PATTERNS[s] || []);
-  let tradeCond = `t.slug = ANY($1::text[])`;
+  // Le métier par son identifiant (index opportunities_trade) plutôt que par la jointure trades : avec le OU mot-clé
+  // ci-dessous, PostgreSQL peut alors combiner les deux index (BitmapOr) au lieu de lire toute la table.
+  let tradeCond = `o.trade_id = ANY(ARRAY(SELECT id FROM trades WHERE slug = ANY($1::text[])))`;
   if (kws.length) {
     params.push(`\\y(${[...kws.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), ...extra].join('|')})\\y`);
     // Annonce privée ou de sous-traitance : son intitulé décrit le besoin précis, il suffit qu'il cite le métier.
-    let kw = `((o.trade_id IS NULL OR COALESCE(ot.code, '') <> 'public_procurement') AND lower(unaccent(o.title)) ~ $${params.length})`;
+    // 7 nov. (Hedi : « la liste n'a pas pu être chargée ») : depuis le passage à toute la France, cette expression
+    // parcourt toute la table. unaccent() est STABLE, donc jamais indexée ; immutable_unaccent() correspond à l'index
+    // trigramme opportunities_title_unaccent_trgm (config/database.ts), qui accélère aussi les expressions régulières.
+    let kw = `((o.trade_id IS NULL OR COALESCE(ot.code, '') <> 'public_procurement') AND ${UA}(o.title) ~* $${params.length})`;
     for (const ex of [...new Set(kws.map(k => domainMismatchExclusionSqlPattern(k)).filter((x): x is string => !!x))]) {
-      params.push(ex); kw = `(${kw} AND unaccent(o.title) !~* $${params.length})`;
+      params.push(ex); kw = `(${kw} AND ${UA}(o.title) !~* $${params.length})`;
     }
     tradeCond = `(${tradeCond} OR ${kw})`;
   }
