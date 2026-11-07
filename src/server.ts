@@ -664,6 +664,7 @@ const startServer = async () => {
         // 7 nov. : texte de recherche normalisé stocké (colonne search_text) : la vérification après index ne relit plus
         // titre + description à chaque recherche.
         ['searchTextJob', 'startSearchTextJob', 'search_text (texte normalisé des annonces)'],
+        ['searchWarmJob', 'startSearchWarmJob', 'préchauffage des recherches courantes'],
         // 1 Oct: one-off prod repairs (buyer-name locations, BOAMP lots) that
         // used to need a shell - Render free has none, so they run by themselves.
         ['legacyRepairJob', 'startLegacyRepairJob', 'legacy data repair'],

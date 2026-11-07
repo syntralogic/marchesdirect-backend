@@ -370,8 +370,10 @@ const searchListCache = createBoundedCache(300);
 const searchCountCache = createBoundedCache(500);
 // 7 nov. : 10 et 15 min (au lieu de 2 et 5) — les annonces ne changent qu'à chaque import (toutes les 6 h et plus) ;
 // l'état ouvert/fermé de chaque fiche reste recalculé à l'ouverture de la fiche.
-const SEARCH_LIST_TTL_MS = 10 * 60 * 1000;
-const SEARCH_COUNT_TTL_MS = 15 * 60 * 1000;
+// 7 nov. (campagne pub : rafales de visiteurs) : les listes vivent 20 min et sont préchauffées toutes les 15 min
+// (jobs/searchWarmJob.ts) pour les métiers courants : un visiteur qui tape « plomberie » ne touche pas la base.
+const SEARCH_LIST_TTL_MS = 20 * 60 * 1000;
+const SEARCH_COUNT_TTL_MS = 25 * 60 * 1000;
 const searchCacheKey = (...parts: unknown[]): string =>
   createHash('sha1').update(JSON.stringify(parts)).digest('hex');
 // Tiny reference tables (trades): no need to hit the DB on every search.
@@ -1451,6 +1453,14 @@ export async function countOpportunitiesFor(query: Record<string, string>): Prom
   await searchOpportunities({ query: { ...query, limit: '1' }, __countOnly: true } as any, fakeRes);
   if (failed) throw new Error('countOpportunitiesFor failed');
   return total;
+}
+
+/** Préchauffage (jobs/searchWarmJob.ts) : exécute une recherche comme le ferait le site, pour remplir les caches. */
+export async function warmSearch(query: Record<string, string>): Promise<boolean> {
+  let ok = true;
+  const fakeRes: any = { statusCode: 200, status(code: number) { this.statusCode = code; return this; }, set() { return this; }, json() { if (this.statusCode >= 400) ok = false; return this; } };
+  await searchOpportunities({ query, headers: {}, ip: '127.0.0.1', get() { return ''; } } as any, fakeRes);
+  return ok;
 }
 
 // Best-effort link to the original notice on its source platform, extracted
