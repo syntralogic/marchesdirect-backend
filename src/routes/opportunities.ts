@@ -1222,8 +1222,13 @@ async function searchOpportunities(req: Request, res: Response) {
     // wording otherwise, so this works on the whole corpus from the first
     // request instead of waiting on a reclassification backlog. Rows the
     // fallback still can't read stay NULL and are still not demoted.
+    // 7 nov. (recherche à 16 s en production, plan mesuré) : la lecture heuristique (np.nature, ~15 expressions
+    // régulières sur titre + description) était recalculée dans le tri pour CHAQUE annonce candidate (15 000 pour
+    // « plomberie »), à chaque recherche, et surtout pour les annonces que l'heuristique ne sait de toute façon pas lire
+    // (elles restent NULL après le passage du traitement de fond). Le traitement de fond (natureBackfillJob) remplit la
+    // colonne en quelques minutes après l'import : le tri lit la colonne, le filtre « nature » garde la lecture complète.
     if (tradeMatchExpr && !wantsTimeLeft) {
-      orderClause = `(CASE WHEN np.nature IN ('fournitures', 'etudes') THEN 1 ELSE 0 END) ASC, ${orderClause}`;
+      orderClause = `(CASE WHEN o.nature_prestation IN ('fournitures', 'etudes') THEN 1 ELSE 0 END) ASC, ${orderClause}`;
     }
     // R02: when the visitor picked a nature explicitly, rows that actually
     // match it come first and the unknown-nature rows kept by the filter
