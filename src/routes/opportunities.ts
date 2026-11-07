@@ -1379,7 +1379,7 @@ async function searchOpportunities(req: Request, res: Response) {
     const tPrep = Date.now(); let tList = 0; let tCount = 0;
     // 7 nov. (recherche à 5-16 s en production, diagnostic temporaire) : ?explain=1 renvoie le plan d'exécution mesuré
     // de la requête de liste au lieu des résultats. Lecture seule ; à retirer une fois la recherche accélérée.
-    if (String(req.query.explain || '') === '1' && !countOnly) {
+    if (['1', '2'].includes(String(req.query.explain || '')) && !countOnly) {
       const listSqlForPlan = `SELECT o.id FROM opportunities o
          ${SCOPE_JOINS}
          ${natureInWhere || natureInOrder ? naturePrestationLateral('o') : ''}
@@ -1387,7 +1387,7 @@ async function searchOpportunities(req: Request, res: Response) {
          ORDER BY ${orderClause}
          LIMIT $${limitIdx} OFFSET $${offsetIdx}`;
       try {
-        const plan = await db.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) ${listSqlForPlan}`, listParams);
+        const plan = await db.query(`EXPLAIN (${String(req.query.explain) === '2' ? 'FORMAT TEXT' : 'ANALYZE, BUFFERS, FORMAT TEXT'}) ${listSqlForPlan}`, listParams);
         return res.json({ plan: plan.rows.map((r: any) => r['QUERY PLAN']), where: whereClause, order: orderClause });
       } catch (e: any) { return res.json({ error: String(e?.message || e).slice(0, 500), sql: listSqlForPlan.slice(0, 3000), params: listParams.map(p => Array.isArray(p) ? p : String(p).slice(0, 200)) }); }
     }
