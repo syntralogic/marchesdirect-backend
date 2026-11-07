@@ -1965,12 +1965,13 @@ router.get('/ranked/candidates', optionalAuth, async (req: AuthRequest, res: Res
     setUnaccentFn((await hasSearchVectorColumn()) ? 'immutable_unaccent' : 'unaccent');
     const journey = typeof req.query.journey === 'string' && req.query.journey !== 'all' ? req.query.journey : null;
     const limit = Number(req.query.limit) || 40;
-    const q = buildCandidatesQuery({ tradeSlugs: trades, department, preferDepartment: homeDepartment, limit, v2, journey });
+    const offset = Number(req.query.offset) || 0;
+    const q = buildCandidatesQuery({ tradeSlugs: trades, department, preferDepartment: homeDepartment, limit, offset, v2, journey });
     // Répartition par type calculée sans la pastille de type, pour que chaque pastille affiche son vrai total.
     const qAll = journey ? buildCandidatesQuery({ tradeSlugs: trades, department, preferDepartment: homeDepartment, limit, v2 }) : q;
     // 7 nov. (Hedi : 2-3 s d'attente) : même métiers, même zone → même liste pendant 2 min, sans relancer les deux requêtes.
     const t0 = Date.now();
-    const [list, count] = await cached(`ranked:${trades.slice().sort().join(',')}:${department || ''}:${homeDepartment || ''}:${q.params.length}:${v2}:${limit}:${journey || ''}`, 120_000,
+    const [list, count] = await cached(`ranked:${trades.slice().sort().join(',')}:${department || ''}:${homeDepartment || ''}:${q.params.length}:${v2}:${limit}:${offset}:${journey || ''}`, 120_000,
       () => Promise.all([db.query(q.listSql, q.params), db.query(qAll.countSql, qAll.countParams)]));
     // 7 nov. : le lot qui concerne l'entreprise (« lot plomberie-sanitaire ») ; le texte de l'annonce n'est pas renvoyé.
     const wanted = new Set(trades);

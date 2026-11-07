@@ -29,8 +29,9 @@ export function normaliseZone(zone: unknown): string | null {
 // présent en production, et buildCandidatesQuery accepte `ua: 'unaccent'` pour une base sans ce wrapper.
 let UA = 'immutable_unaccent';
 export function setUnaccentFn(fn: 'immutable_unaccent' | 'unaccent') { UA = fn; }
-export function buildCandidatesQuery(opts: { tradeSlugs: string[]; department: string | null; preferDepartment?: string | null; limit?: number; v2?: boolean; journey?: string | null }) {
+export function buildCandidatesQuery(opts: { tradeSlugs: string[]; department: string | null; preferDepartment?: string | null; limit?: number; offset?: number; v2?: boolean; journey?: string | null }) {
   const limit = Math.min(Math.max(Math.floor(opts.limit || 40), 1), MAX_CANDIDATES);
+  const offset = Math.min(Math.max(Math.floor(opts.offset || 0), 0), 10000); // 7 nov. : « Voir plus » sans plafond, par pages de 40
   const params: unknown[] = [opts.tradeSlugs];
   const where = [
     `o.deleted_at IS NULL`,
@@ -88,7 +89,7 @@ export function buildCandidatesQuery(opts: { tradeSlugs: string[]; department: s
       l.exec_status, l.exec_communes, l.exec_departments, l.exec_text, l.buyer_city, l.buyer_department, l.publication_departments` : '';
   return {
     listSql: `SELECT o.id, o.title, o.description, ot.code AS journey, o.buyer_name, o.location_city, o.location_department, o.deadline${v2Cols}
-      ${base} ORDER BY ${pref ? `${pref} ASC, ` : ''}${opts.v2 ? `(${DL} IS NULL) ASC, ${lvl} ASC, ` : ''}${DL} ASC NULLS LAST, o.publication_date DESC NULLS LAST${opts.v2 ? ', o.id ASC' : ''} LIMIT ${limit}`,
+      ${base} ORDER BY ${pref ? `${pref} ASC, ` : ''}${opts.v2 ? `(${DL} IS NULL) ASC, ${lvl} ASC, ` : ''}${DL} ASC NULLS LAST, o.publication_date DESC NULLS LAST${opts.v2 ? ', o.id ASC' : ''} LIMIT ${limit}${offset ? ` OFFSET ${offset}` : ''}`,
     // 7 nov. : répartition par type sur tout le résultat (les pastilles « Marchés publics / Appels d'offres privés /
     // Sous-traitance » comptaient seulement les 40 annonces chargées).
     countSql: `SELECT COUNT(*)::int AS n, COUNT(*) FILTER (WHERE ot.code = 'public_procurement')::int AS n_public,
