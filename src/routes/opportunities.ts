@@ -13,7 +13,7 @@ import { reconcileOfficialFields } from '../utils/officialFields';
 import type { RefineAnswers } from '../services/matchEngine';
 import { naturePrestationLateral, NATURE_VALUES } from '../utils/naturePrestation';
 import { buildSourceAnalysisSections } from '../utils/sourceAnalysisSections';
-import { tokenizeQuery, tsqueryAlternatives, isTradeWord, matchTermsOf, domainMismatchExclusionSqlPattern, lotMatchSqlPattern, canMatchInsideTitle } from '../utils/searchQuery';
+import { tokenizeQuery, tsqueryAlternatives, isTradeWord, isPrestationWord, matchTermsOf, domainMismatchExclusionSqlPattern, lotMatchSqlPattern, canMatchInsideTitle } from '../utils/searchQuery';
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts, generateOpportunityAnalysisSections } from '../services/aiService';
 import { recordComputedScore } from '../services/journeyScoreService';
 import { ingestOpportunityDocuments } from '../services/documentIngestionService';
@@ -530,6 +530,10 @@ async function searchOpportunities(req: Request, res: Response) {
     // reviewing against live data this environment can't query), but a
     // real, general lever rather than a per-word patch.
     let tradeMatchExpr: string | null = null;
+    // 7 nov. : score « proximité de la demande » (nombre de mots demandés présents dans le titre), familles de métier.
+    let familyBoostExpr: string | null = null;
+    // focus=… (suggestion « Nettoyage de toiture » → q=nettoyage&focus=toiture) : ne filtre pas, fait remonter.
+    const focusWords = tokenizeQuery(String((req.query as any).focus || '')).slice(0, 4);
     // R02: which natures the visitor explicitly asked for, so the ranking
     // below can put exact matches ahead of the unknown-nature rows that the
     // filter deliberately keeps (see the `nature` filter for why).
@@ -772,6 +776,14 @@ async function searchOpportunities(req: Request, res: Response) {
       // results at all.
       const qWords = tokenizeQuery(q);
       if (qWords.length > 0) {
+        // 7 nov. (recherche par famille de métier) : les mots-métiers (« nettoyage chauffage ») sont des familles
+        // cherchées en OU, jamais exigées ensemble dans la même annonce ; les mots de prestation (« installation »,
+        // « entretien », « dépannage »…) ne filtrent pas, ils font remonter les annonces qui les contiennent ; les autres
+        // mots (« école », « hôpital ») restent exigés. Une suggestion n'est donc jamais plus restrictive que le mot seul.
+        const tradeWords = qWords.filter(w => isTradeWord(w));
+        const familyMode = tradeWords.length > 0;
+        const prestationWords = familyMode ? qWords.filter(w => !isTradeWord(w) && isPrestationWord(w)) : [];
+        const otherWords = familyMode ? qWords.filter(w => !isTradeWord(w) && !isPrestationWord(w)) : [];
         const tsIdx = idx++;
         tsRankParamIdx = tsIdx;
         // Pushed immediately (matching tsIdx's allocation order, the first
@@ -783,7 +795,7 @@ async function searchOpportunities(req: Request, res: Response) {
               const alts = tsqueryAlternatives(w);
               return alts.length > 1 ? `(${alts.join(' | ')})` : alts[0];
             })
-            .join(' & ')
+            .join(familyMode ? ' | ' : ' & ')
         );
         // BUG (found 20 Sep, client report "har search mein 'Failed to search
         // opportunities' / zero results, only for keyword searches - geo and
@@ -802,7 +814,7 @@ async function searchOpportunities(req: Request, res: Response) {
         conditions.push(`$${tsIdx}::text IS NOT NULL`);
         const tradeConds: string[] = [];
         const wordConds: string[] = [];
-        for (const w of qWords) {
+        for (const w of familyMode ? tradeWords : qWords) {
           const { wordCondition, tradeCond } = buildWordCondition(w);
           tradeConds.push(tradeCond);
           wordConds.push(wordCondition);
@@ -811,7 +823,24 @@ async function searchOpportunities(req: Request, res: Response) {
         // métier name ("électricité"), also accept every notice the métier
         // filter accepts (AI-classified trade, ai_matched_trades, trade keywords),
         // so typing it and picking it from the list give the same results.
-        let wordCondition = wordConds.join(' AND ');
+        let wordCondition = familyMode ? `(${wordConds.join(' OR ')})` : wordConds.join(' AND ');
+        if (familyMode) {
+          for (const w of otherWords) {
+            const { wordCondition: c } = buildWordCondition(w);
+            wordCondition = `${wordCondition} AND ${c}`;
+          }
+          const boostWords = [...(tradeWords.length > 1 ? tradeWords : []), ...prestationWords, ...focusWords];
+          if (boostWords.length > 0) {
+            const pieces: string[] = [];
+            for (const w of boostWords) {
+              const alts = matchTermsOf(w).map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+              const bIdx = idx++;
+              params.push(`(${alts.join('|')})`);
+              pieces.push(`(CASE WHEN ${ua}(o.title) ~* $${bIdx} THEN 1 ELSE 0 END)`);
+            }
+            familyBoostExpr = `(${pieces.join(' + ')})`;
+          }
+        }
         const exactTrade = await cached(`trades:exact:${qWords.join(' ')}`, TRADE_LOOKUP_TTL_MS, () => db.query(
           `SELECT id FROM trades WHERE unaccent(lower(name)) = unaccent(lower($1))`,
           [qWords.join(' ')]
@@ -825,7 +854,7 @@ async function searchOpportunities(req: Request, res: Response) {
           }
         }
         conditions.push(wordCondition);
-        tradeMatchExpr = tradeConds.join(' AND ');
+        tradeMatchExpr = tradeConds.join(familyMode ? ' OR ' : ' AND ');
         // Same 42P18 "could not determine data type" issue as the tsIdx fix
         // above, but for every word's nameIdx/matchedIdx (trade-name /
         // ai_matched_trades) params: tradeMatchExpr is only referenced in the
@@ -1216,6 +1245,7 @@ async function searchOpportunities(req: Request, res: Response) {
     if (tradeMatchExpr) {
       orderClause = `(CASE WHEN (${tradeMatchExpr}) THEN 0 ELSE 1 END) ASC, ${orderClause}`;
     }
+    if (familyBoostExpr) orderClause = `${familyBoostExpr} DESC, ${orderClause}`;
     // R04 (deeper fix, needs nature_prestation - see database.ts migration
     // and classifyOpportunity in aiService.ts): audit's own examples are
     // all métier/trade searches (chauffage, peinture, plomberie,
