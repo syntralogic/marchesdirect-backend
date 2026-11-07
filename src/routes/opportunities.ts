@@ -1858,6 +1858,12 @@ router.get('/ranked/diag', async (req: Request, res: Response) => {
     const c = await db.query('SELECT company_data FROM company_lookup_cache WHERE siren = $1', [siret.slice(0, 9)]);
     const d = c.rows[0]?.company_data; steps.cache = { ms: t() - t0, found: !!d, ape: d?.ape || null, postal: d?.postal || null };
     if (!d) return res.json({ steps });
+    if (String(req.query.size || '') === '1') {
+      const sz = await db.query(`SELECT pg_size_pretty(pg_database_size(current_database())) AS db, pg_size_pretty(pg_total_relation_size('opportunities')) AS opportunities,
+        pg_size_pretty(pg_relation_size('opportunities')) AS heap, (SELECT pg_size_pretty(SUM(pg_relation_size(indexrelid))) FROM pg_index WHERE indrelid = 'opportunities'::regclass) AS indexes,
+        (SELECT COUNT(*)::int FROM opportunities) AS rows, (SELECT ROUND(AVG(length(COALESCE(title,'') || ' ' || COALESCE(description,''))))::int FROM opportunities) AS avg_text`);
+      steps.size = sz.rows[0];
+    }
     const trades = tradeSlugsForCompany(d.ape, d.activity); steps.trades = trades;
     const department = normaliseZone(req.query.zone); const home = normaliseZone(String(d.postal || '').slice(0, 2));
     t0 = t(); const v2 = String(req.query.loc || '2') === '2' && await hasLocationTable(); steps.locationTable = { ms: t() - t0, v2 };
