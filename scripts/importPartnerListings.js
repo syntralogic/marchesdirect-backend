@@ -77,7 +77,8 @@ function description(l) {
   if (l.conditions) p.push(`Conditions et réponse : ${l.conditions}`);
   if (l.criteria) p.push(`Critères : ${l.criteria}`);
   if (l.status) p.push(`Statut : ${l.status}`);
-  if (!l.deadline) p.push('Date limite et disponibilité à confirmer : l’annonce n’indique pas de date limite. Nous vérifions qu’elle est toujours d’actualité avant toute mise en relation.');
+  if (l.archived) p.unshift('Consultation archivée : cette consultation n’accepte plus de candidatures. Des consultations similaires sont ouvertes : Elena vous les présente.');
+  else if (!l.deadline) p.push('Date limite et disponibilité à confirmer : l’annonce n’indique pas de date limite. Nous vérifions qu’elle est toujours d’actualité avant toute mise en relation.');
   p.push(`Pour préparer votre réponse (conseils généraux, à adapter à l’annonce) :\n${guidance(l)}`);
   return p.join('\n\n');
 }
@@ -112,7 +113,7 @@ function readLots() {
   return fs.readdirSync(DIR).filter(f => /\.json(\.gz)?$/.test(f)).sort().map(f => {
     const buf = fs.readFileSync(path.join(DIR, f));
     const data = JSON.parse((f.endsWith('.gz') ? zlib.gunzipSync(buf) : buf).toString('utf8'));
-    return { lot: data.lot || f.replace(/\.json(\.gz)?$/, ''), file: data.file || f, withdrawn: data.withdrawn || null, listings: (data.listings || []).filter(l => l.reference && l.title) };
+    return { lot: data.lot || f.replace(/\.json(\.gz)?$/, ''), file: data.file || f, withdrawn: data.withdrawn || null, archive: data.archive || null, listings: (data.listings || []).filter(l => l.reference && l.title) };
   });
 }
 
@@ -134,7 +135,8 @@ async function main() {
   const acts = await pool.query(`UPDATE opportunities SET deleted_at = NOW(), updated_at = NOW()
      WHERE source_id = $1 AND raw_data->>'nature' LIKE 'Acte de sous-traitance%' AND deleted_at IS NULL RETURNING id`, [sourceId]);
   if (acts.rowCount) console.log(`[partenaires] ${acts.rowCount} actes de sous-traitance déjà attribués masqués`);
-  for (const { lot, file, listings, withdrawn } of lots) {
+  for (const { lot, file, listings, withdrawn, archive } of lots) {
+    const status = archive ? 'expired' : 'active'; // lot « archive » : consultations passées, publiées comme clôturées
     // Lot retiré (ex. annonces dont la date est introuvable et dont des vérifications montrent qu'elles sont passées) :
     // masqué partout (deleted_at), réversible — réimporter le lot sans « withdrawn » le rétablit.
     if (withdrawn) {
@@ -149,7 +151,7 @@ async function main() {
       const h = hash(l);
       const ex = existing.get(l.reference);
       const retryGeo = ex && !ex.dept && l.city && !l.department; // ville pas encore géolocalisée (réseau) : on réessaie
-      if (ex && ex.hash === h && ex.status === 'active' && !retryGeo) { unchanged++; continue; }
+      if (ex && ex.hash === h && ex.status === status && !retryGeo) { unchanged++; continue; }
       let city = l.city || null, dept = l.department || null, postal = l.postal || null;
       if (!dept && city) {
         if (ex && ex.dept) { dept = ex.dept; city = ex.city || city; postal = ex.postal || postal; }
@@ -158,7 +160,7 @@ async function main() {
       const typeId = types[l.journey];
       if (!typeId) continue;
       const t = norm(`${l.trade || ''}`); const trade = trades.find(x => t.includes(x.key)) || trades.find(x => norm(l.title).includes(x.key));
-      todo.push({ ref: l.reference, type_id: typeId, trade_id: trade ? trade.id : null, title: l.title.slice(0, 900), description: description(l),
+      todo.push({ status, ref: l.reference, type_id: typeId, trade_id: trade ? trade.id : null, title: l.title.slice(0, 900), description: description({ ...l, archived: !!archive }),
         publication: l.publication || null, deadline: l.deadline || null, value: l.amount || null, city: city ? String(city).slice(0, 200) : null, dept, region: dept ? regions[dept] || null : null,
         raw: { partner_feed: true, lot, file, hash: h, kind: l.kind, nature: l.nature || l.category || null, trade_text: l.trade || null,
                location_text: l.location || null, geo_postal: postal, partner_sources: l.sources || [] },
@@ -173,13 +175,13 @@ async function main() {
           estimated_value, currency, location_city, location_department, location_region, status, ai_classification_status, ai_summary_status,
           dce_documents_status, raw_data)
         SELECT $1, x.ref, x.type_id, x.trade_id, x.title, x.description, COALESCE(x.publication::date, CURRENT_DATE), x.deadline::timestamptz,
-          x.value, 'EUR', x.city, x.dept, x.region, 'active', 'classified', 'not_generated', 'no_documents_found', x.raw
-        FROM jsonb_to_recordset($2::jsonb) AS x(ref text, type_id int, trade_id int, title text, description text, publication text, deadline text,
+          x.value, 'EUR', x.city, x.dept, x.region, x.status, 'classified', 'not_generated', 'no_documents_found', x.raw
+        FROM jsonb_to_recordset($2::jsonb) AS x(status text, ref text, type_id int, trade_id int, title text, description text, publication text, deadline text,
           value numeric, city text, dept text, region text, raw jsonb)
         ON CONFLICT (source_id, source_reference) DO UPDATE SET
           opportunity_type_id = EXCLUDED.opportunity_type_id, trade_id = EXCLUDED.trade_id, title = EXCLUDED.title, description = EXCLUDED.description,
           deadline = EXCLUDED.deadline, estimated_value = EXCLUDED.estimated_value, location_city = EXCLUDED.location_city,
-          location_department = EXCLUDED.location_department, location_region = EXCLUDED.location_region, status = 'active',
+          location_department = EXCLUDED.location_department, location_region = EXCLUDED.location_region, status = EXCLUDED.status,
           raw_data = EXCLUDED.raw_data, deleted_at = NULL, updated_at = NOW()
         RETURNING id, source_reference AS ref, (xmax = 0) AS inserted`, [sourceId, JSON.stringify(chunk)]);
       const ids = new Map(r.rows.map(x => [x.ref, x.id]));
@@ -199,6 +201,7 @@ async function main() {
           deadline_source = EXCLUDED.deadline_source, computed_at = EXCLUDED.computed_at`, [LOCATION_EXTRACTOR_VERSION, JSON.stringify(locs)]);
     }
     const refs = listings.map(l => l.reference);
+    if (archive) { console.log(`[partenaires] lot ${lot} (${file}, archives) : ${inserted} ajoutées, ${updated} mises à jour, ${unchanged} inchangées, ${geocoded} villes géolocalisées`); continue; }
     // Ancien format (premier fichier, sans lot) : les annonces sans lot appartiennent au lot du fichier annonces.json.
     const gone = await pool.query(`UPDATE opportunities SET status = 'expired', updated_at = NOW()
        WHERE source_id = $1 AND status = 'active' AND COALESCE(raw_data->>'lot', 'annonces') = $2 AND NOT (source_reference = ANY($3::text[])) RETURNING id`,
