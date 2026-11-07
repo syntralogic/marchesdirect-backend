@@ -576,6 +576,16 @@ const startServer = async () => {
       });
     }
 
+    // 7 nov. : annonces partenaires (appels d'offres privés et sous-traitance) de data/partenaires/annonces.json,
+    // importées à chaque démarrage (idempotent : rien n'est réécrit si le fichier n'a pas changé).
+    if (process.env.SKIP_PARTNER_IMPORT !== 'true') {
+      const partnerPath = require('path').resolve(process.cwd(), 'scripts', 'importPartnerListings.js');
+      queueBootScript(partnerPath, (err: any, stdout: string, stderr: string) => {
+        if (stdout) logger.info(stdout.trim());
+        if (err) logger.error('[partenaires] import en échec (non bloquant) :', stderr || err.message);
+      });
+    }
+
     if (process.env.SKIP_EDITORIAL_SEED !== 'true') {
       const editorialSeedPath = require('path').resolve(process.cwd(), 'scripts', 'seedEditorialListings.js');
       queueBootScript(editorialSeedPath, (err: any, stdout: string, stderr: string) => {
