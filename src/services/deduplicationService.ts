@@ -161,48 +161,50 @@ export const deduplicateOpportunities = async (): Promise<number> => {
     // wouldn't have helped before; it does now that each run actually
     // advances through the backlog instead of re-scoring the same head of
     // the list.
-    const potentialDuplicates = await db.query(`
-      SELECT 
-        o1.id as id1,
-        o2.id as id2,
-        o1.title,
-        o2.title,
-        similarity(o1.title, o2.title) as title_similarity,
-        similarity(COALESCE(o1.buyer_name, ''), COALESCE(o2.buyer_name, '')) as buyer_similarity,
-        ABS(EXTRACT(EPOCH FROM (o1.deadline - o2.deadline))) as deadline_diff_seconds,
-        o1.estimated_value as value1,
-        o2.estimated_value as value2
-      FROM opportunities o1
-      JOIN opportunities o2 ON 
-        o1.source_id < o2.source_id AND  -- Avoid duplicates
-        o1.id < o2.id AND                 -- Ensure consistent ordering
-        similarity(o1.title, o2.title) > 0.5 AND  -- wide candidate net - final decision is the composite score below
-        (o1.deadline IS NULL OR o2.deadline IS NULL OR ABS(EXTRACT(EPOCH FROM (o1.deadline - o2.deadline))) < 172800) AND  -- within 48h, or either side has no deadline (DECP has none - see collectDecpData)
-        o1.deleted_at IS NULL AND o2.deleted_at IS NULL AND
-        -- BUG (found from repeating "duplicate key" errors in prod logs,
-        -- 12 Sep): was NOT IN ('cancelled', 'expired') only, unlike
-        -- mergeExactDuplicates' grouping query above which already excludes
-        -- 'merged' too. A row just merged (by either pass, in this run or
-        -- a previous one) kept qualifying as a fresh candidate here, so the
-        -- same already-recorded (primary, duplicate) pair got re-attempted
-        -- forever - the resulting unique-constraint violation rolled back
-        -- the whole mergeDuplicates transaction, including the
-        -- status='merged' update, so the row never stopped being a
-        -- candidate. Excluding 'merged' here too breaks that loop.
-        o1.status NOT IN ('cancelled', 'expired', 'merged') AND o2.status NOT IN ('cancelled', 'expired', 'merged')
-      WHERE NOT EXISTS (
-        SELECT 1 FROM opportunity_duplicates 
-        WHERE (primary_opportunity_id = o1.id AND duplicate_opportunity_id = o2.id)
-           OR (primary_opportunity_id = o2.id AND duplicate_opportunity_id = o1.id)
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM opportunity_duplicate_checks
-        WHERE (opportunity_id_1 = o1.id AND opportunity_id_2 = o2.id)
-           OR (opportunity_id_1 = o2.id AND opportunity_id_2 = o1.id)
-      )
-      ORDER BY title_similarity DESC
+    // 8 nov. (erreurs Postgres en production : « canceling statement due to statement timeout » sur cette requête) :
+    // l'ancienne version comparait toute la table à elle-même (176 000 × 176 000 titres avec similarity()). Désormais :
+    // seules les annonces arrivées depuis 7 jours (r) sont comparées, via l'opérateur % qui utilise l'index trigramme
+    // opportunities_title_trgm, et la requête a son propre délai (90 s) sur sa propre connexion : si elle est trop longue,
+    // elle s'arrête seule sans rien bloquer, et la passe suivante reprend.
+    const client = await db.getClient();
+    let potentialDuplicates: { rows: any[] };
+    try {
+      await client.query('BEGIN');
+      await client.query('SET LOCAL statement_timeout = 90000');
+      await client.query('SET LOCAL pg_trgm.similarity_threshold = 0.5');
+      potentialDuplicates = await client.query(`
+      SELECT DISTINCT ON (LEAST(r.id, o.id), GREATEST(r.id, o.id))
+        LEAST(r.id, o.id) AS id1,
+        GREATEST(r.id, o.id) AS id2,
+        similarity(r.title, o.title) AS title_similarity,
+        similarity(COALESCE(r.buyer_name, ''), COALESCE(o.buyer_name, '')) AS buyer_similarity,
+        ABS(EXTRACT(EPOCH FROM (r.deadline - o.deadline))) AS deadline_diff_seconds,
+        r.estimated_value AS value1,
+        o.estimated_value AS value2
+      FROM opportunities r
+      JOIN opportunities o ON
+        o.title % r.title AND
+        o.id <> r.id AND o.source_id <> r.source_id AND
+        (r.deadline IS NULL OR o.deadline IS NULL OR ABS(EXTRACT(EPOCH FROM (r.deadline - o.deadline))) < 172800) AND
+        o.deleted_at IS NULL AND o.status NOT IN ('cancelled', 'expired', 'merged')
+      WHERE r.created_at > NOW() - INTERVAL '7 days'
+        AND r.deleted_at IS NULL AND r.status NOT IN ('cancelled', 'expired', 'merged')
+        AND NOT EXISTS (
+          SELECT 1 FROM opportunity_duplicates
+          WHERE (primary_opportunity_id = r.id AND duplicate_opportunity_id = o.id)
+             OR (primary_opportunity_id = o.id AND duplicate_opportunity_id = r.id))
+        AND NOT EXISTS (
+          SELECT 1 FROM opportunity_duplicate_checks
+          WHERE (opportunity_id_1 = LEAST(r.id, o.id) AND opportunity_id_2 = GREATEST(r.id, o.id))
+             OR (opportunity_id_1 = GREATEST(r.id, o.id) AND opportunity_id_2 = LEAST(r.id, o.id)))
+      ORDER BY LEAST(r.id, o.id), GREATEST(r.id, o.id), title_similarity DESC
       LIMIT 2000
     `);
+      await client.query('COMMIT');
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch { /* connexion rendue */ }
+      throw err;
+    } finally { client.release(); }
 
     logger.info(`Found ${potentialDuplicates.rows.length} potential duplicates`);
 

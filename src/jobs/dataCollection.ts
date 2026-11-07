@@ -52,13 +52,15 @@ export const startScheduledJobs = () => {
   // immediately on boot (in the background, doesn't block server startup)
   // so every deploy/restart guarantees at least one real attempt,
   // regardless of the cron schedule or host sleep behavior.
-  logger.info('[Job] Running an immediate data collection pass on boot (see comment above for why)...');
-  trackJob('dataCollection:boot', () =>
+  // 8 nov. : la passe de démarrage attend 4 min, le temps que l'ancienne instance Render soit arrêtée (sinon deux
+  // imports + deux dédoublonnages en parallèle : verrous en conflit et clés en double dans les journaux).
+  logger.info('[Job] Data collection pass scheduled 4 min after boot (see comment above for why)...');
+  setTimeout(() => trackJob('dataCollection:boot', () =>
     scheduleDataCollection(true)
       .then(() => deduplicateOpportunities())
       .then((merged) => logger.info(`[Job] Boot-time data collection pass complete, ${merged} duplicate pairs merged`))
       .catch((err) => logger.error('[Job] Boot-time data collection pass failed (non-fatal, next cron tick or restart will retry):', err))
-  );
+  ), 4 * 60 * 1000).unref();
 
   logger.info('✅ Data collection job scheduled (every 2h). AI classification runs separately - see jobs/aiProcessing.ts.');
 };

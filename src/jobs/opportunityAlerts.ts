@@ -131,8 +131,8 @@ export const startOpportunityAlerts = () => {
   // right on boot - can never create a duplicate alert. Fire one combined
   // pass immediately so companies aren't waiting on a cron tick that might
   // not happen for a while on a host that spins down between requests.
-  logger.info('[Job] Running an immediate opportunity alert sweep on boot...');
-  trackJob('opportunityAlerts:boot', runAlertSweepsOnce).catch((err) => logger.error('[Job] Boot-time alert sweep failed (non-fatal):', err));
+  logger.info('[Job] Opportunity alert sweep scheduled 5 min after boot (8 nov. : plus de doublon avec l\'instance précédente)...');
+  setTimeout(() => { trackJob('opportunityAlerts:boot', runAlertSweepsOnce).catch((err) => logger.error('[Job] Boot-time alert sweep failed (non-fatal):', err)); }, 5 * 60 * 1000).unref();
 
   logger.info('✅ Opportunity alert jobs scheduled (new matches every 30min, deadline reminders daily at 08:00)');
 };
