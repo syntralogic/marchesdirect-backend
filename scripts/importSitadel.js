@@ -111,6 +111,10 @@ async function main() {
   await pool.query(`CREATE INDEX IF NOT EXISTS construction_projects_commune ON construction_projects (commune_insee, authorized_at DESC)`);
   await pool.query(`CREATE TABLE IF NOT EXISTS construction_imports (id SERIAL PRIMARY KEY, started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       finished_at TIMESTAMPTZ, rows_upserted INT, error TEXT)`);
+  // Reprise (7 nov.) : chaque couple fichier × département déjà importé depuis moins de 72 h est sauté, pour qu'un
+  // redémarrage du serveur ne relance pas tout depuis le début. L'avancement est visible dans /api/chantiers/stats.
+  await pool.query(`CREATE TABLE IF NOT EXISTS construction_import_parts (kind TEXT NOT NULL, department TEXT NOT NULL,
+      done_at TIMESTAMPTZ, rows INT, error TEXT, PRIMARY KEY (kind, department))`);
   const last = (await pool.query(`SELECT finished_at FROM construction_imports WHERE finished_at IS NOT NULL AND error IS NULL ORDER BY finished_at DESC LIMIT 1`)).rows[0];
   if (last && Date.now() - new Date(last.finished_at).getTime() < MIN_HOURS_BETWEEN_RUNS * 3600000 && process.env.SITADEL_FORCE !== 'true') {
     console.log(`[chantiers] import récent (${new Date(last.finished_at).toISOString()}) : rien à faire`);
@@ -123,9 +127,13 @@ async function main() {
   let total = 0; const errors = [];
   const NAMES = await communeNames();
   console.log(`[chantiers] ${NAMES.size} noms de communes officiels chargés`);
+  const doneParts = new Set(process.env.SITADEL_FORCE === 'true' ? [] : (await pool.query(
+    `SELECT kind || ':' || department AS k FROM construction_import_parts WHERE done_at > NOW() - INTERVAL '72 hours' AND error IS NULL`)).rows.map(r => r.k));
   for (const f of FILES) {
     const cols = [...COLS, f.surf].join(',');
     for (const dep of DEPTS) {
+      if (doneParts.has(`${f.kind}:${dep}`)) continue;
+      const before = total;
       const url = `${BASE}/${f.rid}/csv?DEP_CODE=eq:${dep}&DATE_REELLE_AUTORISATION=gte:${sinceIso}&columns=${cols}`;
       try {
         const res = await fetchRetry(url);
@@ -157,7 +165,13 @@ async function main() {
           if (batch.length >= 500) await flush();
         }
         await flush();
-      } catch (e) { errors.push(`${f.kind} ${dep}: ${e.message}`); }
+        await pool.query(`INSERT INTO construction_import_parts (kind, department, done_at, rows, error) VALUES ($1, $2, NOW(), $3, NULL)
+          ON CONFLICT (kind, department) DO UPDATE SET done_at = NOW(), rows = EXCLUDED.rows, error = NULL`, [f.kind, dep, total - before]);
+      } catch (e) {
+        errors.push(`${f.kind} ${dep}: ${e.message}`);
+        await pool.query(`INSERT INTO construction_import_parts (kind, department, done_at, rows, error) VALUES ($1, $2, NOW(), $3, $4)
+          ON CONFLICT (kind, department) DO UPDATE SET done_at = NOW(), rows = EXCLUDED.rows, error = EXCLUDED.error`, [f.kind, dep, total - before, String(e.message || e).slice(0, 300)]).catch(() => {});
+      }
       await new Promise(r => setTimeout(r, 300)); // politesse envers l'API publique
     }
   }
