@@ -82,11 +82,14 @@ const isoDate = v => (/^\d{4}-\d{2}-\d{2}$/.test(v || '') ? v : null);
 
 // Noms officiels des communes (code INSEE → nom accentué, API Découpage administratif). La localité saisie dans
 // Sitadel est souvent sans accent ou mal encodée (« ATAMPES-SUR-MARNE », « CHATEAU THIERRY ») : elle ne sert qu'en secours.
+let CENTRES = []; let POS = new Map();
 async function communeNames() {
   try {
-    const r = await fetch('https://geo.api.gouv.fr/communes?fields=code,nom&format=json&type=commune-actuelle,arrondissement-municipal', { signal: AbortSignal.timeout(60000) });
+    const r = await fetch('https://geo.api.gouv.fr/communes?fields=code,nom,centre&format=json&type=commune-actuelle,arrondissement-municipal', { signal: AbortSignal.timeout(60000) });
     if (!r.ok) return new Map();
-    return new Map((await r.json()).map(c => [c.code, c.nom]));
+    const list = await r.json();
+    CENTRES = list.filter(c => c.centre?.coordinates).map(c => ({ code: c.code, lng: c.centre.coordinates[0], lat: c.centre.coordinates[1] }));
+    return new Map(list.map(c => [c.code, c.nom]));
   } catch { return new Map(); }
 }
 
@@ -117,6 +120,17 @@ async function main() {
   // redémarrage du serveur ne relance pas tout depuis le début. L'avancement est visible dans /api/chantiers/stats.
   await pool.query(`CREATE TABLE IF NOT EXISTS construction_import_parts (kind TEXT NOT NULL, department TEXT NOT NULL,
       done_at TIMESTAMPTZ, rows INT, error TEXT, PRIMARY KEY (kind, department))`);
+  await pool.query(`ALTER TABLE construction_projects ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION, ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS construction_projects_latlng ON construction_projects (lat, lng)`);
+  const missing = (await pool.query(`SELECT COUNT(*)::int AS n FROM construction_projects WHERE lat IS NULL`)).rows[0].n;
+  if (missing > 0) {
+    await communeNames();
+    for (let i = 0; i < CENTRES.length; i += 5000) {
+      await pool.query(`UPDATE construction_projects p SET lat = x.lat, lng = x.lng FROM jsonb_to_recordset($1::jsonb) AS x(code text, lat float8, lng float8)
+        WHERE p.commune_insee = x.code AND p.lat IS NULL`, [JSON.stringify(CENTRES.slice(i, i + 5000))]);
+    }
+    console.log(`[chantiers] positions des communes : ${CENTRES.length} centres, ${missing} chantiers à placer`);
+  }
   const last = (await pool.query(`SELECT finished_at FROM construction_imports WHERE finished_at IS NOT NULL AND error IS NULL ORDER BY finished_at DESC LIMIT 1`)).rows[0];
   if (last && Date.now() - new Date(last.finished_at).getTime() < MIN_HOURS_BETWEEN_RUNS * 3600000 && process.env.SITADEL_FORCE !== 'true') {
     console.log(`[chantiers] import récent (${new Date(last.finished_at).toISOString()}) : rien à faire`);
@@ -128,6 +142,7 @@ async function main() {
   const maxDate = new Date().toISOString().slice(0, 10); // une autorisation datée de demain est une erreur de saisie
   let total = 0; const errors = [];
   const NAMES = await communeNames();
+  POS = new Map(CENTRES.map(c => [c.code, c]));
   console.log(`[chantiers] ${NAMES.size} noms de communes officiels chargés`);
   const doneParts = new Set(process.env.SITADEL_FORCE === 'true' ? [] : (await pool.query(
     `SELECT kind || ':' || department AS k FROM construction_import_parts WHERE done_at > NOW() - INTERVAL '72 hours' AND error IS NULL`)).rows.map(r => r.k));
@@ -145,17 +160,18 @@ async function main() {
           // Un même permis peut figurer sur plusieurs lignes (modificatifs) : on garde la dernière, sinon PostgreSQL refuse
           // le paquet entier (« ON CONFLICT DO UPDATE command cannot affect row a second time »).
           batch = [...new Map(batch.map(b => [b.id, b])).values()];
+          const pos = POS; for (const b of batch) { const c = pos.get(b.commune_insee); if (c) { b.lat = c.lat; b.lng = c.lng; } }
           await pool.query(`
             INSERT INTO construction_projects AS p (id, kind, type_dau, etat, authorized_at, started_at, department, commune_insee, commune, postal_code,
-              nature, destination, floor_area, dwellings, land_area, pool, applicant_name, applicant_siren, imported_at)
+              nature, destination, floor_area, dwellings, land_area, pool, applicant_name, applicant_siren, lat, lng, imported_at)
             SELECT x.id, x.kind, x.type_dau, x.etat, x.authorized_at::date, x.started_at::date, x.department, x.commune_insee, x.commune, x.postal_code,
-              x.nature, x.destination, x.floor_area, x.dwellings, x.land_area, x.pool, x.applicant_name, x.applicant_siren, NOW()
+              x.nature, x.destination, x.floor_area, x.dwellings, x.land_area, x.pool, x.applicant_name, x.applicant_siren, x.lat, x.lng, NOW()
             FROM jsonb_to_recordset($1::jsonb) AS x(id text, kind text, type_dau text, etat int, authorized_at text, started_at text, department text,
               commune_insee text, commune text, postal_code text, nature text, destination int, floor_area numeric, dwellings int, land_area numeric,
-              pool boolean, applicant_name text, applicant_siren text)
+              pool boolean, applicant_name text, applicant_siren text, lat float8, lng float8)
             ON CONFLICT (id) DO UPDATE SET etat = EXCLUDED.etat, started_at = EXCLUDED.started_at, commune = EXCLUDED.commune,
               floor_area = EXCLUDED.floor_area, dwellings = EXCLUDED.dwellings, applicant_name = EXCLUDED.applicant_name,
-              applicant_siren = EXCLUDED.applicant_siren, imported_at = NOW()`, [JSON.stringify(batch)]);
+              applicant_siren = EXCLUDED.applicant_siren, lat = COALESCE(EXCLUDED.lat, p.lat), lng = COALESCE(EXCLUDED.lng, p.lng), imported_at = NOW()`, [JSON.stringify(batch)]);
           total += batch.length; batch = [];
         };
         for await (const r of csvRows(Readable.fromWeb(res.body))) {

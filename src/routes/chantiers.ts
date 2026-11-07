@@ -29,6 +29,16 @@ function categoryOf(r: any): string {
   const d = Number(r.destination);
   return [3, 4, 2].includes(d) ? 'bureaux_commerces' : [5, 6, 8].includes(d) ? 'industrie' : d === 7 ? 'agricole' : d === 9 ? 'public' : 'autres';
 }
+// Repères INDICATIFS (7 nov.) : jamais un calendrier. Hypothèse affichée telle quelle : le gros œuvre suit l'ouverture du
+// chantier, le second œuvre vient ensuite. Si l'ouverture est déclarée, on part de cette date ; sinon de l'autorisation.
+function phasesOf(r: any): { from: string; text: string } | null {
+  const start = r.started_at || r.authorized_at; if (!start) return null;
+  const big = r.kind === 'logements' ? Number(r.dwellings) >= 10 : Number(r.floor_area) >= 1000;
+  return { from: r.started_at ? 'ouverture déclarée' : 'autorisation',
+    text: r.started_at
+      ? `Chantier ouvert : le gros œuvre est en cours ou proche ; le second œuvre (plomberie, électricité, chauffage, plâtrerie, menuiseries) suit, en général plusieurs mois après${big ? ', davantage sur une opération de cette taille' : ''}.`
+      : `Autorisé, ouverture non encore déclarée : le démarrage intervient souvent dans les mois qui suivent (le permis est valable 3 ans). Le second œuvre vient après le gros œuvre${big ? ', souvent plus d’un an après le démarrage' : ''}.` };
+}
 function publicView(r: any) {
   const cat = categoryOf(r);
   const what = r.kind === 'logements'
@@ -44,6 +54,8 @@ function publicView(r: any) {
     departmentName: DEPARTMENTS[r.department] || null, floorArea: r.floor_area != null ? Number(r.floor_area) : null,
     dwellings: r.dwellings != null ? Number(r.dwellings) : null, landArea: r.land_area != null ? Number(r.land_area) : null, pool: !!r.pool,
     applicant: r.applicant_siren || r.applicant_name ? 'Société' : 'Particulier ou demandeur non identifié',
+    distanceKm: r.distance_km != null ? Math.round(Number(r.distance_km)) : null,
+    phases: phasesOf(r),
   };
 }
 
@@ -58,15 +70,25 @@ router.get('/', async (req: Request, res: Response) => {
     const cat = String(req.query.category || '');
     const nature = String(req.query.nature || '');
     const page = Math.max(1, Math.min(200, Number(req.query.page) || 1)); const size = 30;
+    // Radar (7 nov.) : autour d'un point (l'entreprise ou le téléphone), rayon 5 à 150 km, position = centre de la commune.
+    const lat = Number(req.query.lat), lng = Number(req.query.lng), radius = Math.max(5, Math.min(150, Number(req.query.radius) || 30));
+    const near = Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
     const where: string[] = [`COALESCE(etat, 2) <> 4 AND authorized_at <= CURRENT_DATE`]; const params: any[] = [];
     if (dep && DEPARTMENTS[dep]) { params.push(dep); where.push(`department = $${params.length}`); }
     if (CATEGORIES[cat]) where.push(`(${CATEGORIES[cat].where})`);
     if (nature === 'neuf' || nature === 'existant') { params.push(nature); where.push(`nature = $${params.length}`); }
+    let dist = 'NULL::float8';
+    if (near) {
+      const dLat = radius / 111, dLng = radius / (111 * Math.max(0.2, Math.cos(lat * Math.PI / 180)));
+      params.push(lat, lng); const a = params.length - 1, b = params.length;
+      dist = `(6371 * acos(LEAST(1, GREATEST(-1, cos(radians($${a})) * cos(radians(lat)) * cos(radians(lng) - radians($${b})) + sin(radians($${a})) * sin(radians(lat))))))`;
+      where.push(`lat BETWEEN ${lat - dLat} AND ${lat + dLat} AND lng BETWEEN ${lng - dLng} AND ${lng + dLng}`, `${dist} <= ${radius}`);
+    }
     const w = where.join(' AND ');
     const key = `chantiers:${w}:${params.join('|')}:${page}`;
     const out = await cached(key, 600_000, async () => {
       const [rows, count] = await Promise.all([
-        db.query(`SELECT * FROM construction_projects WHERE ${w} ORDER BY authorized_at DESC, id LIMIT ${size} OFFSET ${(page - 1) * size}`, params),
+        db.query(`SELECT *, ${dist} AS distance_km FROM construction_projects WHERE ${w} ORDER BY authorized_at DESC, id LIMIT ${size} OFFSET ${(page - 1) * size}`, params),
         db.query(`SELECT COUNT(*)::int AS n FROM construction_projects WHERE ${w}`, params),
       ]);
       const total = count.rows[0]?.n || 0;
