@@ -312,6 +312,7 @@ app.use('/api/trades', require('./routes/trades').default);
 app.use('/api/brands', require('./routes/brandsPublic').default);
 app.use('/api/seo-pages', require('./routes/seoPagesPublic').default);
 app.use('/api/seo/v2', require('./routes/seoV2').default);
+app.use('/api/chantiers', require('./routes/chantiers').default);
 app.use('/api/subscriptions', require('./routes/subscriptions').default);
 // Browsing subcontracting needs is public (mirrors opportunities); creating
 // one requires an account, enforced per-route inside the router itself.
@@ -588,6 +589,19 @@ const startServer = async () => {
           if (err) logger.error('[partenaires] import en échec (non bloquant) :', stderr || err.message);
         });
       }, 45000).unref();
+    }
+
+    // 7 nov. : « Chantiers à venir » (permis de construire autorisés, base Sitadel du SDES). 90 s après le démarrage
+    // puis toutes les 24 h ; le script ne refait l'import que si le dernier date de plus de 72 h.
+    if (process.env.SKIP_SITADEL_IMPORT !== 'true') {
+      const sitadelPath = require('path').resolve(process.cwd(), 'scripts', 'importSitadel.js');
+      const runSitadel = () => require('child_process').execFile('node', [sitadelPath], { timeout: 60 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 },
+        (err: any, stdout: string, stderr: string) => {
+          if (stdout) logger.info(stdout.trim());
+          if (err) logger.error('[chantiers] import en échec (non bloquant) :', stderr || err.message);
+        });
+      setTimeout(runSitadel, 90000).unref();
+      setInterval(runSitadel, 24 * 3600 * 1000).unref();
     }
 
     if (process.env.SKIP_EDITORIAL_SEED !== 'true') {
