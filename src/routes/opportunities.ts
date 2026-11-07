@@ -1357,6 +1357,42 @@ async function searchOpportunities(req: Request, res: Response) {
       return result.rows;
     };
 
+    // 7 nov. (rafales de visiteurs) : liste et décompte par état en UNE requête. Le périmètre (WHERE, jointures) est
+    // calculé une seule fois : row_number() sur l'ordre de la liste donne la page, les COUNT FILTER donnent la
+    // répartition ouvert / à vérifier / clôturé et lieu d'exécution / acheteur seul / non relu, sur exactement les
+    // mêmes lignes. Même contrat de réponse que la liste + le décompte séparés ; moitié moins de travail pour la base.
+    type Breakdown = { open: number; verify: number; closed: number; execution: number; buyerOnly: number; notYetRead: number };
+    const canMerge = v2 && !countOnly && !natureInOrder;
+    const loadMerged = async (): Promise<{ rows: any[]; breakdown: Breakdown | null }> => {
+      const stateRankExpr = v2Select.replace(/^,/, '').split(' AS state_rank')[0];
+      const lvlExpr = locLevelExpr || '0';
+      const sql = `WITH m AS (
+         SELECT o.id, ${stateRankExpr} AS sr, ${lvlExpr} AS lv, row_number() OVER (ORDER BY ${orderClause}) AS ord
+         FROM opportunities o
+         ${SCOPE_JOINS}
+         ${natureInWhere ? naturePrestationLateral('o') : ''}
+         WHERE ${whereClause}),
+       agg AS (SELECT COUNT(*) FILTER (WHERE sr = 0)::int AS b_open, COUNT(*) FILTER (WHERE sr = 1)::int AS b_verify, COUNT(*) FILTER (WHERE sr >= 2)::int AS b_closed,
+         COUNT(*) FILTER (WHERE lv = 0)::int AS b_exec, COUNT(*) FILTER (WHERE lv = 1)::int AS b_buyer, COUNT(*) FILTER (WHERE lv >= 2)::int AS b_notread FROM m),
+       pg AS (SELECT id, ord FROM m WHERE ord > $${offsetIdx} AND ord <= $${offsetIdx} + $${limitIdx})
+       SELECT ${LIST_COLUMNS}, agg.b_open, agg.b_verify, agg.b_closed, agg.b_exec, agg.b_buyer, agg.b_notread
+       FROM pg
+       JOIN opportunities o ON o.id = pg.id
+       ${SCOPE_JOINS}
+       ${naturePrestationLateral('o')}
+       CROSS JOIN agg
+       ORDER BY pg.ord`;
+      const result = await timedQuery(sql, listParams);
+      const first = result.rows[0];
+      const breakdown: Breakdown | null = first ? { open: first.b_open, verify: first.b_verify, closed: first.b_closed, execution: first.b_exec, buyerOnly: first.b_buyer, notYetRead: first.b_notread } : null;
+      for (const row of result.rows) {
+        try { reconcileOfficialFields(row); } catch (err) { logger.warn(`reconcileOfficialFields failed for opportunity ${row.id} in a list response: ${err instanceof Error ? err.message : err}`); }
+        delete row.ai_extracted_facts; delete row.raw_data;
+        delete row.b_open; delete row.b_verify; delete row.b_closed; delete row.b_exec; delete row.b_buyer; delete row.b_notread;
+      }
+      return { rows: result.rows, breakdown };
+    };
+
     const loadCount = async (): Promise<number> => {
       // Same joins and WHERE as the list; the nature LATERAL is only joined
       // when the WHERE reads it (explicit nature filter).
@@ -1390,10 +1426,25 @@ async function searchOpportunities(req: Request, res: Response) {
     // 7 nov. : temps de chaque étape renvoyé dans la réponse (champ `timing`, ignoré par le site) et dans l'en-tête
     // Server-Timing, pour savoir où part le temps d'une recherche en production.
     const tPrep = Date.now(); let tList = 0; let tCount = 0;
-    const [rows, breakdown] = await Promise.all([
-      countOnly ? Promise.resolve([] as any[]) : searchListCache(searchCacheKey('list', whereClause, orderClause, listParams), SEARCH_LIST_TTL_MS, loadList).then(r => { tList = Date.now() - tPrep; return r; }),
-      v2 ? (searchCountCache(searchCacheKey('breakdown', whereClause, params), SEARCH_COUNT_TTL_MS, loadBreakdown as any).then(r => { tCount = Date.now() - tPrep; return r; }).catch(() => null) as Promise<any>) : Promise.resolve(null),
-    ]);
+    const listKey = searchCacheKey('list', whereClause, orderClause, listParams);
+    const breakdownKey = searchCacheKey('breakdown', whereClause, params);
+    let rows: any[]; let breakdown: Breakdown | null;
+    if (canMerge) {
+      let merged: Breakdown | null | undefined;
+      rows = await searchListCache(listKey, SEARCH_LIST_TTL_MS, async () => { const m = await loadMerged(); merged = m.breakdown; return m.rows; });
+      tList = Date.now() - tPrep;
+      // Page vide au-delà de la fin (« Voir plus ») : la répartition vient du cache de la première page, ou du décompte seul.
+      breakdown = merged != null
+        ? await searchCountCache(breakdownKey, SEARCH_COUNT_TTL_MS, async () => merged as Breakdown)
+        : (rows.length === 0 && offset === 0 ? { open: 0, verify: 0, closed: 0, execution: 0, buyerOnly: 0, notYetRead: 0 }
+          : await (searchCountCache(breakdownKey, SEARCH_COUNT_TTL_MS, loadBreakdown as any).catch(() => null) as Promise<Breakdown | null>));
+      tCount = Date.now() - tPrep;
+    } else {
+      [rows, breakdown] = await Promise.all([
+        countOnly ? Promise.resolve([] as any[]) : searchListCache(listKey, SEARCH_LIST_TTL_MS, loadList).then(r => { tList = Date.now() - tPrep; return r; }),
+        v2 ? (searchCountCache(breakdownKey, SEARCH_COUNT_TTL_MS, loadBreakdown as any).then(r => { tCount = Date.now() - tPrep; return r; }).catch(() => null) as Promise<any>) : Promise.resolve(null),
+      ]);
+    }
     const total: number = breakdown ? breakdown.open + breakdown.verify + breakdown.closed : await searchCountCache(searchCacheKey('count', whereClause, params), SEARCH_COUNT_TTL_MS, loadCount);
     res.set('Server-Timing', `prep;dur=${tPrep - t0}, list;dur=${tList}, count;dur=${tCount}, total;dur=${Date.now() - t0}`);
 
