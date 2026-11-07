@@ -659,6 +659,9 @@ const startServer = async () => {
         // natureBackfillJob.ts) so the request path reads a plain column
         // instead - same shape as locationRegionBackfillJob just above.
         ['natureBackfillJob', 'startNatureBackfillJob', 'nature-de-la-prestation backfill'],
+        // 7 nov. : texte de recherche normalisé stocké (colonne search_text) : la vérification après index ne relit plus
+        // titre + description à chaque recherche.
+        ['searchTextJob', 'startSearchTextJob', 'search_text (texte normalisé des annonces)'],
         // 1 Oct: one-off prod repairs (buyer-name locations, BOAMP lots) that
         // used to need a shell - Render free has none, so they run by themselves.
         ['legacyRepairJob', 'startLegacyRepairJob', 'legacy data repair'],
