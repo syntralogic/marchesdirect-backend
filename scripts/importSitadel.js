@@ -125,7 +125,7 @@ async function main() {
   const run = (await pool.query(`INSERT INTO construction_imports DEFAULT VALUES RETURNING id`)).rows[0].id;
   const since = new Date(); since.setMonth(since.getMonth() - MONTHS_BACK);
   const sinceIso = since.toISOString().slice(0, 10);
-  const maxDate = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10); // dates futures erronées écartées
+  const maxDate = new Date().toISOString().slice(0, 10); // une autorisation datée de demain est une erreur de saisie
   let total = 0; const errors = [];
   const NAMES = await communeNames();
   console.log(`[chantiers] ${NAMES.size} noms de communes officiels chargés`);

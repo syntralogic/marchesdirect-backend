@@ -58,7 +58,7 @@ router.get('/', async (req: Request, res: Response) => {
     const cat = String(req.query.category || '');
     const nature = String(req.query.nature || '');
     const page = Math.max(1, Math.min(200, Number(req.query.page) || 1)); const size = 30;
-    const where: string[] = [`COALESCE(etat, 2) <> 4`]; const params: any[] = [];
+    const where: string[] = [`COALESCE(etat, 2) <> 4 AND authorized_at <= CURRENT_DATE`]; const params: any[] = [];
     if (dep && DEPARTMENTS[dep]) { params.push(dep); where.push(`department = $${params.length}`); }
     if (CATEGORIES[cat]) where.push(`(${CATEGORIES[cat].where})`);
     if (nature === 'neuf' || nature === 'existant') { params.push(nature); where.push(`nature = $${params.length}`); }
@@ -83,9 +83,9 @@ router.get('/stats', async (_req: Request, res: Response) => {
     if (!(await hasTable())) return res.json({ total: 0, departments: [], categories: [], lastImport: null, source: SOURCE });
     const out = await cached('chantiers:stats', 300_000, async () => {
       const [d, c, t, l] = await Promise.all([
-        db.query(`SELECT department, COUNT(*)::int AS n FROM construction_projects WHERE COALESCE(etat, 2) <> 4 GROUP BY 1 ORDER BY 2 DESC`),
-        db.query(`SELECT kind, destination, (COALESCE(dwellings, 1) >= 2) AS multi, COUNT(*)::int AS n FROM construction_projects WHERE COALESCE(etat, 2) <> 4 GROUP BY 1, 2, 3`),
-        db.query(`SELECT COUNT(*)::int AS n, COUNT(*) FILTER (WHERE authorized_at >= CURRENT_DATE - 30)::int AS last30, MAX(authorized_at) AS latest FROM construction_projects WHERE COALESCE(etat, 2) <> 4`),
+        db.query(`SELECT department, COUNT(*)::int AS n FROM construction_projects WHERE COALESCE(etat, 2) <> 4 AND authorized_at <= CURRENT_DATE GROUP BY 1 ORDER BY 2 DESC`),
+        db.query(`SELECT kind, destination, (COALESCE(dwellings, 1) >= 2) AS multi, COUNT(*)::int AS n FROM construction_projects WHERE COALESCE(etat, 2) <> 4 AND authorized_at <= CURRENT_DATE GROUP BY 1, 2, 3`),
+        db.query(`SELECT COUNT(*)::int AS n, COUNT(*) FILTER (WHERE authorized_at >= CURRENT_DATE - 30)::int AS last30, MAX(authorized_at) AS latest FROM construction_projects WHERE COALESCE(etat, 2) <> 4 AND authorized_at <= CURRENT_DATE`),
         db.query(`SELECT finished_at FROM construction_imports WHERE finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1`).catch(() => ({ rows: [] as any[] })),
       ]);
       // Avancement de l'import en cours (couples fichier × département traités, erreurs) : sans donnée personnelle.
@@ -113,7 +113,7 @@ router.get('/:id', async (req: Request, res: Response) => {
     if (!(await hasTable())) return res.status(404).json({ error: 'not_found' });
     const r = (await db.query(`SELECT * FROM construction_projects WHERE id = $1`, [String(req.params.id)])).rows[0];
     if (!r) return res.status(404).json({ error: 'not_found' });
-    const near = await db.query(`SELECT * FROM construction_projects WHERE department = $1 AND id <> $2 AND COALESCE(etat, 2) <> 4
+    const near = await db.query(`SELECT * FROM construction_projects WHERE department = $1 AND id <> $2 AND COALESCE(etat, 2) <> 4 AND authorized_at <= CURRENT_DATE
       ORDER BY (commune_insee = $3) DESC, authorized_at DESC LIMIT 6`, [r.department, r.id, r.commune_insee]);
     res.set('Cache-Control', 'public, max-age=3600');
     res.json({ ...publicView(r), nearby: near.rows.map(publicView), source: SOURCE });
