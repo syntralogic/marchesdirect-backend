@@ -89,5 +89,9 @@ export function buildCandidatesQuery(opts: { tradeSlugs: string[]; department: s
       ${base} ORDER BY ${pref ? `${pref} ASC, ` : ''}${opts.v2 ? `(${DL} IS NULL) ASC, ${lvl} ASC, ` : ''}${DL} ASC NULLS LAST, o.publication_date DESC NULLS LAST${opts.v2 ? ', o.id ASC' : ''} LIMIT ${limit}`,
     countSql: `SELECT COUNT(*)::int AS n ${base}`,
     params,
+    // 7 nov. : le département préféré n'apparaît que dans l'ORDER BY de la liste ; le comptage ne doit pas le recevoir
+    // (« bind message supplies 4 parameters, but prepared statement requires 3 » : c'était l'échec de « Vos marchés »
+    // en production depuis le passage à toute la France).
+    countParams: prefIdx ? params.slice(0, prefIdx - 1) : params,
   };
 }

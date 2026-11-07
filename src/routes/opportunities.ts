@@ -1839,8 +1839,8 @@ router.get('/ranked/diag', async (req: Request, res: Response) => {
     const q = buildCandidatesQuery({ tradeSlugs: trades, department, preferDepartment: home, limit: 40, v2 });
     steps.params = q.params.map(p => Array.isArray(p) ? p : String(p).slice(0, 200));
     t0 = t(); try { const l = await db.query(q.listSql, q.params); steps.list = { ms: t() - t0, rows: l.rows.length }; } catch (e: any) { steps.list = { ms: t() - t0, error: String(e?.message || e).slice(0, 500) }; }
-    t0 = t(); try { const n = await db.query(q.countSql, q.params); steps.count = { ms: t() - t0, n: n.rows[0]?.n }; } catch (e: any) { steps.count = { ms: t() - t0, error: String(e?.message || e).slice(0, 500) }; }
-    if (String(req.query.explain || '') === '1') { try { const ex = await db.query('EXPLAIN ' + q.countSql, q.params); steps.plan = ex.rows.map((r: any) => r['QUERY PLAN']); } catch (e: any) { steps.plan = String(e?.message || e).slice(0, 500); } }
+    t0 = t(); try { const n = await db.query(q.countSql, q.countParams); steps.count = { ms: t() - t0, n: n.rows[0]?.n }; } catch (e: any) { steps.count = { ms: t() - t0, error: String(e?.message || e).slice(0, 500) }; }
+    if (String(req.query.explain || '') === '1') { try { const ex = await db.query('EXPLAIN ' + q.countSql, q.countParams); steps.plan = ex.rows.map((r: any) => r['QUERY PLAN']); } catch (e: any) { steps.plan = String(e?.message || e).slice(0, 500); } }
     res.json({ steps });
   } catch (e: any) { res.status(500).json({ steps, error: String(e?.message || e).slice(0, 500) }); }
 });
@@ -1876,7 +1876,7 @@ router.get('/ranked/candidates', optionalAuth, async (req: AuthRequest, res: Res
     // 7 nov. (Hedi : 2-3 s d'attente) : même métiers, même zone → même liste pendant 2 min, sans relancer les deux requêtes.
     const t0 = Date.now();
     const [list, count] = await cached(`ranked:${trades.slice().sort().join(',')}:${department || ''}:${homeDepartment || ''}:${q.params.length}:${v2}:${Number(req.query.limit) || 40}`, 120_000,
-      () => Promise.all([db.query(q.listSql, q.params), db.query(q.countSql, q.params)]));
+      () => Promise.all([db.query(q.listSql, q.params), db.query(q.countSql, q.countParams)]));
     // 7 nov. : le lot qui concerne l'entreprise (« lot plomberie-sanitaire ») ; le texte de l'annonce n'est pas renvoyé.
     const wanted = new Set(trades);
     const items = list.rows.map((r: any) => { const { description, ...rest } = r;
