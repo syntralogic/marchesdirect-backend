@@ -84,6 +84,10 @@ export async function runSearchTextJob(): Promise<void> {
       await new Promise(r => setTimeout(r, 200)); // laisse respirer les requêtes des visiteurs
     }
     await buildIndex();
+    // Statistiques de la nouvelle colonne pour le planificateur (sans ANALYZE, il n'a aucune estimation et peut
+    // préférer une lecture complète à l'index). Rapide, non bloquant.
+    await db.query('ANALYZE opportunities');
+    logger.info('[search_text] prêt : colonne complète, index valide, statistiques à jour');
   } catch (err) { logger.error('[search_text] échec (reprise au prochain démarrage) :', err); }
   finally { running = false; }
 }
