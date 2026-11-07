@@ -8,7 +8,7 @@ import { body, validationResult } from 'express-validator';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { reconcileOfficialFields } from '../utils/officialFields';
-import type { RefineAnswers } from '../services/matchEngine';
+import { tradeSlugsForCompany, type RefineAnswers } from '../services/matchEngine';
 import { naturePrestationLateral, NATURE_VALUES } from '../utils/naturePrestation';
 import { buildSourceAnalysisSections } from '../utils/sourceAnalysisSections';
 import { tokenizeQuery, tsqueryAlternatives, isTradeWord, matchTermsOf, domainMismatchExclusionSqlPattern, lotMatchSqlPattern, canMatchInsideTitle } from '../utils/searchQuery';
@@ -1817,6 +1817,32 @@ router.get('/appointment-slots', async (_req: Request, res: Response) => {
     logger.error('appointment-slots error:', err);
     res.status(500).json({ error: 'Impossible de charger les créneaux.' });
   }
+});
+
+// GET /api/opportunities/ranked/diag?siret=… — diagnostic temporaire (7 nov.) : rejoue la liste « Vos marchés » pour une
+// entreprise à partir du cache d'identification, et renvoie durées et erreur de chaque étape. Aucune donnée personnelle
+// (l'entreprise est une personne morale déjà publique), aucune écriture. À retirer une fois le délai dépassé compris.
+router.get('/ranked/diag', async (req: Request, res: Response) => {
+  const siret = typeof req.query.siret === 'string' && /^\d{14}$/.test(req.query.siret) ? req.query.siret : null;
+  if (!siret) return res.status(400).json({ error: 'siret' });
+  const steps: Record<string, unknown> = {}; const t = () => Date.now();
+  try {
+    let t0 = t();
+    const c = await db.query('SELECT company_data FROM company_lookup_cache WHERE siren = $1', [siret.slice(0, 9)]);
+    const d = c.rows[0]?.company_data; steps.cache = { ms: t() - t0, found: !!d, ape: d?.ape || null, postal: d?.postal || null };
+    if (!d) return res.json({ steps });
+    const trades = tradeSlugsForCompany(d.ape, d.activity); steps.trades = trades;
+    const department = normaliseZone(req.query.zone); const home = normaliseZone(String(d.postal || '').slice(0, 2));
+    t0 = t(); const v2 = String(req.query.loc || '2') === '2' && await hasLocationTable(); steps.locationTable = { ms: t() - t0, v2 };
+    t0 = t(); const sv = await hasSearchVectorColumn(); steps.searchVector = { ms: t() - t0, sv };
+    setUnaccentFn(sv ? 'immutable_unaccent' : 'unaccent');
+    const q = buildCandidatesQuery({ tradeSlugs: trades, department, preferDepartment: home, limit: 40, v2 });
+    steps.params = q.params.map(p => Array.isArray(p) ? p : String(p).slice(0, 200));
+    t0 = t(); try { const l = await db.query(q.listSql, q.params); steps.list = { ms: t() - t0, rows: l.rows.length }; } catch (e: any) { steps.list = { ms: t() - t0, error: String(e?.message || e).slice(0, 500) }; }
+    t0 = t(); try { const n = await db.query(q.countSql, q.params); steps.count = { ms: t() - t0, n: n.rows[0]?.n }; } catch (e: any) { steps.count = { ms: t() - t0, error: String(e?.message || e).slice(0, 500) }; }
+    if (String(req.query.explain || '') === '1') { try { const ex = await db.query('EXPLAIN ' + q.countSql, q.params); steps.plan = ex.rows.map((r: any) => r['QUERY PLAN']); } catch (e: any) { steps.plan = String(e?.message || e).slice(0, 500); } }
+    res.json({ steps });
+  } catch (e: any) { res.status(500).json({ steps, error: String(e?.message || e).slice(0, 500) }); }
 });
 
 // GET /api/opportunities/ranked/candidates - écran 2 « Vos marchés »: markets of the identified company's trade and zone,
