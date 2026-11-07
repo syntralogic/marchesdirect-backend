@@ -43,6 +43,10 @@ async function ensureLocationSchemaNow(): Promise<void> {
   await db.query(`ALTER TABLE opportunity_locations ADD COLUMN IF NOT EXISTS notice_nature TEXT`);
   await db.query(`ALTER TABLE opportunity_locations ADD COLUMN IF NOT EXISTS supersedes TEXT[] NOT NULL DEFAULT '{}'`);
   await db.query(`CREATE INDEX IF NOT EXISTS opportunity_locations_supersedes_idx ON opportunity_locations USING GIN (supersedes)`);
+  // 7 nov. (recherche lente) : le filtre département lit ces colonnes ; sans index, lecture complète à chaque recherche.
+  await db.query(`CREATE INDEX IF NOT EXISTS opportunity_locations_exec_departments_idx ON opportunity_locations USING GIN (exec_departments)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS opportunity_locations_buyer_department_idx ON opportunity_locations (buyer_department)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS opportunity_locations_notice_deadline_idx ON opportunity_locations (notice_deadline)`);
 }
 
 export async function processLocationBatch(limit = 250): Promise<number> {
