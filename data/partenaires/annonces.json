@@ -1,0 +1,574 @@
+{
+ "file": "03037fff-20_annonces_internet_prives_sous_traitance_copie.docx",
+ "parsedAt": "2026-11-07T09:39:15Z",
+ "listings": [
+  {
+   "reference": "MD-4BFE6E7409",
+   "journey": "tender",
+   "kind": "consultation",
+   "title": "Extension et réaménagement d’un établissement pour personnes âgées",
+   "trade": "Bâtiment et installations techniques",
+   "category": "Appel d’offres privé",
+   "city": "Le Quillio",
+   "department": "22",
+   "location": "Le Quillio — Côtes-d’Armor (22)",
+   "status": "Échéance à venir dans l’avis consulté.",
+   "publication": "2026-10-16",
+   "deadline": "2026-11-20T16:00:00Z",
+   "deadlineText": "20 novembre 2026 à 17 h",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "40 mois ; début prévisionnel en mars 2027, trois phases.",
+   "need": "Une association consulte des entreprises pour agrandir et réaménager un EHPAD. La consultation comprend 23 lots distincts.",
+   "scope": "Terrassement, paysage, désamiantage, gros œuvre, charpente, couverture, étanchéité, menuiserie, peinture, nettoyage, équipements et installations techniques.",
+   "conditions": "Visite et variantes selon le règlement. Dépôt électronique sur la plateforme indiquée dans l’avis.",
+   "criteria": "Technique 60 % ; prix 40 %.",
+   "sources": [
+    {
+     "label": "Avis original",
+     "url": "https://marches.medialex.fr/restapi/avis/pdf/70cf03a65721bd26ed226bb542b1306fe3ce93082ac3e45f854dcadff9e5e4bcc88abe4bf735ebd5"
+    },
+    {
+     "label": "Page de consultation",
+     "url": "https://demat.centraledesmarches.com/7086234"
+    }
+   ]
+  },
+  {
+   "reference": "MD-681C9E3BF9",
+   "journey": "tender",
+   "kind": "consultation",
+   "title": "Solution de paie et administration du personnel",
+   "trade": "Logiciels et services informatiques",
+   "category": "Appel d’offres privé",
+   "city": null,
+   "department": "33",
+   "location": "Gironde (33)",
+   "status": "Échéance à venir dans l’avis consulté.",
+   "publication": "2026-10-01",
+   "deadline": "2026-11-09T11:00:00Z",
+   "deadlineText": "9 novembre 2026 à 12 h",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "Non communiqué dans la page consultée.",
+   "need": "Consultation pour un logiciel de gestion des ressources humaines, couvrant la paie et l’administration du personnel. La référence de consultation est PA048-26.",
+   "scope": "Périmètre fonctionnel détaillé dans le cahier des charges et ses annexes. L’avis public ne chiffre pas les effectifs ni le nombre de licences.",
+   "conditions": "Consulter le dossier et les questions-réponses actualisées sur la plateforme. Les conditions de candidature ne sont pas détaillées dans l’aperçu.",
+   "criteria": "Non communiqué dans la page consultée.",
+   "sources": [
+    {
+     "label": "Consultation officielle",
+     "url": "https://demat-ampa.fr/entreprise/consultation/610950?code=&echanges=&orgAcronyme=s6e"
+    },
+    {
+     "label": "Avis relayé",
+     "url": "https://tandao.fr/appels-d-offres/marche-prive-logiciel-paie-gestion-administration-personnel-gironde-ea418cee0325443281bc48caba1542cf"
+    }
+   ]
+  },
+  {
+   "reference": "MD-B0A43A15FE",
+   "journey": "tender",
+   "kind": "consultation",
+   "title": "Remplacement d’un monte-malades dans un établissement hospitalier",
+   "trade": "Ascenseurs et second œuvre",
+   "category": "Appel d’offres privé",
+   "city": "Bry-sur-Marne",
+   "department": "94",
+   "location": "Bry-sur-Marne — Val-de-Marne (94)",
+   "status": "Échéance à venir dans l’avis consulté.",
+   "publication": "2026-10-29",
+   "deadline": "2026-12-04T11:00:00Z",
+   "deadlineText": "4 décembre 2026 à 12 h",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "4 mois à partir de la notification ; démarrage prévisionnel le 1er avril 2027.",
+   "need": "Un hôpital privé à but non lucratif prévoit le remplacement complet d’un appareil de transport des patients, avec les adaptations de second œuvre associées.",
+   "scope": "Fourniture et travaux nécessaires au remplacement ; caractéristiques et implantation précisées au CCTP.",
+   "conditions": "Visite obligatoire annoncée le 10 ou le 12 novembre 2026 à 14 h. Pièces de candidature à vérifier dans le règlement.",
+   "criteria": "Définis dans le dossier ; pondérations non reproduites dans l’avis.",
+   "sources": [
+    {
+     "label": "Avis détaillé",
+     "url": "https://marches-publics.nukema.com/seo/consultation/view/3122406/Marche_prive_de_travaux_concernant_le_remplacement_d_un_monte_malades_pour_l_hOpital_saint_camille"
+    }
+   ]
+  },
+  {
+   "reference": "MD-7D33C1A599",
+   "journey": "tender",
+   "kind": "consultation",
+   "title": "Métallerie et revêtements pour la réhabilitation d’un immeuble",
+   "trade": "Métallerie et carrelage",
+   "category": "Appel d’offres privé",
+   "city": "Lyon 4e",
+   "department": "69",
+   "location": "Lyon 4e — Rhône (69)",
+   "status": "Échéance à venir dans l’avis consulté.",
+   "publication": "2026-10-21",
+   "deadline": "2026-11-13T11:00:00Z",
+   "deadlineText": "13 novembre 2026 à 12 h",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "12 mois, dont deux mois de préparation ; début indicatif le 2 décembre 2026.",
+   "need": "Relance de deux lots d’une opération de réhabilitation de logements. Le programme concerne un immeuble et non une demande de travaux d’un particulier.",
+   "scope": "Lot 6 de l’opération : métallerie. Lot 9 : chape flottante, carrelage et faïence.",
+   "conditions": "Dossier de consultation annoncé sur Achatpublic. La date limite des questions indiquée dans l’avis était le 6 novembre 2026 à 17 h.",
+   "criteria": "Non communiqué dans la page consultée.",
+   "sources": [
+    {
+     "label": "Avis détaillé",
+     "url": "https://marches-publics.nukema.com/seo/consultation/view/3112674/REHABILITATION_D_UN_IMMEUBLE_DE_LOGEMENTS___Atelier_Logis"
+    }
+   ]
+  },
+  {
+   "reference": "MD-D695DDFA8B",
+   "journey": "tender",
+   "kind": "consultation",
+   "title": "Réhabilitation d’ateliers professionnels en cinq lots",
+   "trade": "Couverture, électricité et travaux",
+   "category": "Appel d’offres privé",
+   "city": "Trélazé",
+   "department": "49",
+   "location": "Trélazé — Maine-et-Loire (49)",
+   "status": "Échéance à venir dans l’avis consulté.",
+   "publication": "2026-11-02",
+   "deadline": "2026-12-03T10:00:00Z",
+   "deadlineText": "3 décembre 2026 à 11 h",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "5 mois ; ordre de service prévisionnel en janvier 2027.",
+   "need": "Consultation de travaux portant sur des ateliers existants. Une entreprise peut répondre à un ou plusieurs lots.",
+   "scope": "Désamiantage ; ravalement ; maçonnerie et VRD ; couverture ; électricité.",
+   "conditions": "Quatre semaines de préparation et quatre mois de travaux annoncés. Variantes interdites. Une clause d’insertion est prévue.",
+   "criteria": "Prix 60 % ; technique 40 %.",
+   "sources": [
+    {
+     "label": "Avis détaillé",
+     "url": "https://lacentraledesmarches.com/marches-publics/Angers-PODELIHA-Rehabilitation-des-ateliers-existants-rue-Francoise-Cacheux-a-Trelaze-site-LesAllumettes-n243rue-Jean-Jaures/632631"
+    }
+   ]
+  },
+  {
+   "reference": "MD-0294D1674A",
+   "journey": "tender",
+   "kind": "consultation",
+   "title": "Rénovation de 52 logements sur deux communes",
+   "trade": "Rénovation énergétique et second œuvre",
+   "category": "Appel d’offres privé",
+   "city": "Chalonnes-sur-Loire et Gennes-Val-de-Loire",
+   "department": "49",
+   "location": "Chalonnes-sur-Loire et Gennes-Val-de-Loire — Maine-et-Loire (49)",
+   "status": "Échéance à venir dans l’avis consulté.",
+   "publication": "2026-10-27",
+   "deadline": "2026-11-17T15:00:00Z",
+   "deadlineText": "17 novembre 2026 à 16 h",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "18 mois, dont deux mois de préparation ; ordre de service prévu en décembre 2026.",
+   "need": "Réhabilitation de 20 logements sur une commune et de 32 sur l’autre. La consultation est répartie en sept lots.",
+   "scope": "Isolation extérieure, ravalement, VRD, couverture, menuiseries, finitions, électricité, chauffage, plomberie et ventilation.",
+   "conditions": "Réponse possible par lot. Variantes admises et prestations supplémentaires prévues dans le règlement.",
+   "criteria": "Prix 50 % ; technique 45 % ; environnement et social 5 %.",
+   "sources": [
+    {
+     "label": "Avis détaillé",
+     "url": "https://lacentraledesmarches.com/marches-publics/Angers-PODELIHA-Rehabilitation-de-52-logements-locatifs-sociaux/630349"
+    }
+   ]
+  },
+  {
+   "reference": "MD-A799094950",
+   "journey": "tender",
+   "kind": "consultation",
+   "title": "Assistance à maîtrise d’ouvrage pour 188 logements",
+   "trade": "Conseil et conduite d’opération",
+   "category": "Appel d’offres privé",
+   "city": "Saint-Barthélemy-d’Anjou",
+   "department": "49",
+   "location": "Saint-Barthélemy-d’Anjou — Maine-et-Loire (49)",
+   "status": "Échéance à venir dans l’avis consulté.",
+   "publication": "2026-11-05",
+   "deadline": "2026-12-02T10:00:00Z",
+   "deadlineText": "2 décembre 2026 à 11 h",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "36 mois ; ordre de service prévisionnel en décembre 2026.",
+   "need": "Mission de services pour accompagner une réhabilitation de 188 logements. Cette consultation concerne l’assistance au maître d’ouvrage, pas l’exécution des travaux.",
+   "scope": "Un lot unique. Le détail des missions et livrables est à relever dans le dossier.",
+   "conditions": "Candidature individuelle ou en groupement ; variantes non admises. Capacités et pièces justificatives selon le règlement.",
+   "criteria": "Financier 60 % ; méthode 20 % ; organisation 10 % ; compréhension du projet et planning 10 %.",
+   "sources": [
+    {
+     "label": "Avis détaillé",
+     "url": "https://lacentraledesmarches.com/marches-publics/Angers-PODELIHA-Rehabilitation-de-188-logements-a-Saint-Barthelemy-d-Anjou-pour-le-compte-du-maitre-d-ouvrage-Podeliha/634064"
+    }
+   ]
+  },
+  {
+   "reference": "MD-9B362DBA8E",
+   "journey": "tender",
+   "kind": "consultation",
+   "title": "Curage et réhabilitation intérieure des colonnes d’évacuation",
+   "trade": "Assainissement et plomberie",
+   "category": "Appel d’offres privé",
+   "city": "Angers",
+   "department": "49",
+   "location": "Angers — Maine-et-Loire (49)",
+   "status": "Échéance à venir dans l’avis consulté.",
+   "publication": "2026-11-05",
+   "deadline": "2026-11-26T10:00:00Z",
+   "deadlineText": "26 novembre 2026 à 11 h",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "4 mois, préparation comprise ; ordre de service prévu en décembre 2026.",
+   "need": "Travaux sur les colonnes d’eaux usées, eaux vannes et eaux pluviales d’un ensemble de 182 logements collectifs, répartis sur sept cages d’escalier.",
+   "scope": "Nettoyage des conduites et réparation par chemisage ; un seul lot.",
+   "conditions": "Bâtiments de trois à cinq étages. Variantes interdites ; prestations supplémentaires prévues. Modalités d’intervention à vérifier au dossier.",
+   "criteria": "Prix 70 % ; technique 30 %.",
+   "sources": [
+    {
+     "label": "Avis détaillé",
+     "url": "https://centraledesmarches.com/marches-publics/Angers-PODELIHA-travaux-de-curage-et-de-chemisage-des-colonnes-EUEVEP-de-la-residence-Beaussier-a-Angers/634065"
+    }
+   ]
+  },
+  {
+   "reference": "MD-57A91754C0",
+   "journey": "tender",
+   "kind": "consultation",
+   "title": "Refonte du site internet d’une organisation professionnelle",
+   "trade": "Développement web",
+   "category": "Appel d’offres privé",
+   "city": null,
+   "department": "75",
+   "location": "Paris (75)",
+   "status": "Échéance à venir dans l’avis consulté.",
+   "publication": "2026-10-30",
+   "deadline": "2026-11-27T12:00:00Z",
+   "deadlineText": "27 novembre 2026 à 13 h",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "Non communiqué dans la page consultée.",
+   "need": "Consultation de services pour reconstruire le site web institutionnel d’une organisation du secteur de l’habitat.",
+   "scope": "Cahier des charges, annexes et matrice de réponse signalés dans le dossier. Les fonctionnalités ne sont pas détaillées dans l’aperçu.",
+   "conditions": "Rechercher la consultation sur la plateforme à partir de son intitulé source. Vérifier les exigences techniques et contractuelles avant de chiffrer.",
+   "criteria": "Non communiqué dans la page consultée.",
+   "sources": [
+    {
+     "label": "Fiche de consultation",
+     "url": "https://marches-publics.com/appel-offre/ile-de-france/paris/paris/2448725"
+    },
+    {
+     "label": "Classification et échéance",
+     "url": "https://v2.marches-securises.fr/entreprise/?date_cloture=&date_cloture_type=&liste_dept=&module=liste_consultations&mps=&pa=&page=39&presta=&r=&type_marche="
+    }
+   ]
+  },
+  {
+   "reference": "MD-5B5930E29B",
+   "journey": "tender",
+   "kind": "consultation",
+   "title": "Construction d’une résidence de 70 appartements",
+   "trade": "Construction tous corps d’état",
+   "category": "Appel d’offres privé",
+   "city": "Castelnau-le-Lez",
+   "department": "34",
+   "location": "Castelnau-le-Lez — Hérault (34)",
+   "status": "Échéance à venir dans l’avis consulté.",
+   "publication": "2026-11-03",
+   "deadline": "2026-12-02T11:00:00Z",
+   "deadlineText": "2 décembre 2026 à 12 h",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "30 mois ; début prévisionnel le 4 janvier 2027.",
+   "need": "Construction d’un ensemble destiné à accueillir des athlètes. L’opération comporte 18 lots, réunis ici en une seule fiche pour ne pas multiplier artificiellement les annonces.",
+   "scope": "Lots de travaux de bâtiment, dont terrassement, fondations et gros œuvre. Choisir le lot adapté dans le dossier.",
+   "conditions": "L’avis décrit un contrat privé selon NF P03-001. Variantes possibles ; clause d’insertion sur quatre lots.",
+   "criteria": "À consulter lot par lot dans le règlement.",
+   "sources": [
+    {
+     "label": "Texte de l’avis européen relayé",
+     "url": "https://www.evergabe.com/fr/appels-doffres/home-sport-residence-pour-athletes-construction-d-un-ensemble-immobilier-de-70-appartements-a-destination-d-athletes-zac-eureka-extension-castelnau-le-lez-2532809/"
+    }
+   ]
+  },
+  {
+   "reference": "MD-A77C80FB62",
+   "journey": "tender",
+   "kind": "consultation",
+   "title": "Modélisation de la demande de logements et des investissements",
+   "trade": "Études économiques et données",
+   "category": "Appel d’offres privé",
+   "city": null,
+   "department": "75",
+   "location": "Paris (75)",
+   "status": "Échéance à venir dans l’avis consulté.",
+   "publication": "2026-11-05",
+   "deadline": "2026-11-30T15:00:00Z",
+   "deadlineText": "30 novembre 2026 à 16 h",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "Non communiqué dans la page consultée.",
+   "need": "Consultation visant des modèles prévisionnels sur les besoins en logements sociaux et les investissements des organismes du secteur.",
+   "scope": "L’avis consulté ne décrit pas les jeux de données, horizons de projection ou livrables détaillés.",
+   "conditions": "Le dossier doit être obtenu avant toute estimation de charge ou proposition méthodologique.",
+   "criteria": "Non communiqué dans la page consultée.",
+   "sources": [
+    {
+     "label": "Fiche de consultation",
+     "url": "https://marches-publics.com/appel-offre/ile-de-france/paris/paris/2451035"
+    },
+    {
+     "label": "Classification et échéance",
+     "url": "https://v2.marches-securises.fr/entreprise/?date_cloture=&date_cloture_type=&liste_dept=&module=liste_consultations&mps=&pa=&page=3&presta=&r=CEA-Paris-Saclay-SMA_91_20260922W2_04&type_marche="
+    }
+   ]
+  },
+  {
+   "reference": "MD-9239DCCEE6",
+   "journey": "tender",
+   "kind": "consultation",
+   "title": "Passage au numérique d’un magazine professionnel",
+   "trade": "Édition numérique et développement web",
+   "category": "Appel d’offres privé",
+   "city": null,
+   "department": "75",
+   "location": "Paris (75)",
+   "status": "Échéance à venir dans l’avis consulté.",
+   "publication": "2026-10-30",
+   "deadline": "2026-11-26T11:00:00Z",
+   "deadlineText": "26 novembre 2026 à 12 h",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "Non communiqué dans la page consultée.",
+   "need": "Une organisation professionnelle lance une consultation pour la digitalisation de son magazine.",
+   "scope": "Un cahier des charges spécifique est annoncé. Les fonctionnalités, interfaces et conditions de reprise des contenus doivent être consultées au dossier.",
+   "conditions": "Réponse à préparer sur la base du cahier des charges ; budget et calendrier d’exécution absents de l’aperçu.",
+   "criteria": "Non communiqué dans la page consultée.",
+   "sources": [
+    {
+     "label": "Fiche de consultation",
+     "url": "https://marches-publics.com/appel-offre/ile-de-france/paris/paris/2448769"
+    },
+    {
+     "label": "Classification et échéance",
+     "url": "https://v2.marches-securises.fr/entreprise/?date_cloture=&date_cloture_type=&liste_dept=&module=liste_consultations&mps=&pa=&page=4&presta=&r=CEA-Paris-Saclay-SMA_91_20260916W2_02&type_marche="
+    }
+   ]
+  },
+  {
+   "reference": "MD-60C8E56FBB",
+   "journey": "tender",
+   "kind": "consultation",
+   "title": "Accompagnement de la stratégie de communication",
+   "trade": "Communication et conseil",
+   "category": "Appel d’offres privé",
+   "city": null,
+   "department": "75",
+   "location": "Paris (75)",
+   "status": "Échéance à venir dans l’avis consulté.",
+   "publication": "2026-10-05",
+   "deadline": "2026-11-13T12:30:00Z",
+   "deadlineText": "13 novembre 2026 à 13 h 30",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "Non communiqué dans la page consultée.",
+   "need": "Recherche d’un prestataire pour préparer, mettre en œuvre et faire évoluer la communication d’une organisation professionnelle.",
+   "scope": "Mission d’accompagnement stratégique. Le cahier des charges est annoncé ; le détail des campagnes et supports n’est pas exposé dans l’aperçu.",
+   "conditions": "Conditions de candidature et périmètre contractuel à vérifier dans le dossier avant la réponse.",
+   "criteria": "Non communiqué dans la page consultée.",
+   "sources": [
+    {
+     "label": "Avis détaillé",
+     "url": "https://marches-publics.nukema.com/seo/consultation/view/3094838/La_presente_consultation_a_pour_objet_de_selectionner_un_prestataire_charge_d_accompagner_l_Union_sociale_pour_l_habitat__USH__dans_la_definition__le_deplo"
+    }
+   ]
+  },
+  {
+   "reference": "MD-B1D8B53123",
+   "journey": "subcontracting",
+   "kind": "demande",
+   "title": "Recherche d’un sous-traitant en nettoyage dans les Yvelines",
+   "trade": "Nettoyage professionnel",
+   "category": "Sous-traitance — demande publiée",
+   "city": null,
+   "department": "78",
+   "location": "Yvelines (78)",
+   "status": "Annonce repérée ; disponibilité non confirmée.",
+   "publication": "2026-11-05",
+   "deadline": null,
+   "deadlineText": "Non indiquée dans l’aperçu.",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "Non communiqué dans la page consultée.",
+   "need": "Une demande de sous-traitance en nettoyage est publiée dans la liste récente du portail.",
+   "scope": "Type de locaux, surfaces, fréquence et matériel non précisés dans l’aperçu public.",
+   "conditions": "L’accès à la fiche complète renvoie vers une connexion. Disponibilité à confirmer.",
+   "criteria": "Non communiqué dans la page consultée.",
+   "sources": [
+    {
+     "label": "Liste publique des demandes",
+     "url": "https://cotraitance.com/devis/"
+    },
+    {
+     "label": "Fiche avec connexion",
+     "url": "https://cotraitance.com/devis/detail/recherche-sous-traitant-nettoyage-yvelines-78-4044"
+    }
+   ]
+  },
+  {
+   "reference": "MD-0E86AAED6C",
+   "journey": "subcontracting",
+   "kind": "demande",
+   "title": "Sous traitance en chauffage et eau chaude sanitaire",
+   "trade": "Chauffage et plomberie",
+   "category": "Sous-traitance — demande publiée",
+   "city": "Toulouse",
+   "department": "31",
+   "location": "Toulouse — Haute-Garonne (31)",
+   "status": "Annonce repérée ; disponibilité non confirmée.",
+   "publication": "2026-10-24",
+   "deadline": null,
+   "deadlineText": "Non indiquée dans l’aperçu.",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "Non communiqué dans la page consultée.",
+   "need": "Demande publiée pour un chantier de chauffage et de plomberie lié à l’eau chaude sanitaire.",
+   "scope": "Équipements, quantités et limites de prestation non accessibles dans l’aperçu public.",
+   "conditions": "Connexion demandée pour consulter la fiche complète. Disponibilité à confirmer.",
+   "criteria": "Non communiqué dans la page consultée.",
+   "sources": [
+    {
+     "label": "Liste publique des demandes",
+     "url": "https://cotraitance.com/devis/"
+    },
+    {
+     "label": "Fiche avec connexion",
+     "url": "https://cotraitance.com/devis/detail/recherche-sous-traitant-chantier-chauffage-plomberie-ecs-toulouse-4041"
+    }
+   ]
+  },
+  {
+   "reference": "MD-A606493CB9",
+   "journey": "subcontracting",
+   "kind": "partenaires",
+   "title": "Partenaires pour rondes et interventions de sécurité",
+   "trade": "Sécurité mobile et gardiennage",
+   "category": "Sous-traitance — recherche de partenaires",
+   "city": null,
+   "department": null,
+   "location": "France ; secteur d’intervention à déclarer",
+   "status": "Recherche de partenaires ; aucun chantier individuel attribué par cette page.",
+   "publication": null,
+   "deadline": null,
+   "deadlineText": "Aucune échéance indiquée.",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "Non communiqué dans la page consultée.",
+   "need": "Un groupe de sécurité invite des sociétés locales à rejoindre son réseau de partenaires opérationnels.",
+   "scope": "Rondes, interventions déclenchées par une alarme et gardiennage conservatoire, pilotés par un centre opérationnel.",
+   "conditions": "Entreprise disposant d’agents mobiles. Formulaire de présélection, puis transmission des informations professionnelles pour validation.",
+   "criteria": "Pas de pondération publiée. Adhésion au réseau distincte de l’obtention d’une mission.",
+   "sources": [
+    {
+     "label": "Appel à partenaires",
+     "url": "https://groupesgp.fr/devenez-partenaire-du-groupe-sgp/"
+    }
+   ]
+  },
+  {
+   "reference": "MD-AFB06E490E",
+   "journey": "subcontracting",
+   "kind": "partenaires",
+   "title": "Transporteurs pour tournées et liaisons express",
+   "trade": "Transport et logistique",
+   "category": "Sous-traitance — recherche de partenaires",
+   "city": null,
+   "department": null,
+   "location": "France ; zones postales à déclarer",
+   "status": "Recherche de partenaires ; aucun chantier individuel attribué par cette page.",
+   "publication": null,
+   "deadline": null,
+   "deadlineText": "Aucune échéance indiquée.",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "Non communiqué dans la page consultée.",
+   "need": "Un opérateur de transport express recherche des entreprises indépendantes pour renforcer son réseau.",
+   "scope": "Collecte et livraison sur plusieurs tournées, liaisons longue distance, exploitation de dépôts ou transport à vélo selon le profil.",
+   "conditions": "Expérience logistique, stabilité financière, moyens humains et flotte adaptés. Le formulaire demande notamment les licences détenues et les zones desservies.",
+   "criteria": "Sélection du partenaire ; volumes et rémunération à définir contractuellement.",
+   "sources": [
+    {
+     "label": "Appel à transporteurs",
+     "url": "https://transporteur.dhl.fr/"
+    }
+   ]
+  },
+  {
+   "reference": "MD-01AA5917DA",
+   "journey": "subcontracting",
+   "kind": "partenaires",
+   "title": "Entreprises de transport pour un réseau national de colis",
+   "trade": "Transport routier de marchandises",
+   "category": "Sous-traitance — recherche de partenaires",
+   "city": null,
+   "department": null,
+   "location": "France",
+   "status": "Recherche de partenaires ; aucun chantier individuel attribué par cette page.",
+   "publication": null,
+   "deadline": null,
+   "deadlineText": "Aucune échéance indiquée.",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "Non communiqué dans la page consultée.",
+   "need": "Un réseau de livraison recherche des transporteurs professionnels pour des relations régulières à l’échelle nationale.",
+   "scope": "Prestations de transport en sous-traitance. Les tournées et volumes précis sont communiqués dans les consultations du réseau.",
+   "conditions": "Inscription préalable annoncée comme gratuite sur la plateforme des partenaires afin de participer aux appels d’offres.",
+   "criteria": "Conditions et rémunération à consulter pour chaque consultation.",
+   "sources": [
+    {
+     "label": "Recherche de transporteurs",
+     "url": "https://www.tnt.com/express/fr_fr/site/societe/devenir-sous-traitant-transport.html"
+    }
+   ]
+  },
+  {
+   "reference": "MD-888901F8F3",
+   "journey": "subcontracting",
+   "kind": "partenaires",
+   "title": "Équipes de pose pour centrales photovoltaïques professionnelles",
+   "trade": "Photovoltaïque et électricité",
+   "category": "Sous-traitance — recherche de partenaires",
+   "city": null,
+   "department": null,
+   "location": "France",
+   "status": "Recherche de partenaires ; aucun chantier individuel attribué par cette page.",
+   "publication": null,
+   "deadline": null,
+   "deadlineText": "Aucune échéance indiquée.",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "Planning établi avant chaque intervention.",
+   "need": "Une entreprise spécialisée souhaite référencer des équipes pour renforcer ses chantiers solaires. La page annonce des centrales de 100 kWc à 1 MWc.",
+   "scope": "Structures et modules, câblage continu et alternatif, raccordements électriques, levage et nacelle selon les compétences.",
+   "conditions": "Le formulaire demande SIRET, effectif, zone, expérience et situation de l’assurance décennale.",
+   "criteria": "Validation partenaire ; aucun volume de commandes garanti par la candidature.",
+   "sources": [
+    {
+     "label": "Candidature partenaire",
+     "url": "https://www.evolinkpro.com/devenir-partenaire"
+    }
+   ]
+  },
+  {
+   "reference": "MD-F4D5629B6B",
+   "journey": "subcontracting",
+   "kind": "partenaires",
+   "title": "Entreprises de nettoyage, couverture et rénovation",
+   "trade": "Nettoyage, couverture, élagage et rénovation",
+   "category": "Sous-traitance — recherche de partenaires",
+   "city": null,
+   "department": null,
+   "location": "France selon l’appel à partenaires",
+   "status": "Recherche de partenaires ; aucun chantier individuel attribué par cette page.",
+   "publication": null,
+   "deadline": null,
+   "deadlineText": "Aucune échéance indiquée.",
+   "budget": "Non communiqué dans la page consultée.",
+   "duration": "Non communiqué dans la page consultée.",
+   "need": "Une entreprise recherche des sous-traitants pour les travaux intérieurs, extérieurs et la propreté professionnelle. La relation client reste assurée par l’entreprise principale.",
+   "scope": "Rénovation, nettoyage, couverture et élagage selon les compétences présentées.",
+   "conditions": "SIREN, références, assurance de responsabilité professionnelle et certification demandés ; nature de cette certification à clarifier.",
+   "criteria": "Rémunération définie dans le contrat. La candidature au réseau ne correspond pas à un chantier identifié.",
+   "sources": [
+    {
+     "label": "Programme de sous-traitance",
+     "url": "https://terraclean95.fr/apporteur-affaires"
+    }
+   ]
+  }
+ ]
+}
