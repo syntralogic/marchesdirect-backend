@@ -140,6 +140,9 @@ async function main() {
         let batch = [];
         const flush = async () => {
           if (!batch.length) return;
+          // Un même permis peut figurer sur plusieurs lignes (modificatifs) : on garde la dernière, sinon PostgreSQL refuse
+          // le paquet entier (« ON CONFLICT DO UPDATE command cannot affect row a second time »).
+          batch = [...new Map(batch.map(b => [b.id, b])).values()];
           await pool.query(`
             INSERT INTO construction_projects AS p (id, kind, type_dau, etat, authorized_at, started_at, department, commune_insee, commune, postal_code,
               nature, destination, floor_area, dwellings, land_area, pool, applicant_name, applicant_siren, imported_at)
