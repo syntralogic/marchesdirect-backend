@@ -112,7 +112,7 @@ function readLots() {
   return fs.readdirSync(DIR).filter(f => /\.json(\.gz)?$/.test(f)).sort().map(f => {
     const buf = fs.readFileSync(path.join(DIR, f));
     const data = JSON.parse((f.endsWith('.gz') ? zlib.gunzipSync(buf) : buf).toString('utf8'));
-    return { lot: data.lot || f.replace(/\.json(\.gz)?$/, ''), file: data.file || f, listings: (data.listings || []).filter(l => l.reference && l.title) };
+    return { lot: data.lot || f.replace(/\.json(\.gz)?$/, ''), file: data.file || f, withdrawn: data.withdrawn || null, listings: (data.listings || []).filter(l => l.reference && l.title) };
   });
 }
 
@@ -129,7 +129,20 @@ async function main() {
   const existing = new Map((await pool.query(`SELECT source_reference AS ref, raw_data->>'hash' AS hash, status, location_department AS dept,
       location_city AS city, raw_data->>'geo_postal' AS postal FROM opportunities WHERE source_id = $1`, [sourceId])).rows.map(r => [r.ref, r]));
 
-  for (const { lot, file, listings } of lots) {
+  // « Actes de sous-traitance déclarés » (sous-traitances déjà attribuées, importées par erreur le 7 nov.) : ce ne sont
+  // pas des annonces, ils sont masqués partout.
+  const acts = await pool.query(`UPDATE opportunities SET deleted_at = NOW(), updated_at = NOW()
+     WHERE source_id = $1 AND raw_data->>'nature' LIKE 'Acte de sous-traitance%' AND deleted_at IS NULL RETURNING id`, [sourceId]);
+  if (acts.rowCount) console.log(`[partenaires] ${acts.rowCount} actes de sous-traitance déjà attribués masqués`);
+  for (const { lot, file, listings, withdrawn } of lots) {
+    // Lot retiré (ex. annonces dont la date est introuvable et dont des vérifications montrent qu'elles sont passées) :
+    // masqué partout (deleted_at), réversible — réimporter le lot sans « withdrawn » le rétablit.
+    if (withdrawn) {
+      const w = await pool.query(`UPDATE opportunities SET deleted_at = NOW(), updated_at = NOW()
+         WHERE source_id = $1 AND raw_data->>'lot' = $2 AND deleted_at IS NULL RETURNING id`, [sourceId, lot]);
+      console.log(`[partenaires] lot ${lot} retiré (${withdrawn}) : ${w.rowCount} annonces masquées`);
+      continue;
+    }
     let inserted = 0, updated = 0, unchanged = 0, geocoded = 0;
     const todo = [];
     for (const l of listings) {
