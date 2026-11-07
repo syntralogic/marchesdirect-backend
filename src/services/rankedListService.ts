@@ -69,7 +69,10 @@ export function buildCandidatesQuery(opts: { tradeSlugs: string[]; department: s
   const pref = prefIdx ? (opts.v2
     ? `(CASE WHEN $${prefIdx} = ANY(l.exec_departments) OR (l.opportunity_id IS NULL AND ${DEPT_SQL} = $${prefIdx}) OR (cardinality(COALESCE(l.exec_departments, '{}')) = 0 AND l.buyer_department = $${prefIdx}) THEN 0 ELSE 1 END)`
     : `(CASE WHEN ${DEPT_SQL} = $${prefIdx} THEN 0 ELSE 1 END)`) : '';
-  const lvl = opts.v2 && opts.department ? `(CASE WHEN $${params.length} = ANY(l.exec_departments) THEN 0 WHEN l.opportunity_id IS NOT NULL THEN 1 ELSE 2 END)` : '0';
+  // Sans département, « 0 » nu dans un ORDER BY est lu par PostgreSQL comme une position de colonne (erreur « ORDER BY
+  // position 0 ») : d'où la liste « Vos marchés » vide depuis le passage à toute la France (7 nov.). On ordonne par une
+  // constante typée, jamais par un entier nu.
+  const lvl = opts.v2 && opts.department ? `(CASE WHEN $${params.length} = ANY(l.exec_departments) THEN 0 WHEN l.opportunity_id IS NOT NULL THEN 1 ELSE 2 END)` : '(0)::int';
   const v2Cols = opts.v2 ? `, ${DL} AS deadline_checked, CASE WHEN ${DL} IS NULL THEN 'verify' ELSE 'open' END AS open_state, ${lvl} AS location_level,
       l.exec_status, l.exec_communes, l.exec_departments, l.exec_text, l.buyer_city, l.buyer_department, l.publication_departments` : '';
   return {

@@ -33,6 +33,12 @@ describe('ranked list candidates', () => {
     expect(q.params[q.params.length - 1]).toBe('92');
     expect(q.listSql).toMatch(/ORDER BY \(CASE WHEN .*= \$\d+ THEN 0 ELSE 1 END\) ASC/);
   });
+  it('7 nov. : sans département, jamais un entier nu dans ORDER BY (PostgreSQL le lit comme une position de colonne)', () => {
+    for (const v2 of [true, false]) {
+      const q = buildCandidatesQuery({ tradeSlugs: ['cvc'], department: null, v2 });
+      expect(q.listSql).not.toMatch(/ORDER BY\s+0\b|,\s*0 ASC/);
+    }
+  });
   it('caps the limit', () => {
     expect(buildCandidatesQuery({ tradeSlugs: ['a'], department: null, limit: 9999 }).listSql).toContain(`LIMIT ${MAX_CANDIDATES}`);
     expect(buildCandidatesQuery({ tradeSlugs: ['a'], department: null, limit: 0 }).listSql).toContain('LIMIT 40');
