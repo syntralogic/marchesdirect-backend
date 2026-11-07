@@ -47,6 +47,7 @@ async function ensureLocationSchemaNow(): Promise<void> {
   await db.query(`CREATE INDEX IF NOT EXISTS opportunity_locations_exec_departments_idx ON opportunity_locations USING GIN (exec_departments)`);
   await db.query(`CREATE INDEX IF NOT EXISTS opportunity_locations_buyer_department_idx ON opportunity_locations (buyer_department)`);
   await db.query(`CREATE INDEX IF NOT EXISTS opportunity_locations_notice_deadline_idx ON opportunity_locations (notice_deadline)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS opportunity_locations_supersedes_nonempty_idx ON opportunity_locations (opportunity_id) WHERE cardinality(supersedes) > 0`);
 }
 
 export async function processLocationBatch(limit = 250): Promise<number> {
