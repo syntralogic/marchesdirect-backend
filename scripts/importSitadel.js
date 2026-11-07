@@ -19,11 +19,13 @@ const { Readable } = require('stream');
 
 const BASE = 'https://data.statistiques.developpement-durable.gouv.fr/dido/api/v1/datafiles';
 const FILES = [
-  { kind: 'logements', rid: '8b35affb-55fc-4c1f-915b-7750f974446a', surf: 'SURF_HAB_CREEE' },
-  { kind: 'locaux', rid: 'f8f0700f-806c-40a7-83b1-f21cf507e7c4', surf: 'SURF_LOC_CREEE' },
+  // 7 nov. : le fichier « locaux » n'a ni NB_LGT_TOT_CREES ni I_PISCINE (refus HTTP 400 de l'API) : colonnes par fichier.
+  { kind: 'logements', rid: '8b35affb-55fc-4c1f-915b-7750f974446a', surf: 'SURF_HAB_CREEE', extra: ['NB_LGT_TOT_CREES', 'I_PISCINE'], minArea: 0 },
+  // Locaux : les micro-ouvrages (postes électriques, abris, 0 à 19 m²) ne sont pas des chantiers pour un artisan.
+  { kind: 'locaux', rid: 'f8f0700f-806c-40a7-83b1-f21cf507e7c4', surf: 'SURF_LOC_CREEE', extra: [], minArea: 20 },
 ];
 const COLS = ['NUM_DAU', 'TYPE_DAU', 'ETAT_DAU', 'DATE_REELLE_AUTORISATION', 'DATE_REELLE_DOC', 'DEP_CODE', 'COMM', 'ADR_LOCALITE_TER',
-  'ADR_CODPOST_TER', 'NATURE_PROJET_DECLAREE', 'DESTINATION_PRINCIPALE', 'NB_LGT_TOT_CREES', 'SUPERFICIE_TERRAIN', 'I_PISCINE', 'DENOM_DEM', 'SIREN_DEM'];
+  'ADR_CODPOST_TER', 'NATURE_PROJET_DECLAREE', 'DESTINATION_PRINCIPALE', 'SUPERFICIE_TERRAIN', 'DENOM_DEM', 'SIREN_DEM'];
 const DEPTS = [...Array.from({ length: 95 }, (_, i) => String(i + 1).padStart(2, '0')).filter(d => d !== '20'), '2A', '2B', '971', '972', '973', '974', '976'];
 const MONTHS_BACK = 12;
 const MIN_HOURS_BETWEEN_RUNS = 72;
@@ -130,7 +132,7 @@ async function main() {
   const doneParts = new Set(process.env.SITADEL_FORCE === 'true' ? [] : (await pool.query(
     `SELECT kind || ':' || department AS k FROM construction_import_parts WHERE done_at > NOW() - INTERVAL '72 hours' AND error IS NULL`)).rows.map(r => r.k));
   for (const f of FILES) {
-    const cols = [...COLS, f.surf].join(',');
+    const cols = [...COLS, ...f.extra, f.surf].join(',');
     for (const dep of DEPTS) {
       if (doneParts.has(`${f.kind}:${dep}`)) continue;
       const before = total;
@@ -159,6 +161,7 @@ async function main() {
         for await (const r of csvRows(Readable.fromWeb(res.body))) {
           const auth = isoDate(r.DATE_REELLE_AUTORISATION);
           if (!r.NUM_DAU || !auth || auth > maxDate) continue;
+          if (f.minArea && !((num(r[f.surf]) || 0) >= f.minArea)) continue;
           batch.push({ id: `${f.kind === 'logements' ? 'L' : 'N'}${r.NUM_DAU}`, kind: f.kind, type_dau: r.TYPE_DAU || null, etat: num(r.ETAT_DAU),
             authorized_at: auth, started_at: isoDate(r.DATE_REELLE_DOC), department: r.DEP_CODE || dep, commune_insee: r.COMM || null,
             commune: NAMES.get(r.COMM) || (r.ADR_LOCALITE_TER ? titleCase(r.ADR_LOCALITE_TER) : null), postal_code: /^\d{5}$/.test(r.ADR_CODPOST_TER || '') ? r.ADR_CODPOST_TER : null,
