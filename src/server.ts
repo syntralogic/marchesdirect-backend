@@ -317,6 +317,7 @@ app.use('/api/listing-reports', require('./routes/listingReports').default);
 app.use('/api/needs', require('./routes/needs').default);
 app.use('/api/members', require('./routes/members').default);
 app.use('/api/awards', require('./routes/awards').default);
+app.use('/api/pilotage', require('./routes/adminFunnel').default);
 app.use('/api/subscriptions', require('./routes/subscriptions').default);
 // Browsing subcontracting needs is public (mirrors opportunities); creating
 // one requires an account, enforced per-route inside the router itself.
