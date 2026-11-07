@@ -17,7 +17,8 @@ import { recordComputedScore } from '../services/journeyScoreService';
 import { ingestOpportunityDocuments } from '../services/documentIngestionService';
 import { computeMatchScore, loadCompanyProfile } from '../services/matchScoreService';
 import { recordJourneyEvent, refreshJourneyForSession } from '../services/journeyEventService';
-import { resolveTradeFromText, keywordsForSlugs } from '../services/tradeResolver';
+import { resolveTradeFromText, keywordsForSlugs, extractTradeSlugs } from '../services/tradeResolver';
+import { pickRelevantLot } from '../utils/boampLots';
 import { syncLeadToCrm } from '../services/crmSyncService';
 import { sendAppointmentConfirmation } from '../services/appointmentConfirmationService';
 import { freeAlternatives } from '../services/appointmentService';
@@ -1377,8 +1378,17 @@ async function searchOpportunities(req: Request, res: Response) {
     const total: number = breakdown ? breakdown.open + breakdown.verify + breakdown.closed : await searchCountCache(searchCacheKey('count', whereClause, params), SEARCH_COUNT_TTL_MS, loadCount);
     res.set('Server-Timing', `prep;dur=${tPrep - t0}, list;dur=${tList}, count;dur=${tCount}, total;dur=${Date.now() - t0}`);
 
+    // 7 nov. : le lot qui correspond à la recherche (« lot plomberie-sanitaire »), quand l'annonce en a plusieurs.
+    const qText = typeof q === 'string' ? q : '';
+    const qSlugs = new Set(extractTradeSlugs(qText));
+    const qWords = qText.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/).filter((w: string) => w.length >= 4).map((w: string) => w.slice(0, 6));
+    const lotMatch = (lot: string) => {
+      if (qSlugs.size && extractTradeSlugs(lot).some((x: string) => qSlugs.has(x))) return true;
+      const f = lot.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      return qWords.length > 0 && qWords.some((w: string) => f.includes(w));
+    };
     res.json({
-      results: rows,
+      results: qText ? rows.map((r: any) => ({ ...r, matched_lot: pickRelevantLot(r.description, lotMatch) })) : rows,
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -1837,8 +1847,12 @@ router.get('/ranked/candidates', optionalAuth, async (req: AuthRequest, res: Res
     const v2 = String(req.query.loc || '') === '2' && await hasLocationTable();
     const q = buildCandidatesQuery({ tradeSlugs: trades, department, preferDepartment: homeDepartment, limit: Number(req.query.limit) || 40, v2 });
     const [list, count] = await Promise.all([db.query(q.listSql, q.params), db.query(q.countSql, q.params)]);
+    // 7 nov. : le lot qui concerne l'entreprise (« lot plomberie-sanitaire ») ; le texte de l'annonce n'est pas renvoyé.
+    const wanted = new Set(trades);
+    const items = list.rows.map((r: any) => { const { description, ...rest } = r;
+      return { ...rest, matched_lot: pickRelevantLot(description, (lot) => extractTradeSlugs(lot).some((s: string) => wanted.has(s))) }; });
     res.json({
-      items: list.rows, total: count.rows[0]?.n || 0, zone: department || 'france', homeDepartment,
+      items, total: count.rows[0]?.n || 0, zone: department || 'france', homeDepartment,
       company: { name: profile?.name || null, activity: profile?.activityText || null, city: profile?.city || null, department: profile?.department || null },
     });
   } catch (err: any) {

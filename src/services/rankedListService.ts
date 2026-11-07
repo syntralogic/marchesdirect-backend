@@ -73,7 +73,7 @@ export function buildCandidatesQuery(opts: { tradeSlugs: string[]; department: s
   const v2Cols = opts.v2 ? `, ${DL} AS deadline_checked, CASE WHEN ${DL} IS NULL THEN 'verify' ELSE 'open' END AS open_state, ${lvl} AS location_level,
       l.exec_status, l.exec_communes, l.exec_departments, l.exec_text, l.buyer_city, l.buyer_department, l.publication_departments` : '';
   return {
-    listSql: `SELECT o.id, o.title, ot.code AS journey, o.buyer_name, o.location_city, o.location_department, o.deadline${v2Cols}
+    listSql: `SELECT o.id, o.title, o.description, ot.code AS journey, o.buyer_name, o.location_city, o.location_department, o.deadline${v2Cols}
       ${base} ORDER BY ${pref ? `${pref} ASC, ` : ''}${opts.v2 ? `(${DL} IS NULL) ASC, ${lvl} ASC, ` : ''}${DL} ASC NULLS LAST, o.publication_date DESC NULLS LAST${opts.v2 ? ', o.id ASC' : ''} LIMIT ${limit}`,
     countSql: `SELECT COUNT(*)::int AS n ${base}`,
     params,
