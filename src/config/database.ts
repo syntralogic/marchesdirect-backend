@@ -729,6 +729,7 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     WHERE notification_preferences IS NULL
   `);
   await step(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(500)`);
+  await step(`ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_tokens_valid_after TIMESTAMPTZ`);
 
   // Buyer/requesting-company name (BOAMP's `nomacheteur` etc.) - previously
   // not stored at all, so the opportunity detail page and the sous-traitance
@@ -1813,3 +1814,4 @@ const applyIncrementalMigrations = async (): Promise<void> => {
 };
 
 // Historical demonstration data is deliberately preserved.
+

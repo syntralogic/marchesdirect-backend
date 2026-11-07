@@ -8,6 +8,7 @@ import { generateTokens, verifyRefreshToken, generateMFASecret, verifyMFAToken, 
 import { encryptSecret, decryptSecret, looksEncrypted } from '../utils/encryption';
 import { sendEmail } from './emailService';
 import { OAuth2Client } from 'google-auth-library';
+import { refreshTokenDigest, isAccessTokenRevoked } from '../utils/tokenSecurity';
 
 interface RegisterParams {
   companyName: string;
@@ -228,12 +229,12 @@ export const registerCompanyAndUser = async (data: RegisterParams, brandId?: str
       ]
     );
 
+    const { accessToken, refreshToken } = generateTokens(userId, data.email);
+    await client.query(`INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
+      VALUES ($1, $2, NOW() + INTERVAL '30 days')`, [userId, refreshTokenDigest(refreshToken)]);
     await client.query('COMMIT');
 
     logger.info(`✅ Registered new company: ${data.companyName} (${companyId})`);
-
-    // Generate tokens
-    const { accessToken, refreshToken } = generateTokens(userId, data.email);
 
     return {
       userId,
@@ -334,7 +335,7 @@ export const loginUser = async (email: string, password: string) => {
     const { accessToken, refreshToken } = generateTokens(user.id, user.email);
 
     // Store refresh token
-    const tokenHash = await bcrypt.hash(refreshToken, 5);
+    const tokenHash = refreshTokenDigest(refreshToken);
     await db.query(
       `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
        VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
@@ -469,7 +470,7 @@ export const verifyMFALogin = async (challengeToken: string, code: string) => {
     await db.query('INSERT INTO login_attempts (email, success) VALUES ($1, $2)', [user.email, true]);
 
     const { accessToken, refreshToken } = generateTokens(user.id, user.email);
-    const tokenHash = await bcrypt.hash(refreshToken, 5);
+    const tokenHash = refreshTokenDigest(refreshToken);
     await db.query(
       `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
        VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
@@ -531,23 +532,31 @@ export const refreshAccessToken = async (refreshToken: string) => {
   try {
     const decoded = verifyRefreshToken(refreshToken);
 
-    // Verify session exists
+    // A session for this user is insufficient: it must match this exact token.
+    // Legacy bcrypt hashes truncated long JWTs and cannot prove that match.
+    // Their holders reconnect once; no account or saved data is deleted.
     const sessionResult = await db.query(
-      'SELECT * FROM user_sessions WHERE user_id = $1 AND expires_at > NOW()',
-      [decoded.userId]
+      `SELECT u.email, u.auth_tokens_valid_after FROM user_sessions s
+       JOIN users u ON u.id = s.user_id
+       WHERE s.user_id = $1 AND s.refresh_token_hash = $2 AND s.expires_at > NOW()
+         AND u.deleted_at IS NULL LIMIT 1`,
+      [decoded.userId, refreshTokenDigest(refreshToken)]
     );
 
     if (sessionResult.rows.length === 0) {
       throw new Error('Session expired');
     }
 
-    // Generate new access token
-    const { accessToken, refreshToken: newRefreshToken } = generateTokens(
+    const user = sessionResult.rows[0];
+    if (isAccessTokenRevoked(decoded.iat, user.auth_tokens_valid_after)) throw new Error('Session expired');
+    // Keep the validated refresh token until expiry. Concurrent tabs can renew
+    // safely, while deleting this row immediately prevents further renewals.
+    const { accessToken } = generateTokens(
       decoded.userId,
-      decoded.email
+      user.email
     );
 
-    return { accessToken, refreshToken: newRefreshToken };
+    return { accessToken, refreshToken };
   } catch (err) {
     logger.error('Refresh token error:', err);
     throw err;
@@ -585,7 +594,7 @@ export const requestPasswordReset = async (email: string) => {
     // In production, send email with reset link
     logger.info(`Password reset token generated for ${email}`);
 
-    return { success: true, resetToken }; // In production, send via email
+    return { success: true }; // Never expose a reset credential or account existence in the response.
   } catch (err) {
     logger.error('Password reset request error:', err);
     throw err;
@@ -628,16 +637,10 @@ export const resetPassword = async (userId: string, newPassword: string) => {
     const salt = await bcrypt.genSalt(parseInt(process.env.PASSWORD_SALT_ROUNDS || '10'));
     const passwordHash = await bcrypt.hash(newPassword, salt);
 
-    await db.query(
-      'UPDATE users SET password_hash = $1 WHERE id = $2',
-      [passwordHash, userId]
-    );
-
-    // Invalidate all existing sessions
-    await db.query(
-      'DELETE FROM user_sessions WHERE user_id = $1',
-      [userId]
-    );
+    await db.transaction(async client => {
+      await client.query('UPDATE users SET password_hash = $1, auth_tokens_valid_after = NOW() WHERE id = $2', [passwordHash, userId]);
+      await client.query('DELETE FROM user_sessions WHERE user_id = $1', [userId]);
+    });
 
     logger.info(`✅ Password reset for user ${userId}`);
 
@@ -733,7 +736,7 @@ export class MagicLinkError extends Error {
 
 const issueSession = async (userId: string, email: string) => {
   const { accessToken, refreshToken } = generateTokens(userId, email);
-  const tokenHash = await bcrypt.hash(refreshToken, 5);
+  const tokenHash = refreshTokenDigest(refreshToken);
   await db.query(
     `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
      VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
@@ -851,12 +854,7 @@ export const loginWithGoogle = async (idToken: string, brandId?: string | null) 
       brandId
     );
     await db.query('UPDATE users SET last_login = NOW() WHERE id = $1', [created.userId]);
-    const tokenHash = await bcrypt.hash(created.refreshToken, 5);
-    await db.query(
-      `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
-       VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
-      [created.userId, tokenHash]
-    );
+    // registerCompanyAndUser already saved the exact refresh token.
     logger.info(`✅ New account via Google: ${email}`);
     return { ...created, firstName, role: 'user', isNewUser: true };
   }
@@ -865,20 +863,14 @@ export const loginWithGoogle = async (idToken: string, brandId?: string | null) 
 
   // Existing account: keep 2FA enforced, Google must not bypass it.
   if (user.mfa_enabled) {
-    const tempToken = uuid();
-    await db.query(
-      `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
-       VALUES ($1, $2, NOW() + INTERVAL '10 minutes')`,
-      [user.id, tempToken]
-    );
-    return { mfaRequired: true, mfaToken: tempToken, userId: user.id };
+    return { mfaRequired: true, mfaToken: signMfaChallenge(user.id), userId: user.id };
   }
 
   await db.query('UPDATE users SET last_login = NOW() WHERE id = $1', [user.id]);
   await db.query('INSERT INTO login_attempts (email, success) VALUES ($1, $2)', [email, true]);
 
   const { accessToken, refreshToken } = generateTokens(user.id, user.email);
-  const tokenHash = await bcrypt.hash(refreshToken, 5);
+  const tokenHash = refreshTokenDigest(refreshToken);
   await db.query(
     `INSERT INTO user_sessions (user_id, refresh_token_hash, expires_at)
      VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
@@ -898,3 +890,4 @@ export const loginWithGoogle = async (idToken: string, brandId?: string | null) 
     isNewUser: false,
   };
 };
+

@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { logger } from '../utils/logger';
+import { signPrivateFilePath } from '../utils/privateFileLinks';
 
 // ============================================================================
 // FILE STORAGE (replaces the URL-paste placeholder for company documents)
@@ -188,7 +189,10 @@ export async function uploadCompanyFile(
   mimetype: string,
   buffer: Buffer
 ): Promise<{ url: string; sizeBytes: number }> {
-  const ext = path.extname(originalName) || '';
+  const extensions: Record<string, string> = { 'application/pdf': '.pdf', 'image/jpeg': '.jpg', 'image/png': '.png',
+    'application/msword': '.doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx' };
+  const ext = extensions[mimetype];
+  if (!ext) throw new UploadValidationError('Type de fichier non autorisé.');
   const safeName = `${crypto.randomUUID()}${ext}`;
   const key = `companies/${companyId}/${safeName}`;
 
@@ -267,7 +271,31 @@ export async function resolveFileUrl(storedRef: string): Promise<string> {
       Expires: 300, // 5 minutes
     });
   }
-  return toAbsoluteLocalUrl(storedRef);
+  return toAbsoluteLocalUrl(storedRef.startsWith('/uploads/companies/') || storedRef.startsWith('/uploads/tenders/')
+    ? signPrivateFilePath(storedRef) : storedRef);
+}
+
+/** Only files uploaded into the authenticated company's directory may be attached or signed. */
+export function normaliseCompanyFileReference(value: unknown, companyId: string): string | null {
+  if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(companyId)) return null;
+  let ref = value;
+  if (/^https?:/i.test(ref)) {
+    try {
+      const url = new URL(ref);
+      if (!PUBLIC_BACKEND_URL || url.origin !== new URL(PUBLIC_BACKEND_URL).origin) return null;
+      ref = url.pathname;
+    } catch { return null; }
+  }
+  const key = ref.startsWith('/uploads/') ? ref.slice('/uploads/'.length) : ref;
+  const prefix = `companies/${companyId}/`;
+  if (!key.startsWith(prefix) || !/^[a-zA-Z0-9_.-]+$/.test(key.slice(prefix.length)) ||
+      ['.', '..'].includes(key.slice(prefix.length))) return null;
+  return ref;
+}
+
+export async function resolveCompanyFileUrl(storedRef: string, companyId: string): Promise<string | null> {
+  const ref = normaliseCompanyFileReference(storedRef, companyId);
+  return ref ? resolveFileUrl(ref) : null;
 }
 
 /**
@@ -282,3 +310,4 @@ export function resolveAvatarUrl(storedRef: string): string {
   }
   return toAbsoluteLocalUrl(storedRef);
 }
+

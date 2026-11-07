@@ -13,14 +13,27 @@ const INDEX = 'opportunities_search_text_trgm';
 let running = false;
 
 export async function ensureSearchTextSchema(): Promise<void> {
-  await db.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS search_text TEXT`);
-  await db.query(`CREATE OR REPLACE FUNCTION opportunities_search_text_trg() RETURNS trigger AS $$
-    BEGIN NEW.search_text := ${SEARCH_TEXT_EXPR.replace(/\btitle\b/g, 'NEW.title').replace(/\bdescription\b/g, 'NEW.description')}; RETURN NEW; END $$ LANGUAGE plpgsql`);
-  await db.query(`DROP TRIGGER IF EXISTS opportunities_search_text ON opportunities`);
-  await db.query(`CREATE TRIGGER opportunities_search_text BEFORE INSERT OR UPDATE OF title, description ON opportunities
-    FOR EACH ROW EXECUTE FUNCTION opportunities_search_text_trg()`);
-  // Index partiel pour trouver vite ce qui reste à remplir, sans relire la table à chaque lot.
-  await db.query(`CREATE INDEX IF NOT EXISTS opportunities_search_text_todo ON opportunities (id) WHERE search_text IS NULL`);
+  // Even ADD COLUMN IF NOT EXISTS takes a strong table lock. On restart,
+  // inspect first so an already installed migration never queues that lock.
+  const state = (await db.query(`SELECT
+    EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='opportunities' AND column_name='search_text') AS col,
+    EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='public.opportunities'::regclass AND tgname='opportunities_search_text') AS trg,
+    to_regclass('public.opportunities_search_text_todo') IS NOT NULL AS todo`)).rows[0];
+  if (state?.col && state?.trg && state?.todo) return;
+  const client = await db.getClient();
+  try {
+    await client.query(`SET lock_timeout = '2s'`);
+    if (!state?.col) await client.query(`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS search_text TEXT`);
+    if (!state?.trg) {
+      await client.query(`CREATE OR REPLACE FUNCTION opportunities_search_text_trg() RETURNS trigger AS $$
+        BEGIN NEW.search_text := ${SEARCH_TEXT_EXPR.replace(/\btitle\b/g, 'NEW.title').replace(/\bdescription\b/g, 'NEW.description')}; RETURN NEW; END $$ LANGUAGE plpgsql SET search_path = public, pg_temp`);
+      await client.query(`CREATE TRIGGER opportunities_search_text BEFORE INSERT OR UPDATE OF title, description ON opportunities
+        FOR EACH ROW EXECUTE FUNCTION opportunities_search_text_trg()`);
+    }
+    if (!state?.todo) await client.query(`CREATE INDEX CONCURRENTLY IF NOT EXISTS opportunities_search_text_todo ON opportunities (id) WHERE search_text IS NULL`);
+  } finally {
+    try { await client.query('RESET lock_timeout'); } finally { client.release(); }
+  }
 }
 
 export async function runSearchTextBatch(limit = 3000): Promise<number> {
@@ -52,7 +65,12 @@ async function buildIndex(): Promise<void> {
 }
 
 /** Vrai quand la colonne est complète et indexée : la recherche peut lire o.search_text. Vérifié toutes les 60 s. */
-export const searchTextReady = () => cached('search_text:ready', 60_000, async () => (await remaining()) === 0 && (await indexValid())).catch(() => false);
+export const searchTextReady = () => cached('search_text:ready', 60_000, async () => {
+  try {
+    const r = await db.query(`SELECT EXISTS(SELECT 1 FROM opportunities WHERE search_text IS NULL LIMIT 1) AS pending`);
+    return !r.rows[0]?.pending && await indexValid();
+  } catch { return false; } // Cache the fallback too while a migration is starting.
+});
 
 export async function runSearchTextJob(): Promise<void> {
   if (running) return; running = true;
@@ -74,3 +92,4 @@ export const startSearchTextJob = () => {
   setTimeout(() => { runSearchTextJob().catch(() => {}); }, 40_000);
   logger.info('✅ search_text : remplissage et index programmés (40 s après le démarrage)');
 };
+

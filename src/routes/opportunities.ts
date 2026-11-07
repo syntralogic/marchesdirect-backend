@@ -1,5 +1,6 @@
 import { buildCandidatesQuery, normaliseZone, setUnaccentFn } from '../services/rankedListService';
 import { searchTextReady } from '../jobs/searchTextJob';
+import { requireDiagnosticAccess } from '../middleware/abuseProtection';
 import { generateSlots, freeSlotDays, isOfferedSlot, formatSlotFr, APPOINTMENT_TZ } from '../utils/appointmentSlots';
 import { cached, createBoundedCache } from '../utils/ttlCache';
 import { createHash } from 'crypto';
@@ -1441,7 +1442,7 @@ async function searchOpportunities(req: Request, res: Response) {
     res.status(500).json({ error: 'search_failed', message: 'Impossible de charger les opportunités. Réessayez.' });
   }
 }
-router.get('/', optionalAuth, searchOpportunities);
+router.get('/', requireDiagnosticAccess, optionalAuth, searchOpportunities);
 
 /**
  * Total the list would show for these query-string filters (same code path as
@@ -1852,7 +1853,7 @@ router.get('/appointment-slots', async (_req: Request, res: Response) => {
 // GET /api/opportunities/ranked/diag?siret=… — diagnostic temporaire (7 nov.) : rejoue la liste « Vos marchés » pour une
 // entreprise à partir du cache d'identification, et renvoie durées et erreur de chaque étape. Aucune donnée personnelle
 // (l'entreprise est une personne morale déjà publique), aucune écriture. À retirer une fois le délai dépassé compris.
-router.get('/ranked/diag', async (req: Request, res: Response) => {
+router.get('/ranked/diag', authenticate, requireRole(['admin', 'super_admin']), async (req: Request, res: Response) => {
   const siret = typeof req.query.siret === 'string' && /^\d{14}$/.test(req.query.siret) ? req.query.siret : null;
   if (!siret) return res.status(400).json({ error: 'siret' });
   const steps: Record<string, unknown> = {}; const t = () => Date.now();
@@ -2004,7 +2005,7 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     kickOffDocumentIngestionIfPending(opportunity.id, opportunity.dce_documents_status);
 
     const sessionId = (req.query.sessionId as string) || '';
-    const email = (req.user?.email || (req.query.email as string) || '');
+    const email = req.user?.email || '';
     const unlocked = await resolveIdentityUnlocked(req.params.id, opportunity.journey, sessionId, email);
 
     // Computed from the real buyer_name *before* it's redacted below - the
@@ -2072,7 +2073,7 @@ router.get('/:id/access', optionalAuth, async (req: AuthRequest, res: Response) 
       return res.status(404).json({ error: 'Opportunity not found' });
     }
     const sessionId = (req.query.sessionId as string) || '';
-    const email = (req.user?.email || (req.query.email as string) || '');
+    const email = req.user?.email || '';
     const unlocked = await resolveIdentityUnlocked(req.params.id, oppResult.rows[0].journey, sessionId, email);
     res.json({ identityUnlocked: unlocked });
   } catch (err: any) {
@@ -2416,3 +2417,4 @@ router.post('/:id/extract-facts', authenticate, requireRole(['admin', 'super_adm
 });
 
 export default router;
+

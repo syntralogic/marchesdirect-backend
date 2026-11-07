@@ -12,6 +12,7 @@ import { logger } from './utils/logger';
 import { cached } from './utils/ttlCache';
 import { explainDbFailure } from './utils/dbDiagnostics';
 import { errorHandler } from './middleware/errorHandler';
+import { installAbuseProtection, protectLocalFiles } from './middleware/abuseProtection';
 import { drainActiveJobs } from './utils/jobTracker';
 import { authenticate, optionalAuth } from './middleware/auth';
 import { isVerificationRequired } from './services/phoneVerificationService';
@@ -169,6 +170,7 @@ app.use('/api/', (_req, res, next) => {
 });
 
 app.use('/api/', limiter);
+installAbuseProtection(app);
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/google', authLimiter);
 app.use('/api/auth/register', authLimiter);
@@ -337,7 +339,7 @@ app.use('/api/dossiers', authenticate, require('./routes/dossiers').default);
 app.use('/api/uploads', authenticate, require('./routes/uploads').default);
 // Serves files saved by the local-disk storage fallback (storageService.ts).
 // No-op / unused when AWS_S3_BUCKET is configured, since files then live in S3.
-app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+app.use('/uploads', protectLocalFiles, express.static(process.env.LOCAL_UPLOAD_DIR || path.join(process.cwd(), 'uploads'), { dotfiles: 'deny', index: false }));
 app.use('/api/dashboard', authenticate, require('./routes/dashboard').default);
 app.use('/api/tenders', authenticate, require('./routes/tenders').default);
 app.use('/api/alerts', authenticate, require('./routes/alerts').default);
@@ -788,3 +790,4 @@ const startServer = async () => {
 startServer();
 
 export default app;
+

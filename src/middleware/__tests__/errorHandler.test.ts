@@ -33,7 +33,7 @@ describe("errorHandler", () => {
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({ error: "Database constraint violation", message: "Key already exists" })
+      expect.objectContaining({ error: "Database constraint violation", message: "Les données transmises ne peuvent pas être enregistrées." })
     );
   });
 
@@ -52,7 +52,7 @@ describe("errorHandler", () => {
     errorHandler(new Error("boom"), mockReq(), res, jest.fn());
 
     expect(res.status).toHaveBeenCalledWith(500);
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: "boom" }));
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: "Une erreur est survenue. Réessayez dans quelques instants." }));
   });
 
   it("does not leak the stack trace outside development", () => {
@@ -64,6 +64,7 @@ describe("errorHandler", () => {
 
     const payload = (res.json as jest.Mock).mock.calls[0][0];
     expect(payload.stack).toBeUndefined();
+    expect(JSON.stringify(payload)).not.toContain('boom');
 
     process.env.NODE_ENV = originalEnv;
   });
@@ -91,3 +92,4 @@ describe("asyncHandler", () => {
     expect(next).not.toHaveBeenCalled();
   });
 });
+
