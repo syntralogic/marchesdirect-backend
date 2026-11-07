@@ -18,7 +18,8 @@ function cpvOf(o: any): string | null {
   const m = /"classPrincipale"\s*:\s*"(\d{8})/.exec(raw) || /ItemClassificationCode[^}]*?"#text"\s*:\s*"(\d{8})/.exec(raw) || /"codeCPV"\s*:\s*"(\d{8})/.exec(raw);
   return m ? m[1] : null;
 }
-const fmt = (n: number) => `${Math.round(n).toLocaleString('fr-FR')} €`;
+// Montants arrondis, lisibles d'un coup d'œil : 48 000 → « 48 000 € », 402 345 → « 400 000 € », 1 250 000 → « 1,3 M€ ».
+const fmt = (n: number) => n >= 1e6 ? `${(Math.round(n / 1e5) / 10).toLocaleString('fr-FR')} M€` : `${(Math.round(n / (n >= 1e5 ? 1e4 : 1e3)) * (n >= 1e5 ? 1e4 : 1e3)).toLocaleString('fr-FR')} €`;
 
 // GET /api/awards/opportunity/:id?sessionId= : fourchette de prix comparables + entreprises comme la vôtre.
 router.get('/opportunity/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
@@ -47,8 +48,9 @@ router.get('/opportunity/:id', optionalAuth, async (req: AuthRequest, res: Respo
     const famLabel = cpv ? (CPV_LABEL[cpv.slice(0, 4)] || null) : null;
     res.set('Cache-Control', 'private, max-age=600');
     res.json({ available: !!(range || peers), cpv, cpvFrom, familyLabel: famLabel,
-      price: range ? { ...range, text: `${range.count} marchés comparables${famLabel ? ` (${famLabel})` : ''} attribués ${range.scope === 'departement' ? 'dans ce département' : 'en France'} ces ${range.years} ans : la plupart entre ${fmt(range.low)} et ${fmt(range.high)}, médiane ${fmt(range.median)}.` } : null,
-      peers: peers ? { ...peers, text: `${peers.count} entreprise${peers.count > 1 ? 's' : ''} de votre métier${peers.pme ? ` (dont ${peers.pme} PME)` : ''} ${peers.count > 1 ? 'ont' : 'a'} remporté un marché comparable ces 3 ans${peers.sameDepartment ? `, ${peers.sameDepartment} dans ce département` : ''}.` } : null,
+      // Court et donnant envie : une ligne de prix, une ligne de pairs. Le détail (nombre de marchés, périmètre) reste disponible mais discret.
+      price: range ? { ...range, text: `Des marchés comme celui-ci se gagnent en général entre ${fmt(range.low)} et ${fmt(range.high)}.`, detail: `${range.count} marchés ${famLabel ? `(${famLabel}) ` : ''}attribués ${range.scope === 'departement' ? 'dans ce département' : 'en France'} ces ${range.years} ans · médiane ${fmt(range.median)}` } : null,
+      peers: peers ? { ...peers, text: peers.sameDepartment ? `${peers.sameDepartment} entreprise${peers.sameDepartment > 1 ? 's' : ''} de votre métier ${peers.sameDepartment > 1 ? 'ont' : 'a'} déjà gagné ici. Pourquoi pas vous ?` : `${peers.count} entreprise${peers.count > 1 ? 's' : ''} de votre métier ${peers.count > 1 ? 'ont' : 'a'} déjà gagné ce type de marché. Pourquoi pas vous ?`, detail: `${peers.count} entreprises en France${peers.pme ? `, dont ${peers.pme} PME` : ''}, ces 3 ans` } : null,
       note: 'Montants attribués (HT) publiés par les acheteurs publics, comparés par famille de prestations. Ils situent un ordre de grandeur, pas le prix de votre offre.' });
   } catch (err) { logger.error('[attributions] fiche :', err); res.status(503).json({ error: 'unavailable' }); }
 });

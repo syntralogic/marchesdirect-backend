@@ -35,12 +35,13 @@ export async function priceRange(cpv: string | null, type: string | null, depart
     scopes.push(['france', '', []]);
     for (const [scope, cond, extra] of scopes) {
       const r = await db.query(`SELECT COUNT(*)::int AS n,
-          percentile_cont(0.2) WITHIN GROUP (ORDER BY montant_rationalise) AS low, percentile_cont(0.5) WITHIN GROUP (ORDER BY montant_rationalise) AS med,
-          percentile_cont(0.8) WITHIN GROUP (ORDER BY montant_rationalise) AS high
+          percentile_cont(0.25) WITHIN GROUP (ORDER BY montant_rationalise) AS low, percentile_cont(0.5) WITHIN GROUP (ORDER BY montant_rationalise) AS med,
+          percentile_cont(0.75) WITHIN GROUP (ORDER BY montant_rationalise) AS high
         FROM public_awards WHERE left(cpv, 4) = $1 AND ($2::text IS NULL OR type = $2) AND COALESCE(montant_anomalie, '') <> 'aberrant'
           AND montant_rationalise BETWEEN 1000 AND 50000000 AND date_notification >= CURRENT_DATE - INTERVAL '3 years' ${cond}`, [fam, type, ...extra]);
       const n = r.rows[0]?.n || 0;
-      if (n >= 5) {
+      // Une fourchette qui s'étale sur plus de ×12 (petits lots et gros marchés globaux mélangés) ne dit rien : on ne l'affiche pas.
+      if (n >= 5 && Number(r.rows[0].high) <= 12 * Math.max(1, Number(r.rows[0].low))) {
         const s = await db.query(`SELECT objet, montant_rationalise AS montant, acheteur_nom, EXTRACT(YEAR FROM date_notification)::int AS year FROM public_awards
           WHERE left(cpv, 4) = $1 AND ($2::text IS NULL OR type = $2) AND COALESCE(montant_anomalie, '') <> 'aberrant' AND montant_rationalise BETWEEN 1000 AND 50000000
             AND date_notification >= CURRENT_DATE - INTERVAL '3 years' ${cond} AND objet IS NOT NULL ORDER BY date_notification DESC LIMIT 3`, [fam, type, ...extra]);
