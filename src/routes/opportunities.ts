@@ -1,4 +1,5 @@
 import { buildCandidatesQuery, normaliseZone, setUnaccentFn } from '../services/rankedListService';
+import { searchTextReady } from '../jobs/searchTextJob';
 import { generateSlots, freeSlotDays, isOfferedSlot, formatSlotFr, APPOINTMENT_TZ } from '../utils/appointmentSlots';
 import { cached, createBoundedCache } from '../utils/ttlCache';
 import { createHash } from 'crypto';
@@ -532,6 +533,8 @@ async function searchOpportunities(req: Request, res: Response) {
     // (buildSearchTrigramIndexes). It exists whenever search_vector does (the
     // generated column depends on it), so the same check decides which to use.
     const ua = (await hasSearchVectorColumn()) ? 'immutable_unaccent' : 'unaccent';
+    // 7 nov. : texte normalisé stocké (jobs/searchTextJob.ts) dès qu'il est complet et indexé ; sinon l'expression.
+    const TXT = (ua === 'immutable_unaccent' && await searchTextReady()) ? 'o.search_text' : `lower(${ua}(o.title || ' ' || COALESCE(o.description, '')))`;
 
     // Single source of truth for "does this notice match this word" - used by the
     // free-text box AND by the métier (trade_id) filter below, so typing
@@ -571,7 +574,7 @@ async function searchOpportunities(req: Request, res: Response) {
           if (lotPattern) {
             const lotIdx = idx++;
             params.push(lotPattern);
-            lotCond = ` OR lower(${ua}(o.title || ' ' || COALESCE(o.description, ''))) ~ $${lotIdx}`;
+            lotCond = ` OR ${TXT} ~ $${lotIdx}`;
           }
           let cond = `(${ua}(o.title) ILIKE ANY($${titleIdx}::text[]) OR ${tradeCond}${lotCond})`;
           // Client audit (27 Sep, point 3): "CVC"/"ventilation" matching a
@@ -586,7 +589,7 @@ async function searchOpportunities(req: Request, res: Response) {
           if (mismatchPattern) {
             const mismatchIdx = idx++;
             params.push(mismatchPattern);
-            cond = `((${cond}) AND NOT (lower(${ua}(o.title || ' ' || COALESCE(o.description, ''))) ~ $${mismatchIdx}))`;
+            cond = `((${cond}) AND NOT (${TXT} ~ $${mismatchIdx}))`;
           }
           wordCondition = cond;
         } else {
@@ -644,7 +647,7 @@ async function searchOpportunities(req: Request, res: Response) {
         if (keywords.length > 0) {
           const kwIdx = idx++;
           params.push(`\\y(${keywords.map((k) => k.toLowerCase()).join('|')})\\y`);
-          let keywordCond = `lower(${ua}(o.title || ' ' || COALESCE(o.description, ''))) ~ $${kwIdx}`;
+          let keywordCond = `${TXT} ~ $${kwIdx}`;
           // AND-NOT any domain-mismatch exclusion any of these keywords
           // trigger (deduplicated - the same rule can fire for several
           // keywords of the same trade, e.g. "chauffage" and "ventilation"
@@ -655,7 +658,7 @@ async function searchOpportunities(req: Request, res: Response) {
           for (const excl of exclusions) {
             const exIdx = idx++;
             params.push(excl);
-            keywordCond += ` AND unaccent(o.title || ' ' || COALESCE(o.description, '')) !~* $${exIdx}`;
+            keywordCond += ` AND ${TXT} !~* $${exIdx}`;
           }
           fullCond = `(${baseCond} OR (${keywordCond}))`;
         }
