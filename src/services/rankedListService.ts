@@ -29,7 +29,7 @@ export function normaliseZone(zone: unknown): string | null {
 // présent en production, et buildCandidatesQuery accepte `ua: 'unaccent'` pour une base sans ce wrapper.
 let UA = 'immutable_unaccent';
 export function setUnaccentFn(fn: 'immutable_unaccent' | 'unaccent') { UA = fn; }
-export function buildCandidatesQuery(opts: { tradeSlugs: string[]; department: string | null; preferDepartment?: string | null; limit?: number; v2?: boolean }) {
+export function buildCandidatesQuery(opts: { tradeSlugs: string[]; department: string | null; preferDepartment?: string | null; limit?: number; v2?: boolean; journey?: string | null }) {
   const limit = Math.min(Math.max(Math.floor(opts.limit || 40), 1), MAX_CANDIDATES);
   const params: unknown[] = [opts.tradeSlugs];
   const where = [
@@ -62,6 +62,8 @@ export function buildCandidatesQuery(opts: { tradeSlugs: string[]; department: s
     tradeCond = `(${tradeCond} OR ${kw})`;
   }
   where[where.indexOf('__TRADE__')] = tradeCond;
+  // 7 nov. : pastille de type (marchés publics / appels d'offres privés / sous-traitance) appliquée côté serveur.
+  if (opts.journey && ['public_procurement', 'tender', 'subcontracting'].includes(opts.journey)) { params.push(opts.journey); where.push(`ot.code = $${params.length}`); }
   if (opts.department) {
     params.push(opts.department);
     where.push(opts.v2
