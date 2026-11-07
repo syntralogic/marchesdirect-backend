@@ -344,6 +344,7 @@ app.use('/api/dashboard', authenticate, require('./routes/dashboard').default);
 app.use('/api/tenders', authenticate, require('./routes/tenders').default);
 app.use('/api/alerts', authenticate, require('./routes/alerts').default);
 app.use('/api/favorites', optionalAuth, require('./routes/favorites').default);
+app.use('/api/saved-searches', optionalAuth, require('./routes/savedSearches').default); // 7 nov. : recherches sauvegardées suivant le visiteur
 app.use('/api/suivi', optionalAuth, require('./routes/suivi').default);
 app.use('/api/chatbot', optionalAuth, require('./routes/chatbot').default);
 app.use('/api/advisor', optionalAuth, require('./routes/advisor').default);

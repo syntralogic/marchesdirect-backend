@@ -3,6 +3,7 @@ import { logger } from '../utils/logger';
 import { trackJob } from '../utils/jobTracker';
 import { processDueFollowUps } from '../services/followUpService';
 import { sendDueAlerts } from '../services/alertSubscriptionService';
+import { sendSavedSearchAlerts } from '../services/savedSearchAlertService';
 
 // Reminders and trade/zone alerts. Both are inert until FOLLOW_UP_EMAILS_ENABLED / ALERT_EMAILS_ENABLED are 'true'.
 export const startFollowUpsSchedule = () => {
@@ -12,6 +13,8 @@ export const startFollowUpsSchedule = () => {
       catch (err) { logger.error('[Job] Follow-up sweep failed:', err); }
       try { const a = await sendDueAlerts(); if (a.sent + a.failed) logger.info(`[Job] Trade/zone alerts: ${JSON.stringify(a)}`); }
       catch (err) { logger.error('[Job] Alert sweep failed:', err); }
+      try { const a = await sendSavedSearchAlerts(); if (a.sent + a.failed + a.pending) logger.info(`[Job] Saved-search alerts: ${JSON.stringify(a)}`); }
+      catch (err) { logger.error('[Job] Saved-search alert sweep failed:', err); }
     });
   });
   logger.info('✅ Follow-up and alert jobs scheduled (every 30 min; sending off until validated)');
