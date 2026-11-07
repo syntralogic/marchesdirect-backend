@@ -43,4 +43,14 @@ describe('ranked list candidates', () => {
     expect(buildCandidatesQuery({ tradeSlugs: ['a'], department: null, limit: 9999 }).listSql).toContain(`LIMIT ${MAX_CANDIDATES}`);
     expect(buildCandidatesQuery({ tradeSlugs: ['a'], department: null, limit: 0 }).listSql).toContain('LIMIT 40');
   });
+
+  it('7 nov. : le comptage ne reçoit pas le paramètre du département préféré (bind message supplies 4 parameters…)', () => {
+    const q = buildCandidatesQuery({ tradeSlugs: ['cvc'], department: null, preferDepartment: '92', v2: true });
+    expect(q.params.length).toBe(q.countParams.length + 1);
+    expect(q.countSql).not.toContain(`$${q.params.length}`);
+    const used = new Set((q.countSql.match(/\$\d+/g) || []).map(x => Number(x.slice(1))));
+    expect(Math.max(...used)).toBe(q.countParams.length);
+    const q2 = buildCandidatesQuery({ tradeSlugs: ['cvc'], department: '92', preferDepartment: '92', v2: true });
+    expect(q2.countParams.length).toBe(q2.params.length);
+  });
 });
