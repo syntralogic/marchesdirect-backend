@@ -99,6 +99,9 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     if (need.status !== 'published' && !isOwner) {
       return res.status(404).json({ error: 'Need not found' });
     }
+    // 7 nov. : les coordonnées du donneur d'ordre ne sortent du serveur que pour lui-même ; la fiche publique ne
+    // contient que les informations publiques (le masquage à l'écran ne suffit pas).
+    if (!isOwner) { delete need.contact_email; delete need.contact_phone; delete need.company_id; }
     res.json({ ...need, matchScore: computeSubcontractNeedMatchScore(need) });
   } catch (err: any) {
     logger.error('Subcontract need detail error:', err);

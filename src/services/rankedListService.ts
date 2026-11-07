@@ -3,7 +3,7 @@
 // and the page fills them in as they arrive. A market outside the trade is never added "to make up the numbers".
 import { keywordsForSlugs } from './tradeResolver';
 import { domainMismatchExclusionSqlPattern } from '../utils/searchQuery';
-export const MAX_CANDIDATES = 60;
+export const MAX_CANDIDATES = 200; // 7 nov. : « Voir plus » sur la liste par entreprise (par pas de 40)
 // Expressions de métier fréquentes dans les intitulés, en plus du vocabulaire mot à mot (texte sans accents, minuscules).
 const EXTRA_TITLE_PATTERNS: Record<string, string[]> = {
   cvc: ['climatiseurs?', 'pompes? a chaleur', 'pac', 'vmc', 'frigoristes?', 'genie climatique', 'chaufferies?', 'chaudieres'],
@@ -87,7 +87,10 @@ export function buildCandidatesQuery(opts: { tradeSlugs: string[]; department: s
   return {
     listSql: `SELECT o.id, o.title, o.description, ot.code AS journey, o.buyer_name, o.location_city, o.location_department, o.deadline${v2Cols}
       ${base} ORDER BY ${pref ? `${pref} ASC, ` : ''}${opts.v2 ? `(${DL} IS NULL) ASC, ${lvl} ASC, ` : ''}${DL} ASC NULLS LAST, o.publication_date DESC NULLS LAST${opts.v2 ? ', o.id ASC' : ''} LIMIT ${limit}`,
-    countSql: `SELECT COUNT(*)::int AS n ${base}`,
+    // 7 nov. : répartition par type sur tout le résultat (les pastilles « Marchés publics / Appels d'offres privés /
+    // Sous-traitance » comptaient seulement les 40 annonces chargées).
+    countSql: `SELECT COUNT(*)::int AS n, COUNT(*) FILTER (WHERE ot.code = 'public_procurement')::int AS n_public,
+      COUNT(*) FILTER (WHERE ot.code = 'tender')::int AS n_tender, COUNT(*) FILTER (WHERE ot.code = 'subcontracting')::int AS n_sub ${base}`,
     params,
     // 7 nov. : le département préféré n'apparaît que dans l'ORDER BY de la liste ; le comptage ne doit pas le recevoir
     // (« bind message supplies 4 parameters, but prepared statement requires 3 » : c'était l'échec de « Vos marchés »

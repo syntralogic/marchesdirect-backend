@@ -40,6 +40,7 @@ const SOURCE_LABELS: Record<string, string> = {
   callback_modal: 'Demande de rappel',
   appointment_modal: 'Demande de rendez-vous',
   alert_request: 'Alerte nouveaux marchés',
+  client_need: 'Besoin déposé (donneur d’ordre)',
 };
 
 // Order: LEAD_NOTIFICATION_EMAILS env (comma separated) -> support email
