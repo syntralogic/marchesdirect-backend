@@ -1671,7 +1671,8 @@ const applyIncrementalMigrations = async (): Promise<void> => {
     INSERT INTO trades (name, slug, description) VALUES
     ('Espaces verts', 'espaces-verts', 'Aménagement paysager et entretien des espaces verts'),
     ('Nettoyage', 'nettoyage', 'Prestations de nettoyage (bâtiments, sites, parties communes)'),
-    ('Maintenance', 'maintenance', 'Contrats de maintenance et d''entretien de bâtiments')
+    ('Maintenance', 'maintenance', 'Contrats de maintenance et d''entretien de bâtiments'),
+    ('Sécurité, gardiennage', 'securite', 'Gardiennage, surveillance, sûreté et sécurité incendie')
     ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description
   `);
   // A dedicated source row for this content: it isn't a scraped connector

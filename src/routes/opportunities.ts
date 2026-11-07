@@ -498,6 +498,15 @@ async function searchOpportunities(req: Request, res: Response) {
     // 4 Nov: no demonstration rows in search results (see LIST_SCOPE_SQL).
     conditions.push("COALESCE(ds.code, '') <> 'editorial_catalog'");
     const params: any[] = [];
+    // 7 nov. (favoris sans compte) : « Mon espace » demandait une fiche par favori (20 requêtes, et rien au-delà de 20).
+    // ids=a,b,c (200 max) renvoie ces annonces en une requête, quel que soit leur statut.
+    const idsParam = String((req.query as any).ids || '');
+    if (idsParam) {
+      const ids = idsParam.split(',').map(x => x.trim()).filter(x => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(x)).slice(0, 200);
+      if (ids.length === 0) return res.json({ results: [], pagination: { page: 1, limit: 200, total: 0, totalPages: 0 } });
+      params.push(ids);
+      conditions.push(`o.id = ANY($${params.length}::uuid[])`);
+    }
     let idx = 1;
     // Captured when the q filter below builds its tsvector/tsquery match,
     // so sort=match can rank by the same relevance expression instead of
