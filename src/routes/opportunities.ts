@@ -1963,17 +1963,21 @@ router.get('/ranked/candidates', optionalAuth, async (req: AuthRequest, res: Res
     }
     const v2 = String(req.query.loc || '') === '2' && await hasLocationTable();
     setUnaccentFn((await hasSearchVectorColumn()) ? 'immutable_unaccent' : 'unaccent');
-    const q = buildCandidatesQuery({ tradeSlugs: trades, department, preferDepartment: homeDepartment, limit: Number(req.query.limit) || 40, v2 });
+    const journey = typeof req.query.journey === 'string' && req.query.journey !== 'all' ? req.query.journey : null;
+    const limit = Number(req.query.limit) || 40;
+    const q = buildCandidatesQuery({ tradeSlugs: trades, department, preferDepartment: homeDepartment, limit, v2, journey });
+    // Répartition par type calculée sans la pastille de type, pour que chaque pastille affiche son vrai total.
+    const qAll = journey ? buildCandidatesQuery({ tradeSlugs: trades, department, preferDepartment: homeDepartment, limit, v2 }) : q;
     // 7 nov. (Hedi : 2-3 s d'attente) : même métiers, même zone → même liste pendant 2 min, sans relancer les deux requêtes.
     const t0 = Date.now();
-    const [list, count] = await cached(`ranked:${trades.slice().sort().join(',')}:${department || ''}:${homeDepartment || ''}:${q.params.length}:${v2}:${Number(req.query.limit) || 40}`, 120_000,
-      () => Promise.all([db.query(q.listSql, q.params), db.query(q.countSql, q.countParams)]));
+    const [list, count] = await cached(`ranked:${trades.slice().sort().join(',')}:${department || ''}:${homeDepartment || ''}:${q.params.length}:${v2}:${limit}:${journey || ''}`, 120_000,
+      () => Promise.all([db.query(q.listSql, q.params), db.query(qAll.countSql, qAll.countParams)]));
     // 7 nov. : le lot qui concerne l'entreprise (« lot plomberie-sanitaire ») ; le texte de l'annonce n'est pas renvoyé.
     const wanted = new Set(trades);
     const items = list.rows.map((r: any) => { const { description, ...rest } = r;
       return { ...rest, matched_lot: pickRelevantLot(description, (lot) => extractTradeSlugs(lot).some((s: string) => wanted.has(s))) }; });
     res.json({
-      items, total: count.rows[0]?.n || 0, zone: department || 'france', homeDepartment, timing: { ms: Date.now() - t0 },
+      items, total: count.rows[0]?.n || 0, zone: department || 'france', homeDepartment, timing: { ms: Date.now() - t0 }, journey,
       byJourney: { public_procurement: count.rows[0]?.n_public || 0, tender: count.rows[0]?.n_tender || 0, subcontracting: count.rows[0]?.n_sub || 0 },
       company: { name: profile?.name || null, activity: profile?.activityText || null, city: profile?.city || null, department: profile?.department || null },
     });
