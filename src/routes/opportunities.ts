@@ -1371,6 +1371,17 @@ async function searchOpportunities(req: Request, res: Response) {
     // 7 nov. : temps de chaque étape renvoyé dans la réponse (champ `timing`, ignoré par le site) et dans l'en-tête
     // Server-Timing, pour savoir où part le temps d'une recherche en production.
     const tPrep = Date.now(); let tList = 0; let tCount = 0;
+    // 7 nov. (recherche à 5-16 s en production, diagnostic temporaire) : ?explain=1 renvoie le plan d'exécution mesuré
+    // de la requête de liste au lieu des résultats. Lecture seule ; à retirer une fois la recherche accélérée.
+    if (String(req.query.explain || '') === '1' && !countOnly) {
+      const listSqlForPlan = `SELECT o.id FROM opportunities o
+         ${SCOPE_JOINS}
+         WHERE ${whereClause}
+         ORDER BY ${orderClause}
+         LIMIT $${limitIdx} OFFSET $${offsetIdx}`;
+      const plan = await db.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) ${listSqlForPlan}`, listParams);
+      return res.json({ plan: plan.rows.map((r: any) => r['QUERY PLAN']), where: whereClause, order: orderClause });
+    }
     const [rows, breakdown] = await Promise.all([
       countOnly ? Promise.resolve([] as any[]) : searchListCache(searchCacheKey('list', whereClause, orderClause, listParams), SEARCH_LIST_TTL_MS, loadList).then(r => { tList = Date.now() - tPrep; return r; }),
       v2 ? (searchCountCache(searchCacheKey('breakdown', whereClause, params), SEARCH_COUNT_TTL_MS, loadBreakdown as any).then(r => { tCount = Date.now() - tPrep; return r; }).catch(() => null) as Promise<any>) : Promise.resolve(null),
