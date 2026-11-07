@@ -94,9 +94,25 @@ router.get('/compteur', async (_req: Request, res: Response) => {
           LEFT JOIN data_sources ds ON ds.id = o.source_id
          WHERE o.deleted_at IS NULL AND o.status = 'active' AND NOT COALESCE(o.is_cancelled, false)
            AND COALESCE(ds.code, '') <> 'editorial_catalog' AND (ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))`);
+      // 7 nov. : même compteur par parcours (public, privé, sous-traitance). « new24h » = annonces arrivées sur le site
+      // dans les dernières 24 h et encore disponibles (les archives et les annonces retirées ne comptent pas).
+      const byJ = await db.query(`
+        SELECT ot.code AS journey,
+               COUNT(*) FILTER (WHERE COALESCE(l.notice_deadline, o.deadline) >= NOW() AND COALESCE(l.notice_deadline, o.deadline) <= NOW() + INTERVAL '3 years')::int AS open,
+               COUNT(*) FILTER (WHERE COALESCE(l.notice_deadline, o.deadline) IS NULL)::int AS verify,
+               COUNT(*) FILTER (WHERE o.created_at >= NOW() - INTERVAL '24 hours')::int AS new24h,
+               MAX(o.created_at) AS last_added
+          FROM opportunities o
+          JOIN opportunity_types ot ON ot.id = o.opportunity_type_id
+          LEFT JOIN opportunity_locations l ON l.opportunity_id = o.id
+          LEFT JOIN data_sources ds ON ds.id = o.source_id
+         WHERE o.deleted_at IS NULL AND o.status = 'active' AND NOT COALESCE(o.is_cancelled, false)
+           AND COALESCE(ds.code, '') <> 'editorial_catalog' AND (ds.code IS DISTINCT FROM 'ted' OR o.location_country IN ('FR', 'FRA'))
+         GROUP BY ot.code`).catch(() => ({ rows: [] as any[] }));
+      const byJourney = Object.fromEntries(byJ.rows.map((r: any) => [r.journey, { open: r.open, verify: r.verify, new24h: r.new24h, lastAddedAt: r.last_added }]));
       const src = await db.query(`SELECT code, name, active AS is_active, last_run, next_run, frequency_hours, total_imports FROM data_sources WHERE COALESCE(code, '') <> 'editorial_catalog' ORDER BY last_run DESC NULLS LAST`);
       const lastImportAt = src.rows.find((r: any) => r.is_active && r.last_run)?.last_run || null;
-      counterCache = { at: Date.now(), body: { ...c.rows[0], lastImportAt, sources: src.rows.map((r: any) => ({ code: r.code, active: r.is_active, lastRun: r.last_run, nextRun: r.next_run, everyHours: r.frequency_hours, totalImports: r.total_imports })), computedAt: new Date().toISOString() } };
+      counterCache = { at: Date.now(), body: { ...c.rows[0], lastImportAt, byJourney, sources: src.rows.map((r: any) => ({ code: r.code, active: r.is_active, lastRun: r.last_run, nextRun: r.next_run, everyHours: r.frequency_hours, totalImports: r.total_imports })), computedAt: new Date().toISOString() } };
     }
     res.set('Cache-Control', 'public, max-age=60, s-maxage=300').json(counterCache.body);
   } catch (err: any) { res.status(503).json({ error: 'unavailable' }); }
