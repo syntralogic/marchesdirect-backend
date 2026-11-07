@@ -52,9 +52,32 @@ const releaseJobSlot = (): void => {
   if (next) next();
 };
 
+// 8 nov. (erreurs Postgres au démarrage : verrous en conflit, clés en double) : pendant un déploiement Render, l'ancienne
+// et la nouvelle instance tournent ensemble quelques minutes et lançaient les mêmes travaux (import, dédoublonnage,
+// alertes, index) en même temps. Un verrou consultatif Postgres par famille de job (la partie avant « : ») garantit
+// qu'une seule instance l'exécute ; l'autre passe son tour et le note.
+async function withDbJobLock<T>(name: string, fn: () => Promise<T>): Promise<T | undefined> {
+  const family = name.split(':')[0];
+  let client: any = null;
+  try {
+    const { db } = require('../config/database');
+    client = await db.getClient();
+    const r = await client.query('SELECT pg_try_advisory_lock(hashtext($1)) AS ok', [`job:${family}`]);
+    if (!r.rows[0]?.ok) { logger.info(`[Jobs] ${name} : déjà en cours sur une autre instance, passage ignoré`); client.release(); return undefined; }
+  } catch (err) {
+    // Base indisponible pour le verrou : on exécute quand même (comportement d'avant), on ne bloque pas le site.
+    try { client?.release(); } catch { /* rien */ }
+    client = null;
+  }
+  try { return await fn(); }
+  finally {
+    if (client) { try { await client.query('SELECT pg_advisory_unlock(hashtext($1))', [`job:${family}`]); } catch { /* connexion rendue */ } client.release(); }
+  }
+}
+
 export function trackJob<T>(name: string, fn: () => Promise<T>): Promise<T> {
   const p = acquireJobSlot()
-    .then(fn)
+    .then(() => withDbJobLock(name, fn) as Promise<T>)
     .finally(releaseJobSlot)
     .catch(err => {
       // Jobs already log their own failures internally; this catch exists

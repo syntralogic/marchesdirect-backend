@@ -208,13 +208,25 @@ const step = async (sql: string): Promise<void> => {
       const r = await pool.query(`SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1`, [idx[1]]);
       if (r.rows.length) return;
     }
-    const client = await pool.connect();
-    try {
-      await client.query(`SET lock_timeout = '5s'`);
-      await client.query(sql);
-    } finally {
-      try { await client.query('RESET lock_timeout'); } catch { /* connexion rendue telle quelle */ }
-      client.release();
+    // 8 nov. : un verrou tenu par l'instance précédente (lot d'import, index) faisait échouer l'étape au bout de 5 s
+    // (« canceling statement due to lock timeout »). On réessaie 3 fois à 15 s d'intervalle avant d'abandonner.
+    for (let attempt = 1; ; attempt++) {
+      const client = await pool.connect();
+      try {
+        await client.query(`SET lock_timeout = '5s'`);
+        await client.query(sql);
+        return;
+      } catch (err: any) {
+        if (err?.code === '55P03' && attempt < 4) {
+          logger.warn(`Migration step waiting for a lock (attempt ${attempt}/3, retry in 15 s): ${sql.trim().slice(0, 80).replace(/\s+/g, ' ')}`);
+          await new Promise((r) => setTimeout(r, 15000));
+          continue;
+        }
+        throw err;
+      } finally {
+        try { await client.query('RESET lock_timeout'); } catch { /* connexion rendue telle quelle */ }
+        client.release();
+      }
     }
   } catch (err) {
     logger.error(`⚠️ Migration step failed (continuing with the rest): ${sql.trim().slice(0, 120).replace(/\s+/g, ' ')}`, err);
