@@ -1974,6 +1974,7 @@ router.get('/ranked/candidates', optionalAuth, async (req: AuthRequest, res: Res
       return { ...rest, matched_lot: pickRelevantLot(description, (lot) => extractTradeSlugs(lot).some((s: string) => wanted.has(s))) }; });
     res.json({
       items, total: count.rows[0]?.n || 0, zone: department || 'france', homeDepartment, timing: { ms: Date.now() - t0 },
+      byJourney: { public_procurement: count.rows[0]?.n_public || 0, tender: count.rows[0]?.n_tender || 0, subcontracting: count.rows[0]?.n_sub || 0 },
       company: { name: profile?.name || null, activity: profile?.activityText || null, city: profile?.city || null, department: profile?.department || null },
     });
   } catch (err: any) {

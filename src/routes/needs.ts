@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
+import { notifyTeamOfNewLead } from '../services/leadNotificationService';
 import { clearCache } from '../utils/ttlCache';
 import { authenticate, requireRole } from '../middleware/auth';
 import { DEPARTMENTS } from '../services/seoV2Service';
@@ -72,6 +73,21 @@ router.post('/', async (req: Request, res: Response) => {
     await db.query(`UPDATE client_needs SET reference = $2 WHERE id = $1`, [id, reference]);
     logger.info(`[besoins] nouveau besoin ${reference} (${journey}, ${need.dept}) en attente de relecture`);
     res.json({ ok: true, reference });
+    // 7 nov. : l'équipe est prévenue comme pour tout contact (fiche dans Leads / Contacts, synchronisation CRM,
+    // e-mail LEAD_NOTIFICATION_EMAILS si configuré). Un besoin déposé ne doit pas dormir dans les journaux.
+    void (async () => {
+      try {
+        const brandId = (await db.query('SELECT id FROM brands ORDER BY created_at ASC LIMIT 1')).rows[0]?.id;
+        if (!brandId) return;
+        const msg = [`Besoin ${reference} déposé (${journey === 'subcontracting' ? 'sous-traitance' : 'appel d’offres privé'}) — à relire dans Besoins.`,
+          `Objet : ${need.title}`, need.trades.length ? `Métiers : ${need.trades.join(', ')}` : null, `Département : ${need.dept}${need.city ? ` · ${need.city}` : ''}`,
+          need.min || need.max ? `Budget : ${[need.min, need.max].filter(Boolean).join(' – ')} €` : null, need.deadline ? `Réponse attendue : ${need.deadline}` : null,
+          need.kind ? `Type : ${need.kind}` : null].filter(Boolean).join('\n');
+        const l = await db.query(`INSERT INTO crm_leads (brand_id, first_name, email, phone, company_name, location_city, lead_source, message, session_id, crm_sync_status)
+          VALUES ($1,$2,$3,$4,$5,$6,'client_need',$7,$8,'pending') RETURNING id`, [brandId, need.contact, need.email, need.phone, need.company, need.city, msg, need.session]);
+        await notifyTeamOfNewLead({ id: l.rows[0].id, firstName: need.contact, email: need.email, phone: need.phone, companyName: need.company, locationCity: need.city, leadSource: 'client_need', message: msg });
+      } catch (e) { logger.error(`[besoins] notification équipe ${reference} :`, e); }
+    })();
   } catch (err) { logger.error('[besoins] dépôt :', err); res.status(503).json({ error: 'unavailable' }); }
 });
 
