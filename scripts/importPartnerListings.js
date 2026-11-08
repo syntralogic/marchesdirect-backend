@@ -101,7 +101,7 @@ async function geocode(city) {
   let out = null;
   try {
     const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 8000);
-    const r = await fetch(`https://api-adresse.data.gouv.fr/search/?q=${encodeURIComponent(q)}&type=municipality&limit=1`, { signal: ctl.signal });
+    const r = await fetch(`https://data.geopf.fr/geocodage/search?q=${encodeURIComponent(q)}&type=municipality&limit=1`, { signal: ctl.signal });
     clearTimeout(tm);
     if (r.ok) {
       const f = (await r.json()).features?.[0];

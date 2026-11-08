@@ -41,7 +41,11 @@
 import axios from 'axios';
 import { logger } from '../utils/logger';
 
-const GEOCODE_BASE_URL = 'https://api-adresse.data.gouv.fr/search/';
+// 8 nov. : l'API Adresse a été transférée à l'IGN ; l'ancienne adresse n'était maintenue que jusqu'en janvier 2026, et
+// toutes les géolocalisations échouaient (« Paris introuvable », distance du pourcentage absente). Nouvelle adresse
+// officielle (même paramètres, même réponse GeoJSON), l'ancienne gardée en secours.
+const GEOCODE_BASE_URL = 'https://data.geopf.fr/geocodage/search';
+const GEOCODE_FALLBACK_URL = 'https://api-adresse.data.gouv.fr/search/';
 
 export interface GeocodeResult {
   lat: number;
@@ -125,10 +129,9 @@ export const geocodeCityDetailed = async (
   const q = departmentCode ? `${cityTrimmed} (${departmentCode})` : cityTrimmed;
 
   try {
-    const response = await axios.get(GEOCODE_BASE_URL, {
-      params: { q, type: 'municipality', limit: 1 },
-      timeout: 5000,
-    });
+    const params = { q, type: 'municipality', limit: 1 };
+    const response = await axios.get(GEOCODE_BASE_URL, { params, timeout: 5000 })
+      .catch(() => axios.get(GEOCODE_FALLBACK_URL, { params, timeout: 5000 }));
     const feature = response.data?.features?.[0];
     const coords = feature?.geometry?.coordinates;
     if (!Array.isArray(coords) || coords.length !== 2) return { status: 'nomatch' };
@@ -156,10 +159,20 @@ export const geocodeCityDetailed = async (
 };
 
 // Backwards-compatible wrapper: null for both "no match" and "error".
+// 8 nov. : mémoire des villes trouvées (24 h), pour ne pas réinterroger le service public à chaque recherche.
+const cityMemo = new Map<string, { at: number; r: GeocodeResult }>();
 export const geocodeCity = async (
   city: string,
   departmentCode?: string | null
 ): Promise<GeocodeResult | null> => {
+  const key = `${String(city || '').trim().toLowerCase()}|${departmentCode || ''}`;
+  const hit = cityMemo.get(key);
+  if (hit && Date.now() - hit.at < 86400000) return hit.r;
   const out = await geocodeCityDetailed(city, departmentCode);
-  return out.status === 'ok' ? out.result : null;
+  if (out.status === 'ok') {
+    cityMemo.set(key, { at: Date.now(), r: out.result });
+    if (cityMemo.size > 5000) cityMemo.delete(cityMemo.keys().next().value as string);
+    return out.result;
+  }
+  return null;
 };
