@@ -1,0 +1,69 @@
+name: Sync to upstream
+
+# Runs ONLY in the client repo. On every push to main it pushes main to the
+# upstream repo (syntralogic/marchesdirect-backend) over SSH using a deploy key that belongs to the
+# upstream repo, so it keeps working even after any collaborator access or
+# personal token is gone. Never force-pushes; stops with an error and opens an
+# issue on conflict.
+#
+# One-time setup (repo admin): Settings > Secrets and variables > Actions >
+# New repository secret > name UPSTREAM_DEPLOY_KEY > paste the private key.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: sync-to-upstream
+  cancel-in-progress: false
+
+jobs:
+  push-upstream:
+    if: github.repository == 'hedi4060/Marche-direct-back'
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_DEPLOY_KEY: ${{ secrets.UPSTREAM_DEPLOY_KEY }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Push main to upstream (merge if histories differ, never force)
+        run: |
+          if [ -z "$UPSTREAM_DEPLOY_KEY" ]; then
+            echo "::warning::UPSTREAM_DEPLOY_KEY secret is not set in this repo, so nothing was pushed to upstream. See the comment at the top of this file."
+            exit 0
+          fi
+          git config user.name "sync-bot"
+          git config user.email "sync-bot@users.noreply.github.com"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$UPSTREAM_DEPLOY_KEY" > ~/.ssh/upstream_key
+          chmod 600 ~/.ssh/upstream_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/upstream_key -o IdentitiesOnly=yes"
+          git remote add upstream git@github.com:syntralogic/marchesdirect-backend.git
+          git fetch upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            git push upstream HEAD:main
+          elif git merge-base --is-ancestor HEAD upstream/main; then
+            echo "upstream is ahead of this repo; the scheduled pull will bring it here."
+          else
+            git checkout -q -b mirror HEAD
+            git merge --no-edit upstream/main || { echo "::error::Merge conflict with upstream/main. Resolve manually; nothing was pushed."; exit 1; }
+            git push upstream mirror:main
+          fi
+
+      - name: Open an issue if the sync failed
+        if: failure()
+        run: |
+          title="Sync to upstream failed"
+          if [ -z "$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$title in:title" --json number --jq '.[0].number')" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --body "The push to syntralogic/marchesdirect-backend failed (most likely a merge conflict). See the run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fi

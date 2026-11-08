@@ -20,7 +20,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Push to client repo (merge if histories differ, never force)
+      - name: Push to client repo (merge if histories differ, stops on conflict, never force)
         env:
           CLIENT_PAT: ${{ secrets.CLIENT_PAT }}
         run: |
@@ -35,6 +35,6 @@ jobs:
             git push client HEAD:main || echo "::warning::push to client failed; fallback pull will handle it"
           else
             git checkout -q -b mirror HEAD
-            git merge --no-edit --allow-unrelated-histories -X ours client/main
+            git merge --no-edit client/main || { echo "::error::Merge conflict with client/main. Resolve manually; nothing was pushed."; exit 1; }
             git push client mirror:main || echo "::warning::merge push failed; fallback pull will handle it"
           fi

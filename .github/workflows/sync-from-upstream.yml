@@ -3,7 +3,7 @@ name: Sync from upstream
 # Runs ONLY in the client repo. Pulls main from the public upstream repo
 # using this repo's own GITHUB_TOKEN (no personal token needed).
 # Non-destructive: fast-forwards when possible, otherwise MERGES (no force push,
-# no history rewrite). On conflicting hunks the upstream version wins.
+# no history rewrite). On conflict it stops with an error (nothing is overwritten).
 on:
   schedule:
     - cron: '7 */2 * * *'
@@ -33,6 +33,6 @@ jobs:
           if git merge --ff-only FETCH_HEAD; then
             echo "fast-forwarded"
           else
-            git merge --no-edit --allow-unrelated-histories -X theirs FETCH_HEAD
+            git merge --no-edit FETCH_HEAD || { echo "::error::Merge conflict with upstream main. Resolve manually; nothing was pushed."; exit 1; }
           fi
           git push origin HEAD:main
