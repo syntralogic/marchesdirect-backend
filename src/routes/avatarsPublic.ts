@@ -13,7 +13,7 @@ router.get('/:userId', async (req: Request, res: Response) => {
     if (!ref || !/^(avatars\/|\/uploads\/avatars\/)/.test(ref)) return res.status(404).end();
     const o = await readStoredObject(ref);
     if (!o) return res.status(404).end();
-    res.set('Content-Type', o.contentType); res.set('Cache-Control', 'public, max-age=3600'); res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Content-Type', o.contentType); res.set('Cache-Control', 'public, max-age=600'); res.set('X-Content-Type-Options', 'nosniff');
     res.send(o.body);
   } catch { res.status(404).end(); }
 });

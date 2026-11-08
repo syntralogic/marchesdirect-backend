@@ -37,7 +37,8 @@ router.post('/avatar', avatarUpload.single('file'), async (req: AuthRequest, res
 
     await db.query('UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2', [url, req.user!.id]);
 
-    res.status(201).json({ avatarUrl: resolveAvatarUrl(url) });
+    // 8 nov. : nouvelle photo visible tout de suite malgré le cache navigateur (adresse servie par le serveur + ?v=).
+    const fresh = resolveAvatarUrl(url); res.status(201).json({ avatarUrl: fresh.startsWith('http') ? `${fresh}${fresh.includes('?') ? '&' : '?'}v=${Date.now()}` : fresh });
   } catch (err: any) {
     if (err instanceof UploadValidationError) {
       return res.status(400).json({ error: err.message });
