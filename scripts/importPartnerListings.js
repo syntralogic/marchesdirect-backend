@@ -122,7 +122,9 @@ function readLots() {
   return fs.readdirSync(DIR).filter(f => /\.json(\.gz)?$/.test(f)).sort().map(f => {
     const buf = fs.readFileSync(path.join(DIR, f));
     const data = JSON.parse((f.endsWith('.gz') ? zlib.gunzipSync(buf) : buf).toString('utf8'));
-    return { lot: data.lot || f.replace(/\.json(\.gz)?$/, ''), file: data.file || f, withdrawn: data.withdrawn || null, archive: data.archive || null, listings: (data.listings || []).filter(l => l.reference && l.title) };
+    // 8 nov. : date de la liste (parsedAt) gardée dans raw_data.lot_date, pour l'afficher comme « liste partenaire du … »
+    // (jamais comme une date de vérification de l'annonce).
+    return { lot: data.lot || f.replace(/\.json(\.gz)?$/, ''), file: data.file || f, lotDate: data.parsedAt || null, withdrawn: data.withdrawn || null, archive: data.archive || null, listings: (data.listings || []).filter(l => l.reference && l.title) };
   });
 }
 
@@ -146,7 +148,7 @@ async function main() {
   const acts = await pool.query(`UPDATE opportunities SET deleted_at = NOW(), updated_at = NOW()
      WHERE source_id = $1 AND raw_data->>'nature' LIKE 'Acte de sous-traitance%' AND deleted_at IS NULL RETURNING id`, [sourceId]);
   if (acts.rowCount) console.log(`[partenaires] ${acts.rowCount} actes de sous-traitance déjà attribués masqués`);
-  for (const { lot, file, listings, withdrawn, archive } of lots) {
+  for (const { lot, file, lotDate, listings, withdrawn, archive } of lots) {
     const status = archive ? 'expired' : 'active'; // lot « archive » : consultations passées, publiées comme clôturées
     // Lot retiré (ex. annonces dont la date est introuvable et dont des vérifications montrent qu'elles sont passées) :
     // masqué partout (deleted_at), réversible — réimporter le lot sans « withdrawn » le rétablit.
@@ -175,7 +177,7 @@ async function main() {
       const trade = (ruled && tradeBySlug[ruled[1]] ? { id: tradeBySlug[ruled[1]] } : null) || trades.find(x => t.includes(x.key)) || trades.find(x => nt.includes(x.key));
       todo.push({ status, ref: l.reference, type_id: typeId, trade_id: trade ? trade.id : null, title: l.title.slice(0, 900), description: description({ ...l, archived: !!archive }),
         publication: l.publication || null, deadline: l.deadline || null, value: l.amount || null, city: city ? String(city).slice(0, 200) : null, dept, region: dept ? regions[dept] || null : null,
-        raw: { partner_feed: true, lot, file, hash: h, kind: l.kind, nature: l.nature || l.category || null, trade_text: l.trade || null,
+        raw: { partner_feed: true, lot, file, lot_date: lotDate, hash: h, kind: l.kind, nature: l.nature || l.category || null, trade_text: l.trade || null,
                location_text: l.location || null, geo_postal: postal, partner_sources: l.sources || [] },
         loc: { status: city && !/ et /.test(city) ? 'commune' : dept ? 'departement' : 'inconnu',
                communes: city && !/ et /.test(city) ? [{ name: city, slug: slug(city), department: dept, postalCode: postal }] : [],

@@ -1995,7 +1995,7 @@ router.get('/ranked/candidates', optionalAuth, async (req: AuthRequest, res: Res
 router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
   try {
     const result = await db.query(
-      `SELECT o.*, ot.code as journey, ot.name as journey_name, t.name as trade_name,
+      `SELECT o.*, ot.code as journey, ot.name as journey_name, t.name as trade_name, ds.name AS source_name, ds.code AS source_code,
               c.code as cpv_display,
               (ds.code = 'editorial_catalog') AS is_demo
        FROM opportunities o
@@ -2012,6 +2012,7 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
     }
 
     const opportunity = result.rows[0];
+    const rawForProvenance = opportunity.raw_data || {}; // lu avant le masquage d'identité (raw_data est retiré ensuite)
 
     // On-demand extraction: whatever opportunity a visitor actually opens
     // gets its facts filled in right now if the batch job hasn't reached it
@@ -2079,6 +2080,20 @@ router.get('/:id', optionalAuth, async (req: AuthRequest, res: Response) => {
       opportunity.source_url = extractSourceUrl(opportunity.raw_data);
     }
     opportunity.identity_unlocked = unlocked;
+
+    // 8 nov. (diagnostic, point 9) : provenance dite sur chaque fiche. Pour une liste partenaire : la date de la liste
+    // (jamais présentée comme une vérification) et le fait que la disponibilité n'est pas confirmée. Pour un avis
+    // public : la source officielle et sa date de publication.
+    {
+      const rd = rawForProvenance;
+      const partner = !!rd.partner_feed || opportunity.source_code === 'partner_feed';
+      const lotDate = rd.lot_date || null;
+      opportunity.provenance = partner
+        ? { kind: 'partner_list', label: 'Liste partenaire', listDate: lotDate, addedAt: opportunity.created_at, verifiedAt: null,
+            availability: 'unconfirmed' }
+        : { kind: 'public_notice', label: opportunity.source_name || null, publishedAt: opportunity.publication_date || null,
+            verifiedAt: opportunity.deadline_checked_at || null, availability: 'notice', url: opportunity.source_url || null };
+    }
 
 
     // v2 (aperçu seulement, ?loc=2) : lieu d'exécution / acheteur / publication séparés et état relu dans l'avis.
