@@ -1,6 +1,7 @@
 import { db } from '../config/database';
 import { cached } from '../utils/ttlCache';
 import { loadCompanyProfile } from './matchScoreService';
+import { APE_TRADE_SLUGS } from './matchEngine';
 
 // 8 nov. (Hedi) : le tableau de bord doit « pousser à l'action » sans rien inventer.
 //  - Visites : la date de la visite précédente (« depuis votre dernière visite, mardi ») et la base des relances.
@@ -47,13 +48,15 @@ async function companyApe(o: { userId: string | null; companyId: string | null; 
 
 export type Pouls = {
   rate: number; per: 'jour ouvré' | 'semaine' | 'mois'; yearCount: number; zoneLabel: string; activity: string;
+  /** same = même code NAF que l'entreprise (« comme la vôtre ») ; trade = codes NAF de son métier (« de votre métier »). */
+  scope: 'same' | 'trade';
   recent: { day: string; buyer: string | null; objet: string; pme: boolean; dept: string | null } | null;
 };
 
 export async function marketPulse(o: { userId: string | null; companyId: string | null; sessionId: string | null }): Promise<Pouls | null> {
   const [ape, profile] = await Promise.all([companyApe(o), loadCompanyProfile(o.companyId, o.sessionId).catch(() => null)]);
   const naf = nafOf(ape); const dept = profile?.department || null;
-  if (!naf) return null;
+  if (!naf && !profile?.tradeSlugs?.length) return null;
   const has = await db.query(`SELECT to_regclass('public.public_awards') IS NOT NULL AS ok`).catch(() => ({ rows: [{ ok: false }] }));
   if (!has.rows[0]?.ok) return null;
   ensureAwardsIndexes();
@@ -73,9 +76,29 @@ function ensureAwardsIndexes() {
   })().catch(e => { awardsIdx = null; logger.warn('[Espace] index attributions :', e?.message); });
 }
 
-function computePulse(naf: string, dept: string | null, tradeSlugs: string[]): Promise<Pouls | null> {
+const NAF_BY_TRADE: Record<string, string[]> = {};
+for (const [a, slugs] of Object.entries(APE_TRADE_SLUGS)) for (const sl of slugs) (NAF_BY_TRADE[sl] ||= []).push(`${a.slice(0, 2)}.${a.slice(2)}`);
+
+function computePulse(naf: string | null, dept: string | null, tradeSlugs: string[]): Promise<Pouls | null> {
   const profile = { tradeSlugs };
-  return cached(`espace:pulse:${naf}:${dept}`, 6 * 3600_000, async () => {
+  return cached(`espace:pulse:${naf}:${dept}:${tradeSlugs.join(',')}`, 6 * 3600_000, async () => {
+    // D'abord le code NAF exact de l'entreprise (« comme la vôtre ») ; s'il n'a aucune attribution (entreprise
+    // enregistrée sous un code hors travaux, par ex.), les codes NAF de son métier (« de votre métier »).
+    const sets: { nafs: string[]; scope: Pouls['scope'] }[] = [];
+    if (naf) sets.push({ nafs: [naf], scope: 'same' });
+    const tradeNafs = [...new Set(tradeSlugs.flatMap(t => NAF_BY_TRADE[t] || []))].filter(x => x !== naf);
+    if (tradeNafs.length) sets.push({ nafs: naf ? [naf, ...tradeNafs] : tradeNafs, scope: 'trade' });
+    for (const set of sets) {
+      const found = await pulseFor(set.nafs, set.scope, dept, profile.tradeSlugs);
+      if (found) return found;
+    }
+    return null;
+  });
+}
+
+async function pulseFor(nafs: string[], scope: Pouls['scope'], dept: string | null, tradeSlugs: string[]): Promise<Pouls | null> {
+  const profile = { tradeSlugs };
+  {
     const tradeNames = profile?.tradeSlugs?.length
       ? (await db.query(`SELECT name FROM trades WHERE slug = ANY($1::text[]) ORDER BY name`, [profile.tradeSlugs])).rows.map((x: any) => String(x.name))
       : [];
@@ -87,9 +110,9 @@ function computePulse(naf: string, dept: string | null, tradeSlugs: string[]): P
     if (region) zones.push({ label: region, depts: Object.entries(regions).filter(([, r]) => r === region).map(([d]) => d) });
     zones.push({ label: 'France', depts: null });
     for (const z of zones) {
-      const p: any[] = [naf]; let cond = '';
+      const p: any[] = [nafs]; let cond = '';
       if (z.depts) { p.push(z.depts); cond = `AND lieu_departement = ANY($2::text[])`; }
-      const r = await db.query(`SELECT COUNT(DISTINCT uid)::int AS n FROM public_awards WHERE titulaire_naf = $1 ${cond}
+      const r = await db.query(`SELECT COUNT(DISTINCT uid)::int AS n FROM public_awards WHERE titulaire_naf = ANY($1::text[]) ${cond}
         AND date_notification BETWEEN CURRENT_DATE - INTERVAL '12 months' AND CURRENT_DATE`, p);
       const n = r.rows[0]?.n || 0;
       if (n < 24 && z.depts) continue; // moins de 2 par mois : on élargit pour une moyenne qui a du sens
@@ -98,15 +121,15 @@ function computePulse(naf: string, dept: string | null, tradeSlugs: string[]): P
       const rate = perDay >= 1 ? Math.round(perDay) : perWeek >= 1 ? Math.round(perWeek) : Math.max(1, Math.round(n / 12));
       const per: Pouls['per'] = perDay >= 1 ? 'jour ouvré' : perWeek >= 1 ? 'semaine' : 'mois';
       const rec = await db.query(`SELECT acheteur_nom, objet, titulaire_categorie, lieu_departement, date_notification FROM public_awards
-        WHERE titulaire_naf = $1 ${cond} AND date_notification BETWEEN CURRENT_DATE - 7 AND CURRENT_DATE AND objet IS NOT NULL
+        WHERE titulaire_naf = ANY($1::text[]) ${cond} AND date_notification BETWEEN CURRENT_DATE - 7 AND CURRENT_DATE AND objet IS NOT NULL
         ORDER BY date_notification DESC LIMIT 1`, p);
       const x = rec.rows[0];
-      return { rate, per, yearCount: n, zoneLabel: z.label, activity,
+      return { rate, per, yearCount: n, zoneLabel: z.label, activity, scope,
         recent: x ? { day: DAYS[new Date(x.date_notification).getDay()], buyer: x.acheteur_nom || null, objet: String(x.objet).slice(0, 120),
           pme: x.titulaire_categorie === 'PME', dept: x.lieu_departement || null } : null };
     }
     return null;
-  });
+  }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
