@@ -56,6 +56,25 @@ export async function marketPulse(o: { userId: string | null; companyId: string 
   if (!naf) return null;
   const has = await db.query(`SELECT to_regclass('public.public_awards') IS NOT NULL AS ok`).catch(() => ({ rows: [{ ok: false }] }));
   if (!has.rows[0]?.ok) return null;
+  ensureAwardsIndexes();
+  // 8 nov. : non bloquant. Le tableau de bord n'attend jamais plus de 2,5 s ce chiffre ; le calcul continue en arrière-plan
+  // et le cadre apparaît à l'ouverture suivante (il reste ensuite 6 h en mémoire).
+  const work = computePulse(naf, dept, profile?.tradeSlugs || []);
+  work.catch(() => {});
+  return Promise.race([work, new Promise<null>(r => setTimeout(() => r(null), 2500))]);
+}
+
+let awardsIdx: Promise<void> | null = null;
+/** Index pour lire vite les attributions d'une activité (code NAF) par date et par département (créés une fois). */
+function ensureAwardsIndexes() {
+  awardsIdx ??= (async () => {
+    await db.query(`CREATE INDEX CONCURRENTLY IF NOT EXISTS public_awards_naf_date ON public_awards (titulaire_naf, date_notification)`);
+    await db.query(`CREATE INDEX CONCURRENTLY IF NOT EXISTS public_awards_naf_dept_date ON public_awards (titulaire_naf, lieu_departement, date_notification)`);
+  })().catch(e => { awardsIdx = null; logger.warn('[Espace] index attributions :', e?.message); });
+}
+
+function computePulse(naf: string, dept: string | null, tradeSlugs: string[]): Promise<Pouls | null> {
+  const profile = { tradeSlugs };
   return cached(`espace:pulse:${naf}:${dept}`, 6 * 3600_000, async () => {
     const tradeNames = profile?.tradeSlugs?.length
       ? (await db.query(`SELECT name FROM trades WHERE slug = ANY($1::text[]) ORDER BY name`, [profile.tradeSlugs])).rows.map((x: any) => String(x.name))
