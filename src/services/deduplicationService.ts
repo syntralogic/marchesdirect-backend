@@ -166,13 +166,24 @@ export const deduplicateOpportunities = async (): Promise<number> => {
     // seules les annonces arrivées depuis 7 jours (r) sont comparées, via l'opérateur % qui utilise l'index trigramme
     // opportunities_title_trgm, et la requête a son propre délai (90 s) sur sa propre connexion : si elle est trop longue,
     // elle s'arrête seule sans rien bloquer, et la passe suivante reprend.
+    // 8 nov. matin (encore 7 dépassements dans la nuit) : travail borné par passe. Un curseur (app_settings
+    // dedup_fuzzy_cursor) mémorise jusqu'où les annonces ont été comparées ; chaque passe prend les 1 500 suivantes
+    // (ordre d'arrivée), les compare à toute la base via l'index trigramme, puis avance le curseur. Charge constante,
+    // progression garantie, aucune annonce oubliée.
     const client = await db.getClient();
     let potentialDuplicates: { rows: any[] };
+    let cursorNext: string | null = null;
     try {
+      const cur = await client.query(`SELECT value #>> '{}' AS v FROM app_settings WHERE key = 'dedup_fuzzy_cursor'`);
+      const cursor = cur.rows[0]?.v || new Date(Date.now() - 7 * 86400000).toISOString();
+      const batch = await client.query(`SELECT id, created_at FROM opportunities WHERE created_at > $1 AND deleted_at IS NULL
+        AND status NOT IN ('cancelled', 'expired', 'merged') ORDER BY created_at ASC, id ASC LIMIT 1500`, [cursor]);
+      const batchIds = batch.rows.map((r: any) => r.id);
+      cursorNext = batch.rows.length ? new Date(batch.rows[batch.rows.length - 1].created_at).toISOString() : null;
       await client.query('BEGIN');
-      await client.query('SET LOCAL statement_timeout = 90000');
+      await client.query('SET LOCAL statement_timeout = 120000');
       await client.query('SET LOCAL pg_trgm.similarity_threshold = 0.5');
-      potentialDuplicates = await client.query(`
+      potentialDuplicates = batchIds.length === 0 ? { rows: [] } : await client.query(`
       SELECT DISTINCT ON (LEAST(r.id, o.id), GREATEST(r.id, o.id))
         LEAST(r.id, o.id) AS id1,
         GREATEST(r.id, o.id) AS id2,
@@ -187,8 +198,7 @@ export const deduplicateOpportunities = async (): Promise<number> => {
         o.id <> r.id AND o.source_id <> r.source_id AND
         (r.deadline IS NULL OR o.deadline IS NULL OR ABS(EXTRACT(EPOCH FROM (r.deadline - o.deadline))) < 172800) AND
         o.deleted_at IS NULL AND o.status NOT IN ('cancelled', 'expired', 'merged')
-      WHERE r.created_at > NOW() - INTERVAL '7 days'
-        AND r.deleted_at IS NULL AND r.status NOT IN ('cancelled', 'expired', 'merged')
+      WHERE r.id = ANY($1::uuid[])
         AND NOT EXISTS (
           SELECT 1 FROM opportunity_duplicates
           WHERE (primary_opportunity_id = r.id AND duplicate_opportunity_id = o.id)
@@ -199,8 +209,10 @@ export const deduplicateOpportunities = async (): Promise<number> => {
              OR (opportunity_id_1 = GREATEST(r.id, o.id) AND opportunity_id_2 = LEAST(r.id, o.id)))
       ORDER BY LEAST(r.id, o.id), GREATEST(r.id, o.id), title_similarity DESC
       LIMIT 2000
-    `);
+    `, [batchIds]);
       await client.query('COMMIT');
+      if (cursorNext) await client.query(`INSERT INTO app_settings (key, value, updated_at) VALUES ('dedup_fuzzy_cursor', to_jsonb($1::text), NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`, [cursorNext]);
     } catch (err) {
       try { await client.query('ROLLBACK'); } catch { /* connexion rendue */ }
       throw err;
