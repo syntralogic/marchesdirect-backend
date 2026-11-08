@@ -507,7 +507,9 @@ export async function searchOpportunities(req: Request, res: Response) {
       params.push(ids);
       conditions.push(`o.id = ANY($${params.length}::uuid[])`);
     }
-    let idx = 1;
+    // The optional saved-ID filter has already bound $1. All later filters and
+    // pagination must continue after it, rather than reuse the UUID array.
+    let idx = params.length + 1;
     // Captured when the q filter below builds its tsvector/tsquery match,
     // so sort=match can rank by the same relevance expression instead of
     // rebuilding (and re-binding) it a second time.
@@ -1084,7 +1086,7 @@ export async function searchOpportunities(req: Request, res: Response) {
     } else if (deadline_within === 'later') {
       conditions.push(`o.deadline IS NOT NULL AND o.deadline > NOW() + INTERVAL '30 days'`);
     }
-    if (status) {
+    if (status && status !== 'all') {
       // Only filters by status when the caller explicitly asks for one -
       // otherwise every status is included (see comment above).
       const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
@@ -2490,4 +2492,5 @@ router.post('/:id/extract-facts', authenticate, requireRole(['admin', 'super_adm
 });
 
 export default router;
+
 
