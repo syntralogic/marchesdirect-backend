@@ -28,6 +28,9 @@ export async function ensurePushSchema(): Promise<void> {
     last_sent_at TIMESTAMPTZ,
     last_error TEXT
   )`);
+  // 8 nov. : clés du navigateur, pour envoyer un texte chiffré (« 356 nouvelles annonces… ») au lieu du message par défaut.
+  await db.query('ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS p256dh TEXT');
+  await db.query('ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS auth_secret TEXT');
   await db.query('CREATE INDEX IF NOT EXISTS push_subscriptions_session ON push_subscriptions(session_id)');
   await db.query('CREATE INDEX IF NOT EXISTS push_subscriptions_email ON push_subscriptions(lower(email))');
 }
@@ -62,17 +65,61 @@ export function isValidEndpoint(endpoint: string): boolean {
   try { const u = new URL(endpoint); return u.protocol === 'https:' && ALLOWED_PUSH_HOSTS.test(u.hostname); } catch { return false; }
 }
 
-export async function saveSubscription(endpoint: string, sessionId: string | null, email: string | null, ua: string | null) {
+export async function saveSubscription(endpoint: string, sessionId: string | null, email: string | null, ua: string | null, keys?: { p256dh?: string; auth?: string } | null) {
   await pushSchema();
-  await db.query(`INSERT INTO push_subscriptions (endpoint, session_id, email, user_agent) VALUES ($1, $2, $3, $4)
-    ON CONFLICT (endpoint) DO UPDATE SET session_id = COALESCE(EXCLUDED.session_id, push_subscriptions.session_id), email = COALESCE(EXCLUDED.email, push_subscriptions.email), last_error = NULL`,
-    [endpoint, sessionId, email, ua ? ua.slice(0, 300) : null]);
+  const p256dh = keys?.p256dh && /^[A-Za-z0-9_-]{80,100}$/.test(keys.p256dh) ? keys.p256dh : null;
+  const auth = keys?.auth && /^[A-Za-z0-9_-]{16,30}$/.test(keys.auth) ? keys.auth : null;
+  await db.query(`INSERT INTO push_subscriptions (endpoint, session_id, email, user_agent, p256dh, auth_secret) VALUES ($1, $2, $3, $4, $5, $6)
+    ON CONFLICT (endpoint) DO UPDATE SET session_id = COALESCE(EXCLUDED.session_id, push_subscriptions.session_id), email = COALESCE(EXCLUDED.email, push_subscriptions.email),
+      p256dh = COALESCE(EXCLUDED.p256dh, push_subscriptions.p256dh), auth_secret = COALESCE(EXCLUDED.auth_secret, push_subscriptions.auth_secret), last_error = NULL`,
+    [endpoint, sessionId, email, ua ? ua.slice(0, 300) : null, p256dh, auth]);
 }
 
-async function sendOne(endpoint: string, v: Vapid): Promise<'ok' | 'gone' | 'error'> {
+/** Chiffrement d'un message de notification (RFC 8291, aes128gcm). */
+export function encryptPayload(payload: string, p256dhB64: string, authB64: string): Buffer {
+  const uaPublic = fromB64u(p256dhB64); const authSecret = fromB64u(authB64);
+  const ecdh = crypto.createECDH('prime256v1'); ecdh.generateKeys();
+  const asPublic = ecdh.getPublicKey();
+  const shared = ecdh.computeSecret(uaPublic);
+  const hmac = (key: Buffer, data: Buffer) => crypto.createHmac('sha256', key).update(data).digest();
+  const prkKey = hmac(authSecret, shared);
+  const ikm = hmac(prkKey, Buffer.concat([Buffer.from('WebPush: info\0'), uaPublic, asPublic, Buffer.from([1])]));
+  const salt = crypto.randomBytes(16);
+  const prk = hmac(salt, ikm);
+  const cek = hmac(prk, Buffer.concat([Buffer.from('Content-Encoding: aes128gcm\0'), Buffer.from([1])])).subarray(0, 16);
+  const nonce = hmac(prk, Buffer.concat([Buffer.from('Content-Encoding: nonce\0'), Buffer.from([1])])).subarray(0, 12);
+  const cipher = crypto.createCipheriv('aes-128-gcm', cek, nonce);
+  const body = Buffer.concat([cipher.update(Buffer.concat([Buffer.from(payload, 'utf8'), Buffer.from([2])])), cipher.final(), cipher.getAuthTag()]);
+  const rs = Buffer.alloc(4); rs.writeUInt32BE(4096, 0);
+  return Buffer.concat([salt, rs, Buffer.from([asPublic.length]), asPublic, body]);
+}
+
+/** Envoie un message (titre, texte, lien) aux téléphones abonnés de ces sessions / e-mails. Jamais bloquant. */
+export async function notifyWithMessage(target: { sessionIds?: string[]; email?: string | null }, msg: { title: string; body: string; url: string; tag?: string }): Promise<number> {
+  try {
+    await pushSchema();
+    const r = await db.query(`SELECT id, endpoint, p256dh, auth_secret FROM push_subscriptions
+      WHERE (session_id = ANY($1::text[])) OR ($2::text IS NOT NULL AND lower(email) = lower($2)) LIMIT 10`, [target.sessionIds || [], target.email || null]);
+    if (!r.rows.length) return 0;
+    const v = await getVapid(); let n = 0;
+    for (const s of r.rows) {
+      const payload = s.p256dh && s.auth_secret ? encryptPayload(JSON.stringify(msg), s.p256dh, s.auth_secret) : null;
+      const out = await sendOne(s.endpoint, v, payload);
+      if (out === 'gone') await db.query('DELETE FROM push_subscriptions WHERE id = $1', [s.id]);
+      else await db.query('UPDATE push_subscriptions SET last_sent_at = NOW(), last_error = $2 WHERE id = $1', [s.id, out === 'ok' ? null : 'send_failed']);
+      if (out === 'ok') n++;
+    }
+    return n;
+  } catch (e: any) { logger.warn('[Push] message impossible:', e?.message); return 0; }
+}
+
+async function sendOne(endpoint: string, v: Vapid, payload: Buffer | null = null): Promise<'ok' | 'gone' | 'error'> {
   const aud = new URL(endpoint).origin;
   try {
-    await axios.post(endpoint, null, { timeout: 10000, headers: { Authorization: `vapid t=${vapidJwt(aud, v)}, k=${v.publicKey}`, TTL: '86400', Urgency: 'high', 'Content-Length': '0' }, validateStatus: s => s < 400 });
+    const auth = `vapid t=${vapidJwt(aud, v)}, k=${v.publicKey}`;
+    await axios.post(endpoint, payload, { timeout: 10000, headers: payload
+      ? { Authorization: auth, TTL: '86400', Urgency: 'normal', 'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream', 'Content-Length': String(payload.length) }
+      : { Authorization: auth, TTL: '86400', Urgency: 'high', 'Content-Length': '0' }, validateStatus: s => s < 400 });
     return 'ok';
   } catch (e: any) {
     const st = e?.response?.status;

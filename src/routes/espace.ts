@@ -5,6 +5,7 @@ import { AuthRequest } from '../middleware/auth';
 import { followupSchema, messagesSchema } from '../services/dossierFollowupService';
 import { ensureSavedSearchSchema } from './savedSearches';
 import { newItemsFor } from '../services/savedSearchAlertService';
+import { recordVisit, marketPulse } from '../services/espaceService';
 
 // 8 nov. (Hedi : « il faut qu'il ait un tableau de bord où il se sente à l'aise, où il retrouve tout, où il prend
 // plaisir à revenir ») : le fil de « Mon espace ». Un seul endroit qui rassemble, du plus récent au plus ancien :
@@ -44,8 +45,11 @@ router.get('/fil', async (req: AuthRequest, res: Response) => {
   if (!key) return res.status(400).json({ error: 'session_required' });
   const favIds = String(req.query.fav || '').split(',').filter(x => UUID.test(x)).slice(0, 100);
   const cacheKey = `${key}|${favIds.join(',')}`;
+  // La visite est comptée à chaque ouverture (même servie depuis le cache) : base du « depuis votre dernière visite »
+  // et des relances (personne n'est relancé s'il est venu depuis moins de 2 jours).
+  const visit = await recordVisit(key, o.sessionId, o.email).catch(() => ({ prevSeenAt: null, visitDays: 1 }));
   const hit = cache.get(cacheKey);
-  if (hit && Date.now() - hit.at < 60_000) return res.json(hit.body);
+  if (hit && Date.now() - hit.at < 60_000) return res.json({ ...hit.body, visit });
   try {
     await readsSchema(); await ensureSavedSearchSchema(); await followupSchema(); await messagesSchema();
     const lastRead = (await db.query('SELECT last_read_at FROM espace_reads WHERE owner_key = $1', [key])).rows[0]?.last_read_at || null;
@@ -58,12 +62,15 @@ router.get('/fil', async (req: AuthRequest, res: Response) => {
     const searches = (await db.query(`SELECT id, label, query, created_at, last_viewed_at FROM saved_searches
       WHERE deleted_at IS NULL AND (${sw.join(' OR ')}) ORDER BY created_at DESC LIMIT 10`, sp)).rows;
     let nouveautes = 0;
+    const picks = new Map<string, any>(); // « À ne pas manquer » : nouvelles annonces des suivis, échéance la plus proche d'abord
     for (const s of searches) {
       try {
         const since = s.last_viewed_at || s.created_at;
         const fresh = await newItemsFor({ id: s.id, query: s.query, alert_baseline_at: since }, 50);
         if (!fresh.length) continue;
         nouveautes += fresh.length;
+        for (const x of fresh) if (!picks.has(x.id)) picks.set(x.id, { id: x.id, title: x.title, city: x.buyer_city || x.location_city || null,
+          deadline: x.deadline_checked || x.deadline || null, journey: x.journey || null, lot: x.matched_lot || null, follow: s.label });
         const latest = fresh.reduce((m: string, x: any) => (x.publication_date && x.publication_date > m ? x.publication_date : m), String(since instanceof Date ? since.toISOString() : since));
         items.push({ id: `n:${s.id}`, kind: 'nouveautes', at: new Date(latest).toISOString(), count: fresh.length,
           title: `${fresh.length >= 50 ? '50+' : fresh.length} nouvelle${fresh.length > 1 ? 's' : ''} annonce${fresh.length > 1 ? 's' : ''} · ${s.label}`,
@@ -114,10 +121,16 @@ router.get('/fil', async (req: AuthRequest, res: Response) => {
     const lr = lastRead ? new Date(lastRead).getTime() : 0;
     for (const it of items) it.unread = it.kind === 'echeance' || it.kind === 'nouveautes' ? true : new Date(it.at).getTime() > lr;
     const messagesNonLus = items.filter(i => i.kind === 'message' && i.unread).length;
-    const body = { summary: { nouveautes, echeances, messagesNonLus, dossiersEnCours }, items: items.slice(0, 40), lastReadAt: lastRead, searches: searches.length };
+    const now = Date.now();
+    const aNePasManquer = [...picks.values()]
+      .filter(x => !x.deadline || new Date(x.deadline).getTime() > now)
+      .sort((a, b) => (a.deadline ? new Date(a.deadline).getTime() : Infinity) - (b.deadline ? new Date(b.deadline).getTime() : Infinity))
+      .slice(0, 8);
+    const pouls = await marketPulse({ userId: o.userId, companyId: o.companyId, sessionId: o.sessionId }).catch((e: any) => { logger.warn('[Espace] pouls :', e?.message); return null; });
+    const body = { summary: { nouveautes, echeances, messagesNonLus, dossiersEnCours }, items: items.slice(0, 40), lastReadAt: lastRead, searches: searches.length, aNePasManquer, pouls };
     cache.set(cacheKey, { at: Date.now(), body });
     if (cache.size > 500) cache.delete(cache.keys().next().value as string);
-    res.json(body);
+    res.json({ ...body, visit });
   } catch (err) { logger.error('[Espace] fil :', err); res.status(503).json({ error: 'unavailable' }); }
 });
 
