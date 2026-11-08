@@ -4,11 +4,19 @@ import { verifyPrivateFilePath } from '../utils/privateFileLinks';
 
 const write = (req: Request) => !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
 const message = { error: 'too_many_requests', message: 'Trop de demandes rapprochées. Réessayez dans quelques instants.' };
+// 8 nov. : sur mobile, les opérateurs font partager une même adresse IP à beaucoup d'abonnés. Une limite « par adresse »
+// seule bloquerait des artisans à cause des autres pendant une campagne SMS. Les limites qui protègent un parcours
+// visiteur comptent donc par visiteur (adresse + session du téléphone), avec un plafond large par adresse contre les robots.
+const sessionOf = (req: Request) => String((req.body && (req.body as any).sessionId) || req.query.sessionId || '').slice(0, 100);
+const perVisitor = (req: Request) => `${req.ip}|${sessionOf(req) || 'sans-session'}`;
 
 export function installAbuseProtection(app: Express): void {
   const forms = ['/api/crm/leads', '/api/needs', '/api/members', '/api/listing-reports',
     '/api/alert-subscriptions', '/api/siret/lead', '/api/siret/alert', '/api/subcontract-needs'];
-  app.use(forms, rateLimit({ windowMs: 15 * 60 * 1000, max: 20, skip: req => !write(req),
+  app.use(forms, json({ limit: '64kb' }));
+  app.use(forms, rateLimit({ windowMs: 15 * 60 * 1000, max: 20, skip: req => !write(req), keyGenerator: perVisitor,
+    standardHeaders: 'draft-7', legacyHeaders: false, message }));
+  app.use(forms, rateLimit({ windowMs: 15 * 60 * 1000, max: 300, skip: req => !write(req),
     standardHeaders: 'draft-7', legacyHeaders: false, message }));
   // Parse small public forms before the more permissive admin JSON parser.
   app.use(forms, json({ limit: '64kb' }), urlencoded({ limit: '64kb', extended: false, parameterLimit: 100 }));
@@ -17,9 +25,15 @@ export function installAbuseProtection(app: Express): void {
       standardHeaders: 'draft-7', legacyHeaders: false, message }));
   app.use('/api/uploads', rateLimit({ windowMs: 15 * 60 * 1000, max: 30, skip: req => !write(req),
     standardHeaders: 'draft-7', legacyHeaders: false, message }));
-  app.use(['/api/siret/lookup', '/api/siret/confirm'], rateLimit({ windowMs: 15 * 60 * 1000, max: 30,
+  app.use(['/api/siret/lookup', '/api/siret/confirm'], json({ limit: '64kb' }));
+  app.use(['/api/siret/lookup', '/api/siret/confirm'], rateLimit({ windowMs: 15 * 60 * 1000, max: 30, keyGenerator: perVisitor,
     skip: req => !write(req), standardHeaders: 'draft-7', legacyHeaders: false, message }));
-  app.use('/api/opportunities', rateLimit({ windowMs: 60_000, max: 90,
+  app.use(['/api/siret/lookup', '/api/siret/confirm'], rateLimit({ windowMs: 15 * 60 * 1000, max: 300,
+    skip: req => !write(req), standardHeaders: 'draft-7', legacyHeaders: false, message }));
+  app.use('/api/opportunities', rateLimit({ windowMs: 60_000, max: 90, keyGenerator: perVisitor,
+    skip: req => req.method !== 'GET' || !['/', '/ranked/candidates'].includes(req.path),
+    standardHeaders: 'draft-7', legacyHeaders: false, message }));
+  app.use('/api/opportunities', rateLimit({ windowMs: 60_000, max: 900,
     skip: req => req.method !== 'GET' || !['/', '/ranked/candidates'].includes(req.path),
     standardHeaders: 'draft-7', legacyHeaders: false, message }));
 }
