@@ -60,7 +60,7 @@ router.post('/push/subscribe', async (req: AuthRequest, res: Response) => {
   if (!isValidEndpoint(endpoint)) return res.status(400).json({ error: 'invalid_subscription' });
   const sessions = sessionsOf(req);
   if (!sessions.length && !req.user) return res.status(400).json({ error: 'session_required' });
-  try { await saveSubscription(endpoint, sessions[0] || null, req.user?.email || null, String(req.headers['user-agent'] || '') || null); res.json({ ok: true }); }
+  try { await saveSubscription(endpoint, sessions[0] || null, req.user?.email || null, String(req.headers['user-agent'] || '') || null, req.body?.subscription?.keys || null); res.json({ ok: true }); }
   catch (err: any) { logger.error('[Push] abonnement:', err); res.status(500).json({ error: 'push_unavailable' }); }
 });
 
