@@ -1851,7 +1851,8 @@ router.get('/geocode-city', async (req: Request, res: Response) => {
     }
     const result = await geocodeCity(city, department);
     if (!result) {
-      return res.status(404).json({ error: 'Could not geocode this city' });
+      const { lastGeocodeError } = require('../services/geocodingService');
+      return res.status(404).json({ error: 'Could not geocode this city', reason: lastGeocodeError || 'nomatch' });
     }
     res.json(result);
   } catch (err: any) {

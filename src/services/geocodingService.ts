@@ -154,12 +154,15 @@ export const geocodeCityDetailed = async (
     return { status: 'ok', result: { lat, lng, department: departmentFromGeocodeProps(feature?.properties), score, ...(matchedName ? { matchedName } : {}) } };
   } catch (err: any) {
     logger.warn(`[geocoding] Failed for "${q}": ${err.message || err}`);
+    lastGeocodeError = `${err?.response?.status || ''} ${err?.code || ''} ${String(err?.message || err).slice(0, 160)}`.trim();
     return { status: 'error' };
   }
 };
 
 // Backwards-compatible wrapper: null for both "no match" and "error".
 // 8 nov. : mémoire des villes trouvées (24 h), pour ne pas réinterroger le service public à chaque recherche.
+/** Dernière erreur technique (diagnostic, sans donnée personnelle). */
+export let lastGeocodeError: string | null = null;
 const cityMemo = new Map<string, { at: number; r: GeocodeResult }>();
 export const geocodeCity = async (
   city: string,
